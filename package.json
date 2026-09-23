@@ -35,10 +35,10 @@
     "@types/luxon": "^3.7.5",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
-    "@vercel/node": "^13.0.1",
-    "drizzle-kit": "^0.31.10",
+    "@vercel/node": "^13.0.2",
+    "drizzle-kit": "^0.31.11",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^5.0.1"
   }
 }
