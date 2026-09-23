@@ -29,6 +29,13 @@
       "when": 1790133357321,
       "tag": "0003_add_reminders",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790162195366,
+      "tag": "0004_add_players",
+      "breakpoints": true
     }
   ]
 }

@@ -53,7 +53,8 @@ const postMatchCommand: Command = {
     // is driven by status, and the message we're sending right now IS the
     // "open for confirmation" message — so build it against the status
     // this match is *about to have*, not its current row.
-    const { content, components } = buildRosterMessage({ ...match, status: "CONFIRMATION_OPEN" }, []);
+    const roster = await ctx.repositories.players.listActiveByGuild(guard.guildId);
+    const { content, components } = buildRosterMessage({ ...match, status: "CONFIRMATION_OPEN" }, [], roster);
 
     // No channel-type check here: /setup's match_channel option is
     // already restricted to ChannelType.GuildText (see setup.ts), so a

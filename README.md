@@ -5,31 +5,21 @@ Private Discord bot for a 6–7 person Valorant Premier team. See
 the single source of truth for scope and behavior; this README only covers
 how to run what's built so far and the decisions made while building it.
 
-## Status: Phase 4 — Scheduling ✅ (Phases 1–3 also complete)
+## Status: Phase 5 — Player Profiles ✅ (Phases 1–4 also complete)
 
-Per plan section 59, Phase 4 scope is: scheduled reminders, reminder
-records, duplicate prevention, timezone handling. Per section 13, each
-reminder needs its own record "so it cannot accidentally be sent twice."
+Per plan section 59, Phase 5 scope is: `/add-player`, `/edit-player`,
+roles, agents, AI settings, protected topics. Section 41 groups
+`/remove-player` and `/player` alongside those in its admin-command
+inventory, so both were built too — the four together are the minimum
+needed to actually manage a roster (add someone, fix a typo, retire
+someone, and check what's stored, since there's no web dashboard per
+plan section 4).
 
-**This phase also had to answer a question the plan doesn't: how does a
-system with no persistent connection (see "Hosting & Deployment" below)
-run anything on a schedule at all?** The answer is the same one section 6
-already gives for Discord itself — "scheduled/cron execution" is
-explicitly listed as part of the target architecture — so Phase 4 is
-built around an **external cron trigger hitting a Vercel Function**, not
-a long-running scheduler process. See "How reminders actually run" below
-for the mechanism, and "Two decisions locked in for later phases" for two
-related questions (a direct-chat command, and Phase 8's passive-listening
-replacement) that came up while scoping this out and were resolved before
-writing any Phase 4 code, per this project's own ground rule of checking
-against the plan before each decision.
-
-**Since this phase was first completed, the Discord transport layer was
-migrated from a gateway connection to HTTP Interactions**, to support
-free-tier serverless hosting (Vercel + Neon) — see "Hosting & Deployment"
-below for why and what changed. Every command and the attendance-button
-flow described below still behaves identically; only *how* Discord
-delivers/receives them changed.
+**This phase also settles the two pieces of Phase 3 debt the README
+flagged at the time** (see "ordering tensions" below, both marked
+resolved) — the public roster message now shows a real "No response"
+section and a real `Confirmed: X/Y` denominator, because there's finally
+a roster to be honest about.
 
 ### Three real ordering tensions in the plan, and how they were resolved
 
@@ -46,6 +36,11 @@ on purpose (plan design principle #12: no rewrite of the core
 match/attendance system later) — Phase 5 can start joining on
 `discord_user_id` without touching this table's shape.
 
+**Resolved in Phase 5, exactly as predicted**: `players` now exists,
+keyed on `discord_user_id` per guild, and `rosterMessage.ts` joins
+attendance rows against it by that same id — `attendance` itself was
+never touched.
+
 **2. Section 16's example roster message names people under "No
 response"** — impossible without knowing who's *expected* to respond,
 which needs the roster from Player Profiles (Phase 5). Resolution: the
@@ -53,6 +48,14 @@ public message shows only actual responses, grouped exactly as section
 16's example groups them (empty sections omitted), plus a `Responded: N`
 count. No "No response" section, no fabricated `X/6` denominator — both
 return once Phase 5 lands.
+
+**Resolved in Phase 5**: `buildRosterMessage` now takes the active roster
+(`PlayerRepository.listActiveByGuild`) as a third argument. With a roster
+present it renders section 16's example faithfully — a real "⚪ No
+response" section and `Confirmed: <playing>/<roster size>` — and falls
+back to the old `Responded: N` behavior only if a roster is genuinely
+empty (a guild that hasn't run `/add-player` yet), so nothing breaks for
+a deployment mid-upgrade.
 
 **3. Section 61's example shows the match message posted automatically
 "three hours before" kickoff — that's the reminder system, Phase 4, not
@@ -164,6 +167,60 @@ match where several offsets are already overdue) would read a stale
 newly-opened channel/message ids in-memory for the rest of that tick;
 regression-tested in `tests/integration/phase4E2E.test.ts`.
 
+### Phase 5 — Player Profiles: what was built and the choices made
+
+Four commands, one repository, and one schema change (plan sections 8/9/10/41):
+
+- **`players` table**: one row per `(guild_id, discord_user_id)`
+  (enforced by a unique index). Role is a fixed 4-value enum (Duelist /
+  Initiator / Controller / Sentinel — plan sections 8/62); agents and
+  protected topics are `jsonb` string arrays rather than child tables —
+  see `schema/players.ts`'s doc comment for why (design principle #11:
+  this is a 6-7 person team, no feature in the plan needs to query
+  *across* agents/topics relationally).
+- **No hard deletes.** `/remove-player` flips `active = false`, the same
+  soft-state pattern `matches` already uses (`CANCELLED`, not row
+  deletion). Re-running `/add-player` for someone previously removed
+  reactivates their existing row instead of erroring on the unique index
+  or creating a second one — `PlayerRepository.upsertByDiscordUserId`
+  handles both "new person" and "returning person" through one path.
+- **Agent names are intentionally NOT validated against Valorant's actual
+  roster.** Riot adds/reworks agents over time; hardcoding a list here
+  would eventually reject a real agent this app just doesn't know about
+  yet. What *is* enforced (`modules/players/playerValidation.ts`):
+  non-empty, de-duplicated, length- and count-bounded input, and — plan
+  section 8's own example (Jett listed under Agents *and* set as
+  Preferred Agent) — a preferred agent must actually be one of the
+  agents just listed.
+- **A new adapter capability.** Every command through Phase 4 only ever
+  read options *about* the invoker. `/add-player`, `/edit-player`,
+  `/remove-player`, and `/player` all target a *different* Discord user,
+  and a Discord User-type option's raw value is just an id — the actual
+  username/nickname lives in the interaction's `resolved` payload.
+  `httpInteractionAdapter.ts` gained `options.getUser()` (nickname →
+  global name → username fallback, same order `displayName.ts` already
+  used for the invoker) and `options.getBoolean()` (needed for
+  `/edit-player`'s six AI-setting toggles) to make that possible.
+- **New players start fully opted in, no protected topics** — plan
+  section 9's own example shows every reference category "enabled" by
+  default. Turning any of them off, or adding protected topics, is
+  `/edit-player`'s job specifically (see that file's doc comment for why
+  it isn't split across both commands).
+- **The Phase 3 roster-message debt is paid off** — see "ordering
+  tensions" above. `buildRosterMessage` takes the active roster as an
+  optional third argument; all four call sites
+  (`announcementSync.ts`, `dispatchButton.ts`, `postMatch.ts`,
+  `reminderCronJob.ts`) now fetch it via
+  `PlayerRepository.listActiveByGuild` and pass it through.
+
+**This phase's tests were also actually run against a real database, not
+just written**: same approach as Phase 4 (`apt-get install postgresql`
+inside this sandbox, real `drizzle/` migrations applied, no
+mocked/simulated DB layer) — `tests/integration/playerRepository.test.ts`
+covers create/read/partial-update/soft-delete/reactivate/uniqueness for
+real. **180 tests passing** (up from 151 in Phase 4): 114 unit, 66
+integration.
+
 ### Two decisions locked in for later phases
 
 Neither of these is Phase 4 work — both came up while scoping the cron
@@ -180,10 +237,10 @@ infrastructure") and section 6 says to avoid. A `/mari` (or `/ai`) slash
 command gets the same "talk to it directly" behavior through the HTTP
 Interactions endpoint this app already has — plan section 63's own Future
 Extensions list names exactly this ("`/ai` — Allow players to directly
-talk to the team AI"). **Not built yet** — it needs an AI service
-(`LLM_API_KEY`, Phase 6) and player context (Phase 5) to be worth
-anything; this only fixes *which* trigger mechanism it'll use once those
-exist.
+talk to the team AI"). **Not built yet** — player context now exists
+(Phase 5), but it still needs an AI service (`LLM_API_KEY`, Phase 6) to
+be worth anything; this only fixes *which* trigger mechanism it'll use
+once that exists.
 
 **2. Phase 8's passive message-listening will be replaced by cron-based
 REST polling of allow-listed channels, not a gateway connection —** but
@@ -331,7 +388,9 @@ selected after evaluating...", "ORM/DB library unspecified beyond
 | Validation | `zod` for env vars and (later) AI structured output | Matches plan section 36/60's emphasis on validating structured data before trusting it |
 | Logging | `pino` | Structured JSON by default (plan section 51), pretty-printed only in dev |
 | Date/time parsing | `luxon` | Native JS `Date`/`Intl` can't construct a wall-clock time in an arbitrary IANA zone; needed for section 11's "team's configured timezone" and section 60's "timezone conversion" test target |
-| Attendance identity | Raw Discord id + display-name snapshot, no `players` FK | Player Profiles (Phase 5) don't exist yet — see "ordering tensions" in the Phase 3 section above |
+| Attendance identity | Raw Discord id + display-name snapshot, no `players` FK | Forward-compatible on purpose (design principle #12) — `players` now exists (Phase 5) and `rosterMessage.ts` joins on `discord_user_id`, but `attendance` rows themselves were never touched, exactly as planned |
+| Player profile lists | `jsonb` string arrays (`agents`, `protected_topics`), not child tables | Plan section 54/design principle #11: a 6-7 person team has no feature that needs to query *across* agents or topics relationally — see `schema/players.ts` |
+| Player removal | Soft delete (`active` flag), no hard `DELETE` | Same pattern as `matches`' `CANCELLED` status; keeps profile/history intact and `/add-player` can reactivate instead of erroring on the unique index |
 | Match posting trigger | Provisional `/post-match` admin command | Reminder system (Phase 4) doesn't exist yet — see "ordering tensions" in the Phase 3 section above |
 | Reminder generation | Reconcile-on-every-tick, not create-once-at-match-time | Self-healing (a crashed tick or an edited match time just gets fixed by the next tick) instead of needing MatchService to know reminders exist at all — see "Phase 4 — how reminders actually run" above |
 | Cron trigger auth | Bearer token (`CRON_SECRET`) checked in `services/scheduling/cronAuth.ts` | Discord's Ed25519 verification only covers Discord's own requests; a cron endpoint needs its own auth or the URL alone is enough to trigger it |
@@ -350,7 +409,7 @@ api/
 
 src/
 ├── discord/
-│   ├── commands/      # setup, createMatch, editMatch, cancelMatch, listMatches, postMatch
+│   ├── commands/      # setup, createMatch, editMatch, cancelMatch, listMatches, postMatch, addPlayer, editPlayer, removePlayer, player
 │   ├── interactions/  # dispatchCommand, dispatchButton
 │   ├── discordRest.ts, verifyInteraction.ts, httpInteractionAdapter.ts, handleDiscordInteraction.ts
 │   ├── permissions.ts, commandGuards.ts, displayName.ts, announcementSync.ts, timezone.ts
@@ -358,8 +417,9 @@ src/
 │   ├── matches/     # matchService, matchLifecycle, dateTime
 │   ├── attendance/  # attendanceService, rosterMessage, customId
 │   ├── reminders/   # reminderScheduling (pure planning), reminderMessages (nudge text)
-│   └── {players,ai,memories}/   # empty until their phase
-├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders
+│   ├── players/     # playerValidation (agent/topic parsing, role choices) — Phase 5
+│   └── {ai,memories}/   # empty until their phase
+├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders, players
 ├── services/
 │   ├── scheduling/   # cronAuth, reminderCronJob — the Phase 4 orchestration layer
 │   └── {discord,ai,retrieval}/   # empty until their phase
@@ -437,9 +497,9 @@ minutes-apart reminders — so an **external** scheduler drives
 Mirrors plan section 60's split between unit and integration tests:
 
 ```bash
-npm test               # unit tests only — no infrastructure needed (91 tests)
+npm test               # unit tests only — no infrastructure needed (114 tests)
 npm run test:integration  # requires DATABASE_URL pointing at a disposable
-                           # Postgres with migrations applied (60 tests)
+                           # Postgres with migrations applied (66 tests)
 ```
 
 Every `tests/integration/*.test.ts` file self-skips (rather than failing)
@@ -482,17 +542,34 @@ What's covered so far, mapped to plan section 60's checklist:
   rejected on a closed match, and a second click from the same player
   updating (not duplicating) their response
   (`tests/integration/phase3E2E.test.ts`)
-- ✅ Protected-topic filtering equivalent: N/A yet (Phase 5+)
-- ✅ `server_config` / `matches` / `attendance` / `reminders` repository
-  semantics, including database-level constraints (unique indexes, FK
-  cascade) (`tests/integration/serverConfigRepository.test.ts`,
+- ✅ Player profile CRUD — create/read/partial-update, soft-delete +
+  reactivate-on-re-add, one-profile-per-guild-per-user uniqueness
+  (`tests/integration/playerRepository.test.ts`); role/agent/protected-topic
+  input validation and the User-option adapter resolution
+  (`tests/unit/playerValidation.test.ts`,
+  `tests/unit/httpInteractionAdapter.test.ts`)
+- ⬜ Protected-topic *filtering into an AI context*: N/A yet — the topics
+  are now captured and storable (`/edit-player`), but there's no AI
+  context builder to filter them out of until Phase 8/9
+- ✅ `server_config` / `matches` / `attendance` / `reminders` / `players`
+  repository semantics, including database-level constraints (unique
+  indexes, FK cascade) (`tests/integration/serverConfigRepository.test.ts`,
   `tests/integration/matchRepository.test.ts`,
   `tests/integration/attendanceRepository.test.ts`,
-  `tests/integration/reminderRepository.test.ts`)
-- ✅ Full command-path integration tests for every command and the button
-  flow (`tests/integration/setupCommandE2E.test.ts`,
+  `tests/integration/reminderRepository.test.ts`,
+  `tests/integration/playerRepository.test.ts`)
+- ✅ Full command-path integration tests (real interaction → dispatch →
+  repository → Postgres) for every Phase 1-4 command and the button flow
+  (`tests/integration/setupCommandE2E.test.ts`,
   `tests/integration/matchCommandsE2E.test.ts`,
   `tests/integration/phase3E2E.test.ts`)
+- ⬜ Same command-path depth for `/add-player` / `/edit-player` /
+  `/remove-player` / `/player`: not written yet. What Phase 5 does have is
+  full repository-level integration coverage (above) plus unit coverage of
+  each command's own validation logic and option parsing — the gap is
+  specifically an E2E test exercising `dispatchCommand` → the real handler
+  → Postgres for these four, the way `phase3E2E.test.ts` does for
+  attendance. Flagging this honestly rather than implying it's covered.
 - ✅ HTTP Interactions signature verification and the full real-signature →
   defer → dispatch → followup flow (`tests/unit/verifyInteraction.test.ts`,
   `tests/integration/httpInteractionE2E.test.ts`)
@@ -526,9 +603,10 @@ have hit it, rather than being a theoretical gap in coverage.
       manual trigger into an automatic one (kept as a manual override);
       runs via external cron (`api/cron/reminders.ts`) since the
       serverless transport has no persistent scheduler of its own
-- [ ] Phase 5 — Player Profiles (`/add-player`, roles, agents, AI settings,
-      protected topics) — should let the roster message show a real "No
-      response" section and a real `X/N` denominator
+- [x] Phase 5 — Player Profiles (`/add-player`, `/edit-player`,
+      `/remove-player`, `/player`; roles, agents, AI settings, protected
+      topics) — also resolved the two Phase 3 roster-message ordering
+      tensions (real "No response" section, real `Confirmed: X/Y`)
 - [ ] Phase 6 — Basic AI (CELEBRATE / ROAST / CONSOLE, no memory yet)
 - [ ] Phase 7 — Private AI Conversations (DM flow, follow-ups)
 - [ ] Phase 8 — Memory System

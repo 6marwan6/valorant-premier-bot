@@ -63,7 +63,8 @@ export async function dispatchButton(interaction: ButtonInteraction, ctx: AppCon
     }
 
     const { match, attendanceRows } = result.value;
-    const { content, components } = buildRosterMessage(match, attendanceRows);
+    const roster = await ctx.repositories.players.listActiveByGuild(guildId);
+    const { content, components } = buildRosterMessage(match, attendanceRows, roster);
     // update() edits the message the button itself is attached to — the
     // one shared public message everyone sees (plan section 16), no
     // separate fetch-by-id needed for this path.

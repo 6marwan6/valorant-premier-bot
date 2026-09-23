@@ -9,6 +9,12 @@ export interface RosterMessage {
   components: ActionRowBuilder<ButtonBuilder>[];
 }
 
+/** The subset of a player profile the roster message needs — plan section 16's "No response" section and the real `Confirmed: X/Y` denominator (Phase 5). */
+export interface RosterPlayer {
+  discordUserId: string;
+  displayName: string;
+}
+
 const STATUS_SECTIONS: Array<{ status: AttendanceRow["status"]; heading: string }> = [
   { status: "PLAYING", heading: "🟢 Playing" },
   { status: "WANTS_TO_BUT_CANNOT", heading: "🟡 Want to, but can't" },
@@ -21,14 +27,24 @@ const STATUS_SECTIONS: Array<{ status: AttendanceRow["status"]; heading: string 
  * message that gets edited in place — "The bot should maintain a single
  * match message where possible."
  *
- * Deliberately does NOT include a "No response" section or a fixed
- * "Confirmed: X/6" denominator the way section 16's example does: without
- * a team roster (Player Profiles, Phase 5) there's no way to know who's
- * *expected* to respond, only who has. Showing "Responded: N" is the
- * honest subset of that example derivable from data that actually exists
- * right now. See README's Phase 3 section for the plan citation on this.
+ * `roster` is every currently-active player (PlayerRepository.
+ * listActiveByGuild) — optional and defaulting to `[]` for two reasons:
+ * callers from before Phase 5 existed shouldn't have to change, and a
+ * guild that hasn't run /add-player yet (or one still on Phase 1-4 code)
+ * has no roster to be honest about. In that empty-roster case this falls
+ * back to exactly the previous behavior: no "No response" section, no
+ * fabricated denominator, just "Responded: N" — the same reasoning this
+ * file's previous version documented (see README's Phase 3 section for
+ * the original citation). Once a roster is passed, this renders plan
+ * section 16's example faithfully: a real "⚪ No response" section
+ * listing every active player who hasn't answered, and
+ * `Confirmed: <PLAYING count>/<roster size>` in place of "Responded: N".
  */
-export function buildRosterMessage(match: MatchRow, attendanceRows: AttendanceRow[]): RosterMessage {
+export function buildRosterMessage(
+  match: MatchRow,
+  attendanceRows: AttendanceRow[],
+  roster: RosterPlayer[] = [],
+): RosterMessage {
   const lines: string[] = [];
 
   if (match.status === "CANCELLED") {
@@ -42,13 +58,17 @@ export function buildRosterMessage(match: MatchRow, attendanceRows: AttendanceRo
   lines.push("");
 
   const byStatus = new Map<AttendanceRow["status"], AttendanceRow[]>();
+  const respondedUserIds = new Set<string>();
   for (const row of attendanceRows) {
     const list = byStatus.get(row.status) ?? [];
     list.push(row);
     byStatus.set(row.status, list);
+    respondedUserIds.add(row.discordUserId);
   }
 
-  if (attendanceRows.length === 0 && match.status !== "CANCELLED") {
+  const noResponsePlayers = roster.filter((p) => !respondedUserIds.has(p.discordUserId));
+
+  if (attendanceRows.length === 0 && roster.length === 0 && match.status !== "CANCELLED") {
     lines.push("_No one has responded yet._");
   } else {
     for (const section of STATUS_SECTIONS) {
@@ -60,10 +80,22 @@ export function buildRosterMessage(match: MatchRow, attendanceRows: AttendanceRo
       }
       lines.push("");
     }
+    if (roster.length > 0 && noResponsePlayers.length > 0) {
+      lines.push("⚪ No response");
+      for (const player of noResponsePlayers) {
+        lines.push(player.displayName);
+      }
+      lines.push("");
+    }
   }
 
   if (match.status !== "CANCELLED") {
-    lines.push(`Responded: ${attendanceRows.length}`);
+    if (roster.length > 0) {
+      const playingCount = byStatus.get("PLAYING")?.length ?? 0;
+      lines.push(`Confirmed: ${playingCount}/${roster.length}`);
+    } else {
+      lines.push(`Responded: ${attendanceRows.length}`);
+    }
   }
 
   const components: ActionRowBuilder<ButtonBuilder>[] = [];

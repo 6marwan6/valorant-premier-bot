@@ -42,6 +42,14 @@ function findOption(
   return options?.find((o) => o.name === name);
 }
 
+export interface ResolvedUserOption {
+  id: string;
+  username: string;
+  globalName: string | null;
+  /** Server nickname if the target is a guild member, else their global/display name, else username — same fallback order as displayName.ts. */
+  displayName: string;
+}
+
 export function buildCommandInteractionAdapter(
   raw: APIChatInputApplicationCommandInteraction,
   discord: DiscordRestClient,
@@ -80,6 +88,33 @@ export function buildCommandInteractionAdapter(
       getRole(name: string): { id: string } | null {
         const opt = findOption(options, name);
         if (opt && opt.type === ApplicationCommandOptionType.Role) return { id: opt.value };
+        return null;
+      },
+      // Needed starting Phase 5: /add-player, /edit-player, /remove-player,
+      // and /player all target a *different* Discord user than whoever
+      // invoked the command, so displayName.ts's "resolve the invoker's
+      // own name" helper doesn't apply here — a User-type option's raw
+      // `value` is just an id; the actual user (and, if they're a member
+      // of this guild, their nickname) lives in `data.resolved`, per
+      // Discord's HTTP Interactions payload shape (see
+      // APIInteractionDataResolved in discord-api-types).
+      getUser(name: string, required?: boolean): ResolvedUserOption | null {
+        const opt = findOption(options, name);
+        if (opt && opt.type === ApplicationCommandOptionType.User) {
+          const userId = opt.value;
+          const resolvedUser = raw.data.resolved?.users?.[userId];
+          const resolvedMember = raw.data.resolved?.members?.[userId];
+          const username = resolvedUser?.username ?? userId;
+          const globalName = resolvedUser?.global_name ?? null;
+          const nick = resolvedMember?.nick ?? null;
+          return { id: userId, username, globalName, displayName: nick ?? globalName ?? username };
+        }
+        if (required) throw new Error(`Missing required user option: ${name}`);
+        return null;
+      },
+      getBoolean(name: string): boolean | null {
+        const opt = findOption(options, name);
+        if (opt && opt.type === ApplicationCommandOptionType.Boolean) return opt.value;
         return null;
       },
     },

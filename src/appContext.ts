@@ -5,6 +5,7 @@ import { ServerConfigRepository } from "./database/repositories/serverConfigRepo
 import { MatchRepository } from "./database/repositories/matchRepository.js";
 import { AttendanceRepository } from "./database/repositories/attendanceRepository.js";
 import { ReminderRepository } from "./database/repositories/reminderRepository.js";
+import { PlayerRepository } from "./database/repositories/playerRepository.js";
 import { MatchService } from "./modules/matches/matchService.js";
 import { AttendanceService } from "./modules/attendance/attendanceService.js";
 import { DiscordRestClient } from "./discord/discordRest.js";
@@ -21,8 +22,8 @@ import { DiscordRestClient } from "./discord/discordRest.js";
  * functions), which can't hold a WebSocket open between invocations, so
  * all outbound Discord calls go through REST instead.
  *
- * Grows over time: Phase 5 adds a PlayerRepository, etc. (plan section 7
- * `database/repositories/`).
+ * Grows over time: Phase 5 adds a PlayerRepository (below); later phases
+ * add their own (plan section 7 `database/repositories/`).
  */
 export interface AppContext {
   discord: DiscordRestClient;
@@ -34,6 +35,7 @@ export interface AppContext {
     matches: MatchRepository;
     attendance: AttendanceRepository;
     reminders: ReminderRepository;
+    players: PlayerRepository;
   };
   services: {
     matches: MatchService;
@@ -51,6 +53,7 @@ export function buildAppContext(params: {
   const matchRepo = new MatchRepository(params.db);
   const attendanceRepo = new AttendanceRepository(params.db);
   const reminderRepo = new ReminderRepository(params.db);
+  const playerRepo = new PlayerRepository(params.db);
   return {
     ...params,
     repositories: {
@@ -58,6 +61,7 @@ export function buildAppContext(params: {
       matches: matchRepo,
       attendance: attendanceRepo,
       reminders: reminderRepo,
+      players: playerRepo,
     },
     services: {
       matches: new MatchService(matchRepo, serverConfigRepo),

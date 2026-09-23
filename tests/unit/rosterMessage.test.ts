@@ -104,9 +104,51 @@ describe("buildRosterMessage", () => {
     expect(components).toHaveLength(0);
   });
 
-  it("never includes a fabricated 'X/6' denominator or a named No Response section (no roster exists yet — see README)", () => {
+  it("without a roster (pre-Phase-5 callers, or a guild with no players yet), falls back to 'Responded: N' with no fabricated denominator", () => {
     const { content } = buildRosterMessage(fakeMatch(), [fakeAttendance({ status: "PLAYING" })]);
     expect(content).not.toMatch(/\/\d+/); // no "N/M" style ratio anywhere
     expect(content).not.toMatch(/no response/i);
+    expect(content).toContain("Responded: 1");
+  });
+
+  it("with a roster, shows a real 'No response' section and a Confirmed: X/Y denominator (plan section 16, Phase 5)", () => {
+    const roster = [
+      { discordUserId: "u1", displayName: "Ahmed" },
+      { discordUserId: "u2", displayName: "Omar" },
+      { discordUserId: "u3", displayName: "Hassan" },
+    ];
+    const rows = [
+      fakeAttendance({ discordUserId: "u1", discordDisplayName: "Ahmed", status: "PLAYING" }),
+      fakeAttendance({ id: 2, discordUserId: "u2", discordDisplayName: "Omar", status: "WANTS_TO_BUT_CANNOT" }),
+    ];
+    const { content } = buildRosterMessage(fakeMatch(), rows, roster);
+
+    expect(content).toContain("⚪ No response");
+    expect(content).toContain("Hassan");
+    expect(content).toContain("Confirmed: 1/3");
+    expect(content).not.toContain("Responded:");
+  });
+
+  it("with a roster and zero responses, lists every active player under No response instead of the generic placeholder", () => {
+    const roster = [
+      { discordUserId: "u1", displayName: "Ahmed" },
+      { discordUserId: "u2", displayName: "Omar" },
+    ];
+    const { content } = buildRosterMessage(fakeMatch(), [], roster);
+
+    expect(content).not.toContain("No one has responded yet.");
+    expect(content).toContain("⚪ No response");
+    expect(content).toContain("Ahmed");
+    expect(content).toContain("Omar");
+    expect(content).toContain("Confirmed: 0/2");
+  });
+
+  it("omits the No response section once everyone on the roster has answered", () => {
+    const roster = [{ discordUserId: "u1", displayName: "Ahmed" }];
+    const rows = [fakeAttendance({ discordUserId: "u1", discordDisplayName: "Ahmed", status: "PLAYING" })];
+    const { content } = buildRosterMessage(fakeMatch(), rows, roster);
+
+    expect(content).not.toContain("No response");
+    expect(content).toContain("Confirmed: 1/1");
   });
 });

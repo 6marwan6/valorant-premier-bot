@@ -80,7 +80,8 @@ export async function runReminderCronJob(ctx: AppContext, now: Date = new Date()
         const prepared = await ctx.services.attendance.prepareAnnouncement(match.guildId, match.id);
         if (!prepared.ok) throw new Error(prepared.error);
 
-        const { content, components } = buildRosterMessage({ ...match, status: "CONFIRMATION_OPEN" }, []);
+        const roster = await ctx.repositories.players.listActiveByGuild(match.guildId);
+        const { content, components } = buildRosterMessage({ ...match, status: "CONFIRMATION_OPEN" }, [], roster);
         const sent = await ctx.discord.sendChannelMessage(prepared.value.channelId, { content, components });
         await ctx.services.attendance.recordAnnouncement(match.id, prepared.value.channelId, sent.id);
         await ctx.repositories.reminders.markSent(claimed.id, prepared.value.channelId, sent.id);
