@@ -3,6 +3,48 @@ import type { AppContext } from "../../appContext.js";
 import { parseAttendanceCustomId } from "../../modules/attendance/customId.js";
 import { buildRosterMessage } from "../../modules/attendance/rosterMessage.js";
 import { resolveDisplayName } from "../displayName.js";
+import type { MatchRow } from "../../database/schema/matches.js";
+import type { PlayerRow } from "../../database/schema/players.js";
+import type { AttendanceRow } from "../../database/schema/attendance.js";
+
+/**
+ * Plan section 15 step 6 / section 17: "Start the corresponding AI flow"
+ * — Phase 6 delivers it as a private (ephemeral) followup; real DMs are
+ * Phase 7. Runs strictly AFTER the attendance write and public roster
+ * update have succeeded, and is fully isolated: nothing in here can turn
+ * a recorded response into a "something went wrong" message (plan
+ * sections 48 and 66 #8). Skipped when the AI isn't configured, when the
+ * click didn't change anything (idempotency, section 50), or when the
+ * clicker has no active player profile.
+ */
+async function sendAiFollowUp(
+  interaction: ButtonInteraction,
+  ctx: AppContext,
+  params: { match: MatchRow; status: AttendanceRow["status"]; changed: boolean; roster: PlayerRow[] },
+): Promise<void> {
+  if (!params.changed || !ctx.services.ai.enabled) return;
+  const player = params.roster.find((p) => p.discordUserId === interaction.user.id);
+  if (!player) return;
+
+  try {
+    const outcome = await ctx.services.ai.respondToAttendance({
+      player,
+      match: params.match,
+      status: params.status,
+    });
+    await interaction.followUp({ content: outcome.text, ephemeral: true });
+  } catch (err) {
+    ctx.logger.error(
+      {
+        event: "ai.followup.failed",
+        matchId: params.match.id,
+        playerId: player.id,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "Failed to deliver AI followup",
+    );
+  }
+}
 
 /**
  * Routes a button click. Currently only attendance buttons exist
@@ -81,6 +123,8 @@ export async function dispatchButton(interaction: ButtonInteraction, ctx: AppCon
       },
       "Attendance recorded",
     );
+
+    await sendAiFollowUp(interaction, ctx, { match, status: parsed.status, changed: result.value.changed, roster });
   } catch (err) {
     const cause = err instanceof Error && "cause" in err ? (err as { cause?: unknown }).cause : undefined;
     ctx.logger.error(

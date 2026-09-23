@@ -83,7 +83,7 @@ export class AttendanceService {
     discordUserId: string;
     discordDisplayName: string;
     status: AttendanceRow["status"];
-  }): Promise<MatchResult<MatchWithAttendance>> {
+  }): Promise<MatchResult<MatchWithAttendance & { changed: boolean }>> {
     const match = await this.matches.getById(params.matchId);
     if (!match || match.guildId !== params.guildId) {
       return { ok: false, error: "This match no longer exists." };
@@ -91,6 +91,12 @@ export class AttendanceService {
     if (match.status !== "CONFIRMATION_OPEN") {
       return { ok: false, error: "This match isn't accepting responses anymore." };
     }
+
+    // `changed` is false only when this exact status was already recorded
+    // (a repeated click). The AI flow keys off it so a double-click never
+    // produces a second AI message (plan sections 15, 50, 57).
+    const previous = await this.attendance.getForPlayer(params.matchId, params.discordUserId);
+    const changed = previous?.status !== params.status;
 
     await this.attendance.upsert({
       guildId: params.guildId,
@@ -101,7 +107,7 @@ export class AttendanceService {
     });
 
     const attendanceRows = await this.attendance.listByMatch(params.matchId);
-    return { ok: true, value: { match, attendanceRows } };
+    return { ok: true, value: { match, attendanceRows, changed } };
   }
 
   /** Read-only fetch used by /edit-match and /cancel-match to refresh an already-posted message. */

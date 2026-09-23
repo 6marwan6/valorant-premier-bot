@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "api/interactions.ts": {
-      "maxDuration": 15
+      "maxDuration": 30
     },
     "api/cron/reminders.ts": {
       "maxDuration": 30

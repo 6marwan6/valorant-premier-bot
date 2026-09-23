@@ -9,6 +9,8 @@ import { PlayerRepository } from "./database/repositories/playerRepository.js";
 import { MatchService } from "./modules/matches/matchService.js";
 import { AttendanceService } from "./modules/attendance/attendanceService.js";
 import { DiscordRestClient } from "./discord/discordRest.js";
+import { AiService } from "./modules/ai/aiService.js";
+import { createLlmClient, type LlmClient } from "./services/ai/llmClient.js";
 
 /**
  * Dependency container threaded through commands, events, and (in later
@@ -40,6 +42,7 @@ export interface AppContext {
   services: {
     matches: MatchService;
     attendance: AttendanceService;
+    ai: AiService;
   };
 }
 
@@ -48,14 +51,18 @@ export function buildAppContext(params: {
   db: Database;
   env: Env;
   logger: Logger;
+  /** Test seam: pass a fake (or null to force AI off) instead of building one from env. */
+  llm?: LlmClient | null;
 }): AppContext {
   const serverConfigRepo = new ServerConfigRepository(params.db);
   const matchRepo = new MatchRepository(params.db);
   const attendanceRepo = new AttendanceRepository(params.db);
   const reminderRepo = new ReminderRepository(params.db);
   const playerRepo = new PlayerRepository(params.db);
+  const { llm: llmOverride, ...contextParams } = params;
+  const llm = llmOverride !== undefined ? llmOverride : createLlmClient(params.env, params.logger);
   return {
-    ...params,
+    ...contextParams,
     repositories: {
       serverConfig: serverConfigRepo,
       matches: matchRepo,
@@ -66,6 +73,7 @@ export function buildAppContext(params: {
     services: {
       matches: new MatchService(matchRepo, serverConfigRepo),
       attendance: new AttendanceService(matchRepo, attendanceRepo, serverConfigRepo),
+      ai: new AiService(llm, params.logger),
     },
   };
 }

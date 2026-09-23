@@ -41,6 +41,21 @@ describe("parseEnv", () => {
     expect(env.LLM_API_KEY).toBeUndefined();
   });
 
+  it("leaves the AI provider unset by default and applies bounded LLM defaults (plan sections 57/59)", () => {
+    const env = parseEnv(validBase);
+    expect(env.LLM_BASE_URL).toBeUndefined();
+    expect(env.LLM_MODEL).toBeUndefined();
+    expect(env.LLM_TIMEOUT_MS).toBe(10_000);
+    expect(env.LLM_MAX_TOKENS).toBe(1024);
+  });
+
+  it("coerces numeric LLM settings and rejects a malformed base URL", () => {
+    const env = parseEnv({ ...validBase, LLM_TIMEOUT_MS: "5000", LLM_MAX_TOKENS: "512" });
+    expect(env.LLM_TIMEOUT_MS).toBe(5000);
+    expect(env.LLM_MAX_TOKENS).toBe(512);
+    expect(() => parseEnv({ ...validBase, LLM_BASE_URL: "not a url" })).toThrow(/LLM_BASE_URL/);
+  });
+
   it("allows overriding the bootstrap timezone", () => {
     const env = parseEnv({ ...validBase, DEFAULT_TIMEZONE: "Africa/Cairo" });
     expect(env.DEFAULT_TIMEZONE).toBe("Africa/Cairo");

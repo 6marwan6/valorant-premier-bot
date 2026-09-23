@@ -34,8 +34,21 @@ export const envSchema = z.object({
   // not open).
   CRON_SECRET: z.string().optional(),
 
-  // Not required in Phase 1 (plan: Phase 6 is the first phase that needs AI).
+  // Phase 6 (plan sections 57/59): any OpenAI-style Chat Completions
+  // provider. All optional at the schema level — if the key, base URL or
+  // model is missing the AI layer simply stays off and attendance works
+  // exactly as before (plan design principle #8). Models stay configurable
+  // per section 57; provider-specific request fields (e.g. reasoning
+  // effort) go in LLM_EXTRA_BODY as a JSON object.
   LLM_API_KEY: z.string().optional(),
+  LLM_BASE_URL: z.string().url().optional(),
+  LLM_MODEL: z.string().min(1).optional(),
+  LLM_EXTRA_BODY: z.string().optional(),
+  // Interactions run under vercel.json's maxDuration; the LLM call happens
+  // after the attendance write, so it gets its own bounded budget.
+  LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  // Reasoning models spend max_tokens on thinking before the answer.
+  LLM_MAX_TOKENS: z.coerce.number().int().positive().default(1024),
 
   // Bootstrap-only fallbacks — see database/schema/serverConfig.ts for the
   // authoritative, per-guild, DB-backed configuration.
