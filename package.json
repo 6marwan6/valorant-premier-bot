@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@vercel/functions": "^3.9.9",
     "discord-api-types": "^0.38.55",
     "discord-interactions": "^4.4.0",
     "discord.js": "^14.16.3",
@@ -32,7 +33,6 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "vite": "^5.4.11",
     "@types/luxon": "^3.7.5",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
@@ -40,6 +40,7 @@
     "drizzle-kit": "^0.31.11",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
+    "vite": "^5.4.11",
     "vitest": "^2.1.8"
   }
 }

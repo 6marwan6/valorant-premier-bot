@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { waitUntil } from "@vercel/functions";
 import { loadEnv } from "../src/config/env.js";
 import { logger } from "../src/config/logger.js";
 import { createDatabase } from "../src/database/client.js";
@@ -45,7 +46,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return buildAppContext({ discord, db, env, logger });
   };
 
-  await handleDiscordInteraction({
+  const startedAt = Date.now();
+  let markAcked!: () => void;
+  const acked = new Promise<void>((resolve) => {
+    markAcked = resolve;
+  });
+
+  const work = handleDiscordInteraction({
     rawBody,
     signature: req.headers["x-signature-ed25519"],
     timestamp: req.headers["x-signature-timestamp"],
@@ -53,6 +60,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     buildCtx,
     sendInitialResponse: (status, body) => {
       res.status(status).json(body);
+      logger.info(
+        { event: "interaction.ack.sent", status, latencyMs: Date.now() - startedAt },
+        "Initial response sent to Discord",
+      );
+      markAcked();
     },
-  });
+   })
+    .then(() => {
+      logger.info(
+        { event: "interaction.work.finished", latencyMs: Date.now() - startedAt },
+        "Interaction work finished",
+      );
+    })
+    .catch((err) => {
+      logger.error(
+        {
+          event: "interaction.work.failed",
+          latencyMs: Date.now() - startedAt,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Interaction work threw",
+      );
+      if (!res.headersSent) res.status(500).json({ error: "internal error" });
+    })
+    .finally(markAcked);
+
+  // Keeps the invocation alive for the post-ack work (DB + followup PATCH).
+  waitUntil(work);
+  // Return as soon as Discord has its ack; `work` continues under waitUntil.
+  await acked;
 }
