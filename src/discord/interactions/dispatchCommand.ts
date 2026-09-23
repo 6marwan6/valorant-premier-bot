@@ -42,6 +42,12 @@ export async function dispatchCommand(
       "Command handled",
     );
   } catch (err) {
+    // drizzle-orm 0.45.x wraps driver errors: err.message is a generic
+    // "Failed query: ..."; the actual DB error (constraint name, Postgres
+    // error code) lives on err.cause. Log both so failures stay debuggable
+    // — see tests/integration/matchRepository.test.ts for the concrete
+    // shape this was discovered against.
+    const cause = err instanceof Error && "cause" in err ? (err as { cause?: unknown }).cause : undefined;
     ctx.logger.error(
       {
         event: "command.failed",
@@ -49,6 +55,7 @@ export async function dispatchCommand(
         guildId: interaction.guildId,
         latencyMs: Date.now() - startedAt,
         err: err instanceof Error ? err.message : String(err),
+        cause: cause instanceof Error ? cause.message : undefined,
       },
       "Command handler threw",
     );

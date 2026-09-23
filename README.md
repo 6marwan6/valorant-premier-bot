@@ -5,30 +5,315 @@ Private Discord bot for a 6–7 person Valorant Premier team. See
 the single source of truth for scope and behavior; this README only covers
 how to run what's built so far and the decisions made while building it.
 
-## Status: Phase 1 — Discord Foundation ✅
+## Status: Phase 4 — Scheduling ✅ (Phases 1–3 also complete)
 
-Per plan section 59, Phase 1 scope is: Discord bot, Discord authentication,
-slash commands, admin permissions, basic configuration — **no AI**. That's
-exactly what's implemented:
+Per plan section 59, Phase 4 scope is: scheduled reminders, reminder
+records, duplicate prevention, timezone handling. Per section 13, each
+reminder needs its own record "so it cannot accidentally be sent twice."
 
-- Discord gateway client (`src/discord/client.ts`), minimal intents
-- `/setup` slash command (plan sections 41, 53) — admin-only, writes the
-  per-guild `server_config` row (timezone, match channel, admin role,
-  reminder schedule, default roast intensity, default memory policy)
-- Admin permission check (plan section 55) — native Discord Administrator
-  OR the configured `admin_role_id`
-- PostgreSQL + Drizzle ORM, with a `database/repositories/` layer (plan
-  section 7) so nothing outside `ServerConfigRepository` touches SQL
-  directly
-- Structured logging (plan section 51) — no message content, no PII, just
-  event/id/latency fields
-- Command deploy script, migration runner
-- 24 unit tests + 4 integration tests against a real Postgres instance (28
-  total, all passing) — see "Testing" below
+**This phase also had to answer a question the plan doesn't: how does a
+system with no persistent connection (see "Hosting & Deployment" below)
+run anything on a schedule at all?** The answer is the same one section 6
+already gives for Discord itself — "scheduled/cron execution" is
+explicitly listed as part of the target architecture — so Phase 4 is
+built around an **external cron trigger hitting a Vercel Function**, not
+a long-running scheduler process. See "How reminders actually run" below
+for the mechanism, and "Two decisions locked in for later phases" for two
+related questions (a direct-chat command, and Phase 8's passive-listening
+replacement) that came up while scoping this out and were resolved before
+writing any Phase 4 code, per this project's own ground rule of checking
+against the plan before each decision.
 
-Nothing from Phase 2 onward (matches, attendance, AI, memory) is built yet
-— this is intentionally a thin, verifiable slice.
+**Since this phase was first completed, the Discord transport layer was
+migrated from a gateway connection to HTTP Interactions**, to support
+free-tier serverless hosting (Vercel + Neon) — see "Hosting & Deployment"
+below for why and what changed. Every command and the attendance-button
+flow described below still behaves identically; only *how* Discord
+delivers/receives them changed.
 
+### Three real ordering tensions in the plan, and how they were resolved
+
+The plan's own phase ordering creates dependencies Phase 3 can't fully
+satisfy yet. Rather than quietly build around them, here's each one and
+the resolution, so you can override any of them:
+
+**1. Section 15 step 2, "identify the player," implies a `players` table
+— but Player Profiles are Phase 5, which comes *after* Attendance (Phase
+3) in the plan's own ordering.** Resolution: `attendance` rows key off raw
+Discord identity (`discord_user_id` + a `discord_display_name` snapshot
+taken at response time), not a `players` FK. This is forward-compatible
+on purpose (plan design principle #12: no rewrite of the core
+match/attendance system later) — Phase 5 can start joining on
+`discord_user_id` without touching this table's shape.
+
+**2. Section 16's example roster message names people under "No
+response"** — impossible without knowing who's *expected* to respond,
+which needs the roster from Player Profiles (Phase 5). Resolution: the
+public message shows only actual responses, grouped exactly as section
+16's example groups them (empty sections omitted), plus a `Responded: N`
+count. No "No response" section, no fabricated `X/6` denominator — both
+return once Phase 5 lands.
+
+**3. Section 61's example shows the match message posted automatically
+"three hours before" kickoff — that's the reminder system, Phase 4, not
+built yet.** Resolution: added `/post-match`, a **provisional** admin
+command not named in the plan's section 41 list. It does exactly what
+Phase 4's scheduler will eventually do automatically (validate, open for
+confirmation, post the buttoned message) but triggered manually. When
+Phase 4 is built it should call the same
+`AttendanceService.prepareAnnouncement`/`recordAnnouncement` pair this
+command uses — `/post-match` likely becomes redundant then (or stays as a
+manual "post early" override) rather than being thrown away.
+
+### What's implemented
+
+- `attendance` table: `(match_id, discord_user_id)` unique index enforces
+  plan section 15's idempotency requirement ("clicking the same button
+  twice... should not create duplicate records") **at the database
+  level** via an upsert — proven directly in `psql` before any app code
+  was written on top of it
+- `matches.announcementChannelId`/`announcementMessageId`: track the
+  single posted message per match ("The bot should maintain a single
+  match message where possible," section 16)
+- `AttendanceService`: validates match state before accepting a response
+  (section 15 step 3, "verify the match is accepting responses") and
+  before allowing a match to be posted (only from `SCHEDULED`); all
+  framework-agnostic, no Discord types
+- `buildRosterMessage`: pure function building both the announcement
+  (section 14) and the roster (section 16) as one editable message —
+  cancelling a match keeps the response history visible but removes the
+  buttons entirely, rather than leaving live buttons that would just be
+  rejected on click
+- A button click edits the public message via `interaction.update()`
+  directly (the button's own message) — no separate fetch-by-id needed
+  for that path. `/cancel-match` and `/edit-match`, which change match
+  state *outside* a button click, push a best-effort refresh to an
+  already-posted announcement via `announcementSync.ts`; a Discord-side
+  failure there is logged and swallowed, never rolled back, since the
+  database is already the source of truth by that point (design
+  principle #2)
+
+**100 tests passing** (up from 73 in Phase 2): 61 unit, 39 integration
+against real Postgres — including a full `/post-match` → button-click →
+message-content e2e suite that **caught a real bug**: the very first
+posted announcement was missing its buttons, because it was built from
+the match's pre-transition `SCHEDULED` status rather than the
+`CONFIRMATION_OPEN` status it was about to have. Fixed in
+`postMatch.ts`; regression-tested in `tests/integration/phase3E2E.test.ts`.
+
+### Phase 4 — how reminders actually run
+
+**Reconciliation, not scheduling.** There's no code anywhere that "sets a
+timer for 3 hours from now." Instead, `services/scheduling/
+reminderCronJob.ts` runs on every external-cron tick (see below) and, for
+every match still `SCHEDULED`/`CONFIRMATION_OPEN`, makes sure its
+`reminders` rows match what they *should* be right now given
+`server_config.reminder_schedule_minutes` and the match's current
+`scheduled_at` (`ReminderRepository.reconcileMatch`, an idempotent
+upsert). Then, separately, it sends whatever's actually due. This means:
+
+- **Editing a match's time automatically retimes its still-pending
+  reminders** — no special-case code in `/edit-match` needed; the next
+  cron tick just recomputes them.
+- **A crashed or skipped tick isn't a lost reminder** — the next tick
+  reconciles from scratch. There's no separate "did generation succeed"
+  state to get out of sync with the match itself.
+- **The earliest-configured offset is what opens the match for
+  confirmation** — plan section 61's example ("posted... three hours
+  before kickoff") — calling the exact same
+  `AttendanceService.prepareAnnouncement`/`recordAnnouncement` pair
+  `/post-match` already used (see that command's updated doc comment for
+  how the two now coexist without racing). Every later offset for the
+  same match sends a short nudge instead (`modules/reminders/
+  reminderMessages.ts`) — attendance tally, no buttons (the roster
+  message keeps the only live ones, per section 16).
+- **Duplicate-send prevention (plan section 50) is a claim, not a lock**:
+  `ReminderRepository.claim()` is a single `UPDATE ... WHERE
+  status='PENDING'` — at most one overlapping cron invocation can ever
+  win a given reminder. A Discord-call failure after claiming reverts the
+  row to `PENDING` (logged, not swallowed) so the next tick retries,
+  rather than either silently dropping the reminder or falsely marking it
+  sent.
+
+**How it's actually triggered:** `api/cron/reminders.ts`, a Vercel
+Function guarded by a bearer-token check (`services/scheduling/
+cronAuth.ts`) against `CRON_SECRET` — Discord's own Ed25519 verification
+only covers requests Discord itself sends, so a cron endpoint needs its
+own auth or anyone who finds the URL could trigger it. Point an external
+scheduler (cron-job.org / Upstash QStash — see "Hosting & Deployment") at
+it every 5–15 minutes with header `Authorization: Bearer <CRON_SECRET>`.
+It's deliberately its own route rather than a generic `?job=` dispatcher:
+plain Vercel file routing already gives each cron job (this one now,
+Phase 8's message-poll job later) its own URL, schedule, and
+`maxDuration` for free; what's actually shared is the auth check and the
+context-building boilerplate, not the route itself.
+
+`/post-match` is kept, not retired, now that reminders open matches
+automatically — it's the "post early" manual override the Phase 3 section
+above predicted, for an admin who doesn't want to wait for the first
+scheduled reminder.
+
+**151 tests passing** (up from 100 in Phase 3): 91 unit, 60 integration —
+this time actually run against a real local Postgres inside the sandbox
+(not just written and left unverified), including a bug the integration
+suite caught before you'd have hit it: the very first version of the cron
+job re-used a *snapshot* of each match taken before the loop started, so
+a second reminder due for the same match in the same tick (a late-created
+match where several offsets are already overdue) would read a stale
+`announcementChannelId` — still null — and fail. Fixed by tracking
+newly-opened channel/message ids in-memory for the rest of that tick;
+regression-tested in `tests/integration/phase4E2E.test.ts`.
+
+### Two decisions locked in for later phases
+
+Neither of these is Phase 4 work — both came up while scoping the cron
+migration and were resolved (checked against the plan, not just assumed)
+before Phase 4 code was written, so they don't get revisited by surprise
+later.
+
+**1. Talking to the bot directly will be a slash command, not `@mention`
+parsing.** Discord has no push mechanism for arbitrary channel messages
+outside Interactions (commands/buttons/modals) — catching `@Mari hello`
+as it happens needs a live Gateway WebSocket, which is exactly the
+persistent-process pattern plan section 4 rules out ("VPS
+infrastructure") and section 6 says to avoid. A `/mari` (or `/ai`) slash
+command gets the same "talk to it directly" behavior through the HTTP
+Interactions endpoint this app already has — plan section 63's own Future
+Extensions list names exactly this ("`/ai` — Allow players to directly
+talk to the team AI"). **Not built yet** — it needs an AI service
+(`LLM_API_KEY`, Phase 6) and player context (Phase 5) to be worth
+anything; this only fixes *which* trigger mechanism it'll use once those
+exist.
+
+**2. Phase 8's passive message-listening will be replaced by cron-based
+REST polling of allow-listed channels, not a gateway connection —** but
+with one open question carried forward rather than silently decided.
+Discord's `GET /channels/{id}/messages?after=...` works from a stateless
+function (needs `Message Content Intent` enabled in the Developer
+Portal — an app-level toggle, not a live session) the same way the
+reminders cron job already works, tracking a `last_processed_message_id`
+per channel for idempotent incremental fetches. Section 6's own
+"scheduled/cron execution" covers this the same way it covers reminders.
+**What's still open:** this "Hosting & Deployment" section already
+flagged, before this conversation, that an *explicit* slash-command
+"remember this" flow might fit the plan's own emphasis on consent
+(sections 21, 47) better than scanning-then-extracting messages passively
+— section 21's whole "Should I remember this? [Remember] [Don't
+Remember]" flow is consent-first by design, and section 47's "prevent
+false memories" posture leans the same way. Polling solves the
+*transport* problem (how do you read messages at all without a gateway);
+it doesn't settle *whether* passive scanning is still the right design
+once Phase 8 actually starts. Recorded here so that choice gets made
+deliberately then, not defaulted into now.
+
+## A dependency vulnerability found and fixed (Phase 2)
+
+`npm audit` flagged a **high-severity SQL-injection advisory in
+drizzle-orm** (CVE-2026-39356, fixed in 0.45.2). Checked whether it
+actually applied here: the vector requires passing untrusted input to
+`sql.identifier()`/`.as()` to build dynamic SQL identifiers, which this
+codebase never does — everything goes through the typed query builder. Not
+currently exploitable, but upgraded `drizzle-orm` (0.36→0.45) and
+`drizzle-kit` (0.30→0.31) anyway since the codebase is still small enough
+that a breaking-change upgrade is cheap. `npm audit --omit=dev` (i.e. what
+actually ships) reports **zero vulnerabilities**. The remaining findings
+under `npm audit` are all transitive dev-only tooling (vitest/vite/esbuild,
+pulled in by `drizzle-kit`'s internal config loader) that never ships in
+`npm run build && npm start` — not addressed, since the fix (`vitest@5`)
+is itself a breaking change with no production benefit.
+
+One side effect worth knowing: drizzle-orm 0.45.x changed how it surfaces
+database errors — the top-level `Error.message` is now a generic `"Failed
+query: ..."`; the actual Postgres error (constraint name, error code) is
+on `err.cause`. Both `dispatchCommand` and `dispatchButton`'s error
+logging capture both.
+
+## Timezone discrepancy in plan section 3 — resolved
+
+> "Use `Europe/frankfurt` as the team's default timezone."
+
+**`Europe/Frankfurt` is not a valid IANA timezone identifier.** Germany has
+exactly one IANA zone: `Europe/Berlin`. There is no separate Frankfurt zone
+in the tz database, so any timezone library (including JS's own `Intl`)
+rejects it outright.
+
+Rather than hardcode a string that would throw at runtime the first time
+someone tried to compute a reminder time (plan section 13, section 60
+explicitly lists "timezone conversion" as a unit-test target), I:
+
+- Built `isValidTimeZone()` (`src/discord/timezone.ts`) and wired it into
+  `/setup` so an admin who tries to set it to `Europe/Frankfurt` gets a
+  clear rejection instead of a silently broken config
+- Added a unit test (`tests/unit/timezone.test.ts`) pinning this down so it
+  can't regress
+
+**Resolved at the start of Phase 4** (reminder timing needed a real
+answer, not just a valid one): `DEFAULT_TIMEZONE` defaults to
+**`Africa/Cairo`** (`.env.example`, `database/schema/serverConfig.ts`) —
+plan section 11's own worked example already uses it, and the team is
+Cairo-based. Still overridable per-guild via `/setup` if that's ever
+wrong for a given deployment.
+
+## Hosting & Deployment: serverless (Vercel + Neon), by design
+
+This app targets **free-tier serverless hosting**: Vercel Functions +
+Neon (managed Postgres) + an external scheduler for cron (cron-job.org or
+Upstash QStash — Vercel's own free-tier cron only fires once a day, too
+coarse for reminders spaced hours/minutes apart, per plan section 13).
+This is a direct, deliberate reading of plan section 6 ("serverless
+backend execution... managed database... scheduled/cron execution... free
+or very low-cost tiers where practical," VPS infrastructure specifically
+excluded).
+
+**The one real consequence:** Vercel Functions are stateless and
+short-lived — they cannot hold `discord.js`'s gateway `Client` (a
+persistent WebSocket) open between invocations. So this app talks to
+Discord via **HTTP Interactions** instead: Discord POSTs each
+command/button interaction to one endpoint (`api/interactions.ts`), the
+app cryptographically verifies it came from Discord
+(`src/discord/verifyInteraction.ts`, Ed25519 — this is now the literal
+front door of the app, since there's no gateway session implicitly
+authenticating anything), and responds. All outbound calls (sending or
+editing a message) go through plain REST (`src/discord/discordRest.ts`)
+instead of gateway Client methods.
+
+Two things worth knowing if you're picking this up fresh:
+
+1. **Deferred responses.** Discord expects a response within 3 seconds,
+   but a cold Vercel function + a cold Neon connection could occasionally
+   exceed that. So every command/button interaction is acknowledged
+   immediately with a "deferred" response (near-instant, no DB touched
+   yet), and the real content is delivered a moment later via a separate
+   outbound REST call once the actual work (DB read/write) finishes — see
+   `src/discord/handleDiscordInteraction.ts`'s doc comment for the exact
+   mechanics of how a single Vercel invocation sends that first response
+   and then keeps running to deliver the second one.
+2. **This breaks Phase 8's passive message-listening** (plan section 45)
+   — an HTTP Interactions endpoint only ever receives interactions
+   (commands/buttons/modals), never regular channel messages, which
+   requires a gateway connection. Not a blocker now (Phase 8 is several
+   phases away); the replacement approach (cron-based REST polling) is
+   now decided — see "Two decisions locked in for later phases" under the
+   Phase 4 section above for the mechanism and the one open question it
+   deliberately leaves for Phase 8 itself.
+
+**Neon needs no code changes.** Use Neon's *pooled* connection string
+(the one with `-pooler` in the hostname — PgBouncer, transaction mode) as
+`DATABASE_URL`. That's the standard pattern for many short-lived
+serverless connections against one Postgres instance, and our existing
+`pg` + `drizzle-orm/node-postgres` setup works against it unmodified.
+
+**One caveat I can't verify from this sandbox:** the exact mechanics of
+"Vercel keeps a Node.js function invocation alive after its first
+response until the handler's promise resolves" (needed for the deferred
+→ followup pattern above), and current `maxDuration` limits per plan
+tier, are standard/documented Vercel behavior as of this writing, but
+this sandbox has no network access to Vercel to confirm live. Worth a
+quick check against Vercel's current docs before your first real deploy —
+`vercel.json`'s `maxDuration: 15` (interactions) and `30` (the reminders
+cron function, which may process several matches' worth of sequential
+Discord calls per tick) are reasonable starting points, not
+verified-working numbers.
 
 ## Architecture decisions made (plan left these open)
 
@@ -39,76 +324,211 @@ selected after evaluating...", "ORM/DB library unspecified beyond
 | Decision | Choice | Why |
 |---|---|---|
 | Language/runtime | Node.js + TypeScript (plan section 7, explicit) | — |
-| ORM | Drizzle ORM + `pg` | Lightweight, fits the plan's explicit `database/repositories/` pattern better than a heavier client, works well on low-cost/serverless-friendly hosts (plan section 6) |
-| Discord connection | Gateway (`discord.js` `Client`), not HTTP-only interactions | Phase 8 (memory extraction, plan section 45) needs to listen to messages in specific channels, which requires a gateway connection anyway (HTTP interactions only cover commands/buttons). Building on gateway from day one avoids a rewrite later (plan principle #12). A **managed low-cost host** (e.g. Railway/Fly.io/Render) is still consistent with plan section 6 — section 4 excludes self-managed **VPS** infrastructure specifically, not all persistent processes |
+| ORM | Drizzle ORM + `pg` | Lightweight, fits the plan's explicit `database/repositories/` pattern better than a heavier client; works unmodified against Neon's pooled connection string |
+| Hosting | Vercel Functions + Neon + external cron | Free-tier serverless, per plan section 6 and an explicit cost constraint — see "Hosting & Deployment" above |
+| Discord transport | HTTP Interactions (verified via Ed25519), not gateway | Required by the serverless hosting choice — a persistent WebSocket can't survive between stateless function invocations. See "Hosting & Deployment" above for the Phase 8 consequence |
 | Command scope | Guild commands, not global | Plan section 54: single-server only, and guild commands update instantly instead of taking up to an hour to propagate |
 | Validation | `zod` for env vars and (later) AI structured output | Matches plan section 36/60's emphasis on validating structured data before trusting it |
 | Logging | `pino` | Structured JSON by default (plan section 51), pretty-printed only in dev |
+| Date/time parsing | `luxon` | Native JS `Date`/`Intl` can't construct a wall-clock time in an arbitrary IANA zone; needed for section 11's "team's configured timezone" and section 60's "timezone conversion" test target |
+| Attendance identity | Raw Discord id + display-name snapshot, no `players` FK | Player Profiles (Phase 5) don't exist yet — see "ordering tensions" in the Phase 3 section above |
+| Match posting trigger | Provisional `/post-match` admin command | Reminder system (Phase 4) doesn't exist yet — see "ordering tensions" in the Phase 3 section above |
+| Reminder generation | Reconcile-on-every-tick, not create-once-at-match-time | Self-healing (a crashed tick or an edited match time just gets fixed by the next tick) instead of needing MatchService to know reminders exist at all — see "Phase 4 — how reminders actually run" above |
+| Cron trigger auth | Bearer token (`CRON_SECRET`) checked in `services/scheduling/cronAuth.ts` | Discord's Ed25519 verification only covers Discord's own requests; a cron endpoint needs its own auth or the URL alone is enough to trigger it |
+| Reminder idempotency | Claim-then-send (`PENDING` → `CLAIMED` → `SENT`/back to `PENDING`) | A single `UPDATE ... WHERE status='PENDING'` is the actual duplicate-send guard (plan section 50); status alone (`PENDING`/`SENT`) can't tell two concurrent cron ticks apart, an extra transient state can |
 
 ## Project layout
 
-Matches plan section 7 exactly:
+Matches plan section 7, plus a top-level `api/` for the Vercel functions
+(a Vercel convention, not a plan-derived choice):
 
 ```
+api/
+├── interactions.ts   # Vercel function — the Discord Interactions Endpoint URL
+└── cron/
+    └── reminders.ts  # Vercel function — external-cron entry point (Phase 4)
+
 src/
-├── discord/{commands,interactions,events,embeds}/
-├── modules/{players,matches,attendance,reminders,ai,memories}/   (mostly empty until their phase)
-├── database/{schema,repositories}/
-├── services/{discord,ai,retrieval,scheduling}/                  (empty until their phase)
-├── config/           # env.ts, logger.ts
-└── index.ts
+├── discord/
+│   ├── commands/      # setup, createMatch, editMatch, cancelMatch, listMatches, postMatch
+│   ├── interactions/  # dispatchCommand, dispatchButton
+│   ├── discordRest.ts, verifyInteraction.ts, httpInteractionAdapter.ts, handleDiscordInteraction.ts
+│   ├── permissions.ts, commandGuards.ts, displayName.ts, announcementSync.ts, timezone.ts
+├── modules/
+│   ├── matches/     # matchService, matchLifecycle, dateTime
+│   ├── attendance/  # attendanceService, rosterMessage, customId
+│   ├── reminders/   # reminderScheduling (pure planning), reminderMessages (nudge text)
+│   └── {players,ai,memories}/   # empty until their phase
+├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders
+├── services/
+│   ├── scheduling/   # cronAuth, reminderCronJob — the Phase 4 orchestration layer
+│   └── {discord,ai,retrieval}/   # empty until their phase
+├── scripts/          # deployCommands, validateCommands
+└── config/           # env.ts, logger.ts
 ```
+
+There's no `src/index.ts` — `api/interactions.ts` is the production
+entry point (a Vercel Function has no separate "start the process" step).
 
 ## Setup
 
 ```bash
 npm install
 cp .env.example .env
-# fill in DISCORD_BOT_TOKEN, DISCORD_CLIENT_ID, DISCORD_GUILD_ID, DATABASE_URL
+# fill in DISCORD_BOT_TOKEN, DISCORD_CLIENT_ID, DISCORD_GUILD_ID,
+# DISCORD_PUBLIC_KEY, DATABASE_URL, CRON_SECRET (Phase 4 — any long random string)
 
 npm run db:generate   # only needed after changing schema files
 npm run db:migrate    # applies drizzle/ migrations to DATABASE_URL
-npm run deploy-commands  # registers /setup with your test guild
-npm run dev            # starts the bot (tsx watch)
+npm run deploy-commands   # registers all slash commands with your test guild
+npm run validate-commands # offline sanity check of command definitions (no network needed)
+npm run dev               # runs `vercel dev` — local Vercel function emulation
 ```
 
-For production: `npm run build && npm start`.
+Deploy with the Vercel CLI or by connecting the repo in the Vercel
+dashboard — no separate build step to run yourself; Vercel builds
+`api/interactions.ts` and `api/cron/reminders.ts` directly. After
+deploying, set the Vercel deployment's URL + `/api/interactions` as the
+**Interactions Endpoint URL** in the Discord Developer Portal (Discord
+will immediately send a PING to verify it — see
+`handleDiscordInteraction.ts`).
+
+### Discord application setup (one-time, outside this repo)
+
+1. Create an application at the Discord Developer Portal, add a Bot user.
+2. Copy the bot token → `DISCORD_BOT_TOKEN`; the application (client) ID →
+   `DISCORD_CLIENT_ID`; the **public key** (General Information tab) →
+   `DISCORD_PUBLIC_KEY`.
+3. Invite the bot to your server with the `applications.commands` and
+   `bot` scopes, granting **Send Messages**, **Embed Links**, and **Read
+   Message History** in whatever channel you'll set as the match channel.
+4. Copy your server's ID → `DISCORD_GUILD_ID`.
+5. Set the **Interactions Endpoint URL** (General Information tab) to
+   your deployed `.../api/interactions` URL — required for an HTTP
+   Interactions app; without it Discord will never deliver any
+   interaction to this bot.
+6. Run `/setup` first, with a `match_channel` — every match command
+   requires the config row it creates, and `/post-match` specifically
+   needs `match_channel` set.
+
+### Cron setup (Phase 4, one-time, outside this repo)
+
+Vercel's own free-tier cron only fires once a day — too coarse for
+minutes-apart reminders — so an **external** scheduler drives
+`/api/cron/reminders` instead:
+
+1. Generate a long random value for `CRON_SECRET` (e.g. `openssl rand
+   -hex 32`) and set it in your Vercel project's environment variables.
+2. In [cron-job.org](https://cron-job.org) (or Upstash QStash, or any
+   scheduler that can set a custom header), create a job:
+   - URL: `https://<your-deployment>.vercel.app/api/cron/reminders`
+   - Method: `GET` (or `POST` — both work)
+   - Header: `Authorization: Bearer <CRON_SECRET>`
+   - Schedule: every 5–15 minutes — plenty of granularity for a 6–7
+     person team's reminder offsets
+3. A request with a missing/wrong header gets `401`; a healthy tick
+   returns `200` with a small JSON summary
+   (`{ok, guildsProcessed, matchesReconciled, remindersSent, ...}`) —
+   useful for confirming it's actually running from the scheduler's own
+   request-history view.
 
 ## Testing
 
 Mirrors plan section 60's split between unit and integration tests:
 
 ```bash
-npm test               # unit tests only — no infrastructure needed (24 tests)
+npm test               # unit tests only — no infrastructure needed (91 tests)
 npm run test:integration  # requires DATABASE_URL pointing at a disposable
-                           # Postgres with migrations applied (4 tests)
+                           # Postgres with migrations applied (60 tests)
 ```
 
-`tests/integration/serverConfigRepository.test.ts` self-skips (rather than
-failing) when `DATABASE_URL` isn't set, so `npm test` stays fast and
-infra-free by default while CI (or you, locally) can opt into the full
-suite by setting `DATABASE_URL` and running `npm run test:integration`.
+Every `tests/integration/*.test.ts` file self-skips (rather than failing)
+when `DATABASE_URL` isn't set, so `npm test` stays fast and infra-free by
+default while CI (or you, locally) can opt into the full suite by setting
+`DATABASE_URL` and running `npm run test:integration`.
+
+The integration suite includes full command-path tests — a real (mocked
+Discord-interaction-object, real database) call through
+`dispatchCommand`/`dispatchButton` → the actual handler → the actual
+repository → Postgres — for every command and the button flow, including
+a fake `DiscordRestClient` (`tests/integration/phase3E2E.test.ts`) that
+tracks its own edited message content, so "does `/cancel-match` actually
+remove the buttons from the live message" is a real assertion, not an
+assumption.
+
+Since the hosting migration, there's a second, even deeper tier:
+`tests/integration/httpInteractionE2E.test.ts` exercises the *entire* HTTP
+Interactions flow — a **real Ed25519 keypair** signs a request exactly the
+way Discord does, `handleDiscordInteraction` verifies it cryptographically
+(`tests/unit/verifyInteraction.test.ts` covers the verification function
+itself in isolation, including tampered-payload and wrong-key rejection),
+sends the deferred ack, dispatches through the real command/button
+handlers, and delivers the real content via the real followup REST call —
+all against a real Postgres database. This is the deepest verification
+possible without live Discord/Vercel network access, which this sandbox
+doesn't have (`discord.com` and `vercel.com` aren't in its egress
+allowlist); a real deploy + a real Discord server is the one step that
+still needs to happen on your end.
 
 What's covered so far, mapped to plan section 60's checklist:
 - ✅ Permission checks (`tests/unit/permissions.test.ts`,
   `tests/unit/checkAdminFromInteraction.test.ts`)
-- ✅ Timezone validation (`tests/unit/timezone.test.ts`)
-- ✅ `server_config` repository upsert semantics — partial updates don't
-  clobber untouched fields (`tests/integration/serverConfigRepository.test.ts`)
-- ⬜ Match state transitions, attendance state changes, reminder
-  scheduling, memory visibility, protected-topic filtering, AI output
-  validation — all depend on tables/features that don't exist until later
-  phases; will be added alongside each phase, not retrofitted at the end
+- ✅ Timezone conversion (`tests/unit/timezone.test.ts`,
+  `tests/unit/dateTime.test.ts` — including DST transitions and leap years)
+- ✅ Match state transitions (`tests/unit/matchLifecycle.test.ts`, every
+  status × both guards)
+- ✅ Attendance state changes — idempotent upsert, per-match scoping, FK
+  cascade (`tests/integration/attendanceRepository.test.ts`); a click
+  rejected on a closed match, and a second click from the same player
+  updating (not duplicating) their response
+  (`tests/integration/phase3E2E.test.ts`)
+- ✅ Protected-topic filtering equivalent: N/A yet (Phase 5+)
+- ✅ `server_config` / `matches` / `attendance` / `reminders` repository
+  semantics, including database-level constraints (unique indexes, FK
+  cascade) (`tests/integration/serverConfigRepository.test.ts`,
+  `tests/integration/matchRepository.test.ts`,
+  `tests/integration/attendanceRepository.test.ts`,
+  `tests/integration/reminderRepository.test.ts`)
+- ✅ Full command-path integration tests for every command and the button
+  flow (`tests/integration/setupCommandE2E.test.ts`,
+  `tests/integration/matchCommandsE2E.test.ts`,
+  `tests/integration/phase3E2E.test.ts`)
+- ✅ HTTP Interactions signature verification and the full real-signature →
+  defer → dispatch → followup flow (`tests/unit/verifyInteraction.test.ts`,
+  `tests/integration/httpInteractionE2E.test.ts`)
+- ✅ Reminder scheduling (plan section 13/60): offset math incl. a DST
+  transition (`tests/unit/reminderScheduling.test.ts`), claim-based
+  duplicate-send prevention under concurrent claims, reconcile idempotency,
+  cancelled-match cleanup (`tests/integration/reminderRepository.test.ts`),
+  and the full cron-tick flow — announcement vs. nudge routing, same-tick
+  multi-offset ordering, a reverted-then-retried failed send
+  (`tests/integration/phase4E2E.test.ts`)
+- ⬜ Memory visibility, protected-topic filtering, AI output validation —
+  depend on tables/features that don't exist until later phases; will be
+  added alongside each phase, not retrofitted at the end
+
+**Phase 4's integration suite was actually run**, not just written: this
+sandbox has no route to Neon, so I installed Postgres locally
+(`apt-get install postgresql`), ran the real `drizzle/` migrations
+against it, and executed all 151 tests for real — that's how the
+same-tick stale-snapshot bug mentioned above got caught before you would
+have hit it, rather than being a theoretical gap in coverage.
 
 ## Roadmap (plan section 59)
 
 - [x] Phase 1 — Discord Foundation
-- [ ] Phase 2 — Match System (`/create-match`, `/edit-match`,
-      `/cancel-match`, match lifecycle)
-- [ ] Phase 3 — Attendance (buttons, public roster message)
-- [ ] Phase 4 — Scheduling (reminders, idempotency, DST handling)
+- [x] Phase 2 — Match System (`/create-match`, `/edit-match`,
+      `/cancel-match`, `/list-matches`, match lifecycle)
+- [x] Phase 3 — Attendance (buttons, public roster message, `/post-match`
+      as a provisional bridge until Phase 4)
+- [x] Phase 4 — Scheduling (reminder reconciliation, claim-based
+      idempotency, DST-safe offset math) — absorbed `/post-match`'s
+      manual trigger into an automatic one (kept as a manual override);
+      runs via external cron (`api/cron/reminders.ts`) since the
+      serverless transport has no persistent scheduler of its own
 - [ ] Phase 5 — Player Profiles (`/add-player`, roles, agents, AI settings,
-      protected topics)
+      protected topics) — should let the roster message show a real "No
+      response" section and a real `X/N` denominator
 - [ ] Phase 6 — Basic AI (CELEBRATE / ROAST / CONSOLE, no memory yet)
 - [ ] Phase 7 — Private AI Conversations (DM flow, follow-ups)
 - [ ] Phase 8 — Memory System

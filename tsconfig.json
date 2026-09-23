@@ -14,11 +14,11 @@
     "resolveJsonModule": true,
     "declaration": false,
     "sourceMap": true,
+    "baseUrl": ".",
     "paths": {
-      "~/*": ["./src/*"],
-      "@/*": ["./src/*"]
+      "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "include": ["src/**/*.ts", "tests/**/*.ts", "api/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

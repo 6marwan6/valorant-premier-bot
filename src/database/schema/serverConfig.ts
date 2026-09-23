@@ -24,8 +24,10 @@ export const serverConfig = pgTable("server_config", {
 
   // Plan section 3: "Use Europe/frankfurt as the team's default timezone."
   // "Europe/Frankfurt" is not a valid IANA zone — see README for the flagged
-  // discrepancy. We default to the closest valid equivalent, Europe/Berlin.
-  timezone: text("timezone").notNull().default("Europe/Berlin"),
+  // discrepancy (now resolved). Defaults to Africa/Cairo, per plan section
+  // 11's own worked example and the team being Cairo-based; override via
+  // /setup for a different deployment.
+  timezone: text("timezone").notNull().default("Africa/Cairo"),
 
   matchChannelId: text("match_channel_id"),
   adminRoleId: text("admin_role_id"),

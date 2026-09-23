@@ -1,12 +1,14 @@
 import "dotenv/config";
 import { defineConfig } from "drizzle-kit";
 
-// Points at the individual schema files, excluding ./index.ts, because
-// drizzle-kit's CJS-based config loader can't follow the ".js"-suffixed
-// relative imports our ESM runtime code uses inside index.ts's re-exports.
-// Add new schema files to this glob as they're created in later phases.
+// Add new schema files to this array as they're created in later phases.
 export default defineConfig({
-  schema: "./src/database/schema/serverConfig.ts",
+  schema: [
+    "./src/database/schema/serverConfig.ts",
+    "./src/database/schema/matches.ts",
+    "./src/database/schema/attendance.ts",
+    "./src/database/schema/reminders.ts",
+  ],
   out: "./drizzle",
   dialect: "postgresql",
   dbCredentials: {

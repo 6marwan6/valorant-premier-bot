@@ -1,5 +1,10 @@
 import type { Command } from "./types.js";
 import setupCommand from "./setup.js";
+import createMatchCommand from "./createMatch.js";
+import editMatchCommand from "./editMatch.js";
+import cancelMatchCommand from "./cancelMatch.js";
+import listMatchesCommand from "./listMatches.js";
+import postMatchCommand from "./postMatch.js";
 
 /**
  * Central command registry. Every command file exports a default `Command`
@@ -8,11 +13,20 @@ import setupCommand from "./setup.js";
  *   - src/discord/interactions/dispatchCommand.ts (routes incoming
  *     ChatInputCommandInteractions to the right handler)
  *
- * Phase 1 only ships /setup. Later phases append commands here as they're
- * built (plan section 41: /add-player, /create-match, /complete-match, ...
- * and section 42: /profile, /memories, /ai-settings).
+ * Phase 1: /setup. Phase 2 (plan section 59): the match commands. Phase 3:
+ * /post-match (provisional — see its own file doc) + attendance buttons
+ * (handled via dispatchButton.ts, not the command registry). Later phases
+ * append commands here as they're built (plan section 41: /add-player,
+ * /complete-match, ... and section 42: /profile, /memories, /ai-settings).
  */
-export const commands: Command[] = [setupCommand];
+export const commands: Command[] = [
+  setupCommand,
+  createMatchCommand,
+  editMatchCommand,
+  cancelMatchCommand,
+  listMatchesCommand,
+  postMatchCommand,
+];
 
 export const commandsByName: Map<string, Command> = new Map(
   commands.map((command) => [command.data.name, command]),

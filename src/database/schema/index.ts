@@ -1,10 +1,11 @@
-// Phase 1 only defines server_config. Later phases add (per plan section 7):
+// Phase 1 defined server_config; matches/attendance/reminders (Phases 2-4)
+// are implemented below. Still to come (per plan section 7):
 //   players.ts        (plan section 8)
-//   matches.ts         (plan section 11-12)
-//   attendance.ts       (plan section 15)
-//   reminders.ts         (plan section 13)
 //   memories.ts           (plan section 23)
 //   memoryEvidence.ts       (plan section 25)
 //   aiConversations.ts       (plan section 29)
 //   matchEvents.ts             (plan section 40)
 export * from "./serverConfig.js";
+export * from "./matches.js";
+export * from "./attendance.js";
+export * from "./reminders.js";

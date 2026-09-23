@@ -5,8 +5,29 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1789675964871,
-      "tag": "0000_outstanding_monster_badoon",
+      "when": 1789700588554,
+      "tag": "0000_fast_night_thrasher",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789700657948,
+      "tag": "0001_add_matches",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789718923317,
+      "tag": "0002_add_attendance_and_announcement_cols",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790133357321,
+      "tag": "0003_add_reminders",
       "breakpoints": true
     }
   ]

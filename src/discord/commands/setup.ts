@@ -38,7 +38,7 @@ const data = new SlashCommandBuilder()
   .addStringOption((opt) =>
     opt
       .setName("timezone")
-      .setDescription('IANA timezone, e.g. "Europe/Berlin" (plan default; see README)')
+      .setDescription('IANA timezone, e.g. "Africa/Cairo" (default; see README)')
       .setRequired(false),
   )
   .addIntegerOption((opt) =>

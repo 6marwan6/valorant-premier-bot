@@ -48,7 +48,7 @@ describeIfDb("ServerConfigRepository (integration)", () => {
     expect(created.guildId).toBe(guildId);
     expect(created.matchChannelId).toBe("channel-1");
     // Defaults from the schema (plan section 3 / 53), not passed explicitly.
-    expect(created.timezone).toBe("Europe/Berlin");
+    expect(created.timezone).toBe("Africa/Cairo");
     expect(created.reminderScheduleMinutes).toEqual([180, 60, 15]);
     expect(created.defaultRoastIntensity).toBe(50);
     expect(created.adminRoleId).toBeNull();

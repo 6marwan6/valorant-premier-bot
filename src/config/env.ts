@@ -15,15 +15,37 @@ export const envSchema = z.object({
   DISCORD_BOT_TOKEN: z.string().min(1, "DISCORD_BOT_TOKEN is required"),
   DISCORD_CLIENT_ID: z.string().min(1, "DISCORD_CLIENT_ID is required"),
   DISCORD_GUILD_ID: z.string().min(1, "DISCORD_GUILD_ID is required"),
+  // Required for verifying HTTP Interactions requests (see
+  // discord/verifyInteraction.ts) — distinct from DISCORD_BOT_TOKEN.
+  // Serverless hosting (Vercel functions) uses Discord's HTTP Interactions
+  // model instead of a persistent gateway connection, per the project's
+  // hosting decision — see README "Hosting & Deployment".
+  DISCORD_PUBLIC_KEY: z.string().min(1, "DISCORD_PUBLIC_KEY is required"),
 
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+
+  // Phase 4 (plan section 13/59): shared secret the external cron
+  // scheduler (cron-job.org / Upstash QStash) sends as
+  // `Authorization: Bearer <CRON_SECRET>` — see
+  // services/scheduling/cronAuth.ts and api/cron/reminders.ts. Optional
+  // at the schema level only so existing Phase 1-3 deployments (and
+  // tests) that don't touch cron endpoints don't need to set it; the cron
+  // endpoint itself refuses every request when it's unset (fails closed,
+  // not open).
+  CRON_SECRET: z.string().optional(),
 
   // Not required in Phase 1 (plan: Phase 6 is the first phase that needs AI).
   LLM_API_KEY: z.string().optional(),
 
   // Bootstrap-only fallbacks — see database/schema/serverConfig.ts for the
   // authoritative, per-guild, DB-backed configuration.
-  DEFAULT_TIMEZONE: z.string().default("Europe/Berlin"),
+  //
+  // Plan section 3 says "Europe/frankfurt", which isn't a valid IANA zone
+  // (see README's "flagged discrepancy" section, now resolved) — defaults
+  // to Africa/Cairo instead, per plan section 11's own worked example and
+  // the team being Cairo-based. Override via /setup or this env var if
+  // that's wrong for your deployment.
+  DEFAULT_TIMEZONE: z.string().default("Africa/Cairo"),
   MATCH_CHANNEL_ID: z.string().optional(),
   ADMIN_ROLE_ID: z.string().optional(),
 

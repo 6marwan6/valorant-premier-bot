@@ -21,6 +21,19 @@ export class ServerConfigRepository {
   }
 
   /**
+   * Every configured guild's row — used by the reminders cron job
+   * (services/scheduling/reminderCronJob.ts) to know which guild(s) to
+   * reconcile reminders for and which reminder_schedule_minutes to apply.
+   * V1 is single-server (plan section 54), so in practice this returns
+   * zero or one row; looping over "every configured guild" rather than
+   * hardcoding a single guild id is just the natural shape of iterating
+   * this table, not a multi-tenancy abstraction.
+   */
+  async listAll(): Promise<ServerConfigRow[]> {
+    return this.db.select().from(serverConfig);
+  }
+
+  /**
    * Creates the config row on first /setup, or updates the existing one on
    * subsequent runs. Only fields explicitly passed are changed — undefined
    * fields keep their current (or default) value. This keeps /setup safe to
