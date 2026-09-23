@@ -30,6 +30,10 @@ export async function dispatchCommand(
   }
 
   const startedAt = Date.now();
+  ctx.logger.info(
+    { event: "command.started", commandName: interaction.commandName, guildId: interaction.guildId },
+    "Command dispatch starting",
+  );
   try {
     await command.execute(interaction, ctx);
     ctx.logger.info(
