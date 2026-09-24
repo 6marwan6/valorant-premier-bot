@@ -5,7 +5,12 @@ Private Discord bot for a 6–7 person Valorant Premier team. See
 the single source of truth for scope and behavior; this README only covers
 how to run what's built so far and the decisions made while building it.
 
-## Status: Phase 5 — Player Profiles ✅ (Phases 1–4 also complete)
+## Status: Phase 7 — Private AI Conversations ✅ (Phases 1–6 also complete)
+
+Jump to [Phase 7 — private conversations](#phase-7--private-ai-conversations-what-was-built-and-the-choices-made)
+for the newest work. The Phase 5 notes below are kept as they were.
+
+### Phase 5 — Player Profiles (previous status header)
 
 Per plan section 59, Phase 5 scope is: `/add-player`, `/edit-player`,
 roles, agents, AI settings, protected topics. Section 41 groups
@@ -221,6 +226,137 @@ covers create/read/partial-update/soft-delete/reactivate/uniqueness for
 real. **180 tests passing** (up from 151 in Phase 4): 114 unit, 66
 integration.
 
+### Phase 6 — Basic AI (summary of what the code does)
+
+Attendance click → `modeForStatus` (PLAYING → CELEBRATE, CANNOT_PLAY → ROAST,
+WANTS_TO_BUT_CANNOT → CONSOLE) → `buildAIContext` (player profile, match,
+attendance response, AI settings; protected topics as FORBIDDEN) → an
+OpenAI-compatible `LlmClient` → `parseAiOutput` (JSON validation, mention
+neutralization, protected-topic check on the *output*) → one private
+(ephemeral) followup. Every failure resolves to the plan section 48 fallback
+and never affects attendance.
+
+### Amendment to plan sections 17/19/61: attendance reactions are public
+
+Decided after Phase 7: roasts and hype only work if the team sees them, so
+`PLAYING` (CELEBRATE) and `CANNOT_PLAY` (ROAST) are now posted in the match
+channel, @mentioning the player (`allowed_mentions` limits pings to that one
+user). `WANTS_TO_BUT_CANNOT` posts only a fixed "can't make it this time 🟡"
+line — no AI text, no reason, no roast — and the *why* stays in the private
+DM. If the AI fails, the safe fallback goes to the player privately, never
+into the channel. Not built: letting a player allow a public roast from
+inside the DM chat (needs Phase 8's consent/memory flow), and any
+one-public-message-per-player-per-match limit (flipping answers posts again).
+
+### Phase 7 — Private AI Conversations: what was built and the choices made
+
+Plan section 59 scope: *Discord DM, conversation state, follow-up questions,
+CONSOLE conversation flow.* Section 20 says CONSOLE is the mode that talks
+back ("What happened?" … "The player can respond naturally"), and section
+61's example shows exactly this: opener in a DM, the player answers, the AI
+continues. So:
+
+- **CONSOLE (`WANTS_TO_BUT_CANNOT`) is now a real DM conversation.** The
+  button click only gets a short private pointer ("I sent you a DM").
+- **CELEBRATE and ROAST are unchanged** — single private messages (sections
+  18/19; nothing in the plan gives them a back-and-forth).
+- **Memory is still Phase 8.** `memory_candidate` is accepted and discarded
+  exactly like Phase 6, and the prompt forbids the model from offering to
+  "remember" anything. The `[Remember]/[Don't Remember]` buttons from
+  section 61's example belong to Phase 8 (section 21), so they aren't here.
+
+**The ordering tension (same style as the Phase 3 notes above): a typed DM
+reply can't reach an HTTP-Interactions app.** Discord only pushes
+*interactions* to the endpoint; an ordinary message typed into a DM is
+delivered via the gateway, which the serverless hosting choice rules out
+(README "Hosting & Deployment"; plan sections 4/6). Two paths therefore feed
+the same `ConversationService.handlePlayerReply`:
+
+1. **💬 Reply button → modal** (instant, needs no setup). Every bot DM that
+   expects an answer carries a Reply button; its modal submit *is* an
+   interaction. The reply is echoed back as a quote above the bot's answer
+   (text entered in a modal never appears in the chat by itself), and the
+   answered message's button is removed.
+2. **Typed replies, via an optional cron poll** (`api/cron/dm-replies.ts`) —
+   the same cron-polling design already decided for Phase 8. Not instant, and
+   only works once you schedule it. A burst of typed messages is joined into
+   one turn.
+
+Both are idempotent against retries *and against each other* — see below.
+
+**Data (plan section 29)** — migration `0005_add_ai_conversations.sql`:
+`ai_conversations` (id, player_id, match_id, mode, started_at, ended_at, plus
+`guild_id`, `end_reason`, `dm_channel_id`, `last_seen_message_id`,
+`last_activity_at`) and `ai_messages` (id, conversation_id, role, content,
+created_at, plus `source_ref`). Departures from section 29's literal field
+list are only what the DM transport and idempotency need. Roles are the
+plan's USER / ASSISTANT / SYSTEM (Phase 7 writes the first two).
+
+**Conversation rules, all enforced by the backend (section 37), never by the
+model:**
+
+| Rule | Where |
+|---|---|
+| One open conversation per player per match | partial unique index — a double-tapped button can't open two (section 50) |
+| One processing per player message | unique `(conversation_id, source_ref)` — `interaction:<id>` or `message:<id>`; storing the player's message *is* the claim |
+| Max 5 player messages, then wrap up | `MAX_PLAYER_TURNS`; the model's `should_follow_up` is one input, not the decision |
+| Ends when the player changes their answer | `ATTENDANCE_CHANGED` (a conversation that already matches the *new* answer survives, which is what makes a double-click harmless) |
+| Ends when the match is cancelled/started/completed | `MATCH_CLOSED` |
+| Ends after 12 h idle | `IDLE_TIMEOUT` (`CONVERSATION_IDLE_TIMEOUT_MS`) |
+| Only the conversation's own player can post into it | ownership check (section 44 rule 3); a wrong or missing id gets the same answer |
+| Respects "AI follow-ups" (section 9) | off → the player gets Phase 6's single message instead of a DM; turning it off mid-conversation ends it |
+| Respects "Personal references" | on/off changes how the prompt tells the model to treat what the player shares |
+
+**Failure handling (sections 48/49/66 #8):**
+
+- DMs closed / Discord error → conversation ends `DM_UNAVAILABLE`, the player
+  gets the single ephemeral message plus a one-line note. Attendance untouched.
+- LLM down at the *start* → the conversation still opens, using section 20's
+  own opener wording. LLM down or output rejected *mid*-conversation → a
+  short safe wrap-up and the conversation ends (`AI_FAILURE`).
+- A reply that fails to deliver leaves the Reply button in place and the
+  transcript unchanged (assistant messages are stored only after Discord
+  confirms delivery), so the player can just try again.
+
+**Privacy (sections 44, 51, 55, 56):** conversations live only in the
+database and the player's DM; nothing personal is ever written to the public
+channel. The transcript goes into the prompt inside `<application_data>` as
+untrusted data, sanitized like every other field; the CONSOLE conversation
+has its own rule block rather than reusing Phase 6's shared rules. Logs carry
+metadata only (ids, turn kind, latency, tokens, `memoryCount: 0`) — a test
+asserts neither the player's nor the model's text ever appears in them.
+
+**Modal detail:** text inputs are wrapped in a `Label` component, because
+Discord deprecated action-row-wrapped inputs in modals; the submit parser
+accepts both shapes.
+
+**No new slash commands and no new env vars.** After deploying: run
+`npm run db:migrate`. To enable typed replies, add a second external cron job
+(same header as the reminders job): `GET https://<deployment>/api/cron/dm-replies`
+every 1–5 minutes. Cost note: unlike the reminders tick, this one is only
+worth its database wake-up while conversations are open, so if you don't care
+about typed replies, don't schedule it — the Reply button never needs it.
+
+**Not verified from this sandbox** (no route to Discord): that Discord
+delivers component and modal interactions from a *bot DM* to the Interactions
+Endpoint the way it does for guild messages (this is Discord's documented
+behavior for apps that DM users they share a server with), and the exact
+2000-char/45-char limits are taken from Discord's docs/types rather than a
+live call. Both are worth one manual pass in your test server: click "Want to
+play, but can't", tap **Reply**, answer, and type one message with the poll
+scheduled.
+
+**329 tests passing** (up from 180 at the end of Phase 5's notes): 223 unit,
+106 integration against a real Postgres. Three things worth knowing the tests
+pin down: (1) a double-tapped button must not end the conversation its twin
+just opened (mode-aware `endForAttendanceChange`); (2) the poller must never
+move its cursor past a message it hasn't read, or anything the player types
+while the model is thinking is silently lost — both were mutation-checked
+(deliberately breaking the code makes the tests fail); (3) one Phase 6 test
+(`aiContextBuilder.test.ts`) was already failing before this phase because it
+still asserted CONSOLE prompt wording that had since been edited; it now
+asserts what the code actually guarantees.
+
 ### Two decisions locked in for later phases
 
 Neither of these is Phase 4 work — both came up while scoping the cron
@@ -405,7 +541,8 @@ Matches plan section 7, plus a top-level `api/` for the Vercel functions
 api/
 ├── interactions.ts   # Vercel function — the Discord Interactions Endpoint URL
 └── cron/
-    └── reminders.ts  # Vercel function — external-cron entry point (Phase 4)
+    ├── reminders.ts    # Vercel function — external-cron entry point (Phase 4)
+    └── dm-replies.ts   # Vercel function — optional typed-DM-reply poller (Phase 7)
 
 src/
 ├── discord/
@@ -413,16 +550,19 @@ src/
 │   ├── interactions/  # dispatchCommand, dispatchButton
 │   ├── discordRest.ts, verifyInteraction.ts, httpInteractionAdapter.ts, handleDiscordInteraction.ts
 │   ├── permissions.ts, commandGuards.ts, displayName.ts, announcementSync.ts, timezone.ts
+│   ├── consoleConversation.ts   # Phase 7: DM opener, Reply modal, reply delivery
 ├── modules/
 │   ├── matches/     # matchService, matchLifecycle, dateTime
 │   ├── attendance/  # attendanceService, rosterMessage, customId
 │   ├── reminders/   # reminderScheduling (pure planning), reminderMessages (nudge text)
 │   ├── players/     # playerValidation (agent/topic parsing, role choices) — Phase 5
-│   └── {ai,memories}/   # empty until their phase
-├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders, players
+│   ├── ai/          # aiService, aiContextBuilder, aiOutput, aiMode (Phase 6); conversationService, conversationContextBuilder, conversationCustomId (Phase 7)
+│   └── memories/    # empty until Phase 8
+├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders, players, aiConversations
 ├── services/
-│   ├── scheduling/   # cronAuth, reminderCronJob — the Phase 4 orchestration layer
-│   └── {discord,ai,retrieval}/   # empty until their phase
+│   ├── scheduling/   # cronAuth, reminderCronJob (Phase 4), dmReplyPollJob (Phase 7)
+│   ├── ai/           # llmClient (Phase 6)
+│   └── {discord,retrieval}/   # empty until their phase
 ├── scripts/          # deployCommands, validateCommands
 └── config/           # env.ts, logger.ts
 ```
@@ -497,9 +637,9 @@ minutes-apart reminders — so an **external** scheduler drives
 Mirrors plan section 60's split between unit and integration tests:
 
 ```bash
-npm test               # unit tests only — no infrastructure needed (114 tests)
+npm test               # unit tests only — no infrastructure needed (223 tests)
 npm run test:integration  # requires DATABASE_URL pointing at a disposable
-                           # Postgres with migrations applied (66 tests)
+                           # Postgres with migrations applied (106 tests)
 ```
 
 Every `tests/integration/*.test.ts` file self-skips (rather than failing)
@@ -607,8 +747,9 @@ have hit it, rather than being a theoretical gap in coverage.
       `/remove-player`, `/player`; roles, agents, AI settings, protected
       topics) — also resolved the two Phase 3 roster-message ordering
       tensions (real "No response" section, real `Confirmed: X/Y`)
-- [ ] Phase 6 — Basic AI (CELEBRATE / ROAST / CONSOLE, no memory yet)
-- [ ] Phase 7 — Private AI Conversations (DM flow, follow-ups)
+- [x] Phase 6 — Basic AI (CELEBRATE / ROAST / CONSOLE, no memory yet)
+- [x] Phase 7 — Private AI Conversations (CONSOLE DM flow: Reply-button modal +
+      optional typed-reply poller, follow-ups, turn/idle/match-state limits)
 - [ ] Phase 8 — Memory System
 - [ ] Phase 9 — Retrieval (structured + semantic + privacy filtering)
 - [ ] Phase 10 — Match Hype / Recaps

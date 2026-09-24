@@ -51,8 +51,8 @@ describe("buildAIContext", () => {
   it("never roasts in CONSOLE mode, even at maximum intensity (plan sections 20/31)", () => {
     const ctx = buildAIContext({ player: makePlayer({ roastIntensity: 100 }), mode: "CONSOLE", match: makeMatch() });
     expect(ctx.user).toContain("Teasing level for this message: NONE");
-    expect(ctx.system).toContain("No roasting");
-    expect(ctx.system).toContain("Do not ask any questions");
+    expect(ctx.user).toContain("No roasting at all");
+    expect(ctx.system).toContain("MODE: CONSOLE.");
   });
 
   it("omits role/agents when Valorant references are disabled", () => {

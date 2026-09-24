@@ -9,6 +9,7 @@ export default defineConfig({
     "./src/database/schema/attendance.ts",
     "./src/database/schema/reminders.ts",
     "./src/database/schema/players.ts",
+    "./src/database/schema/aiConversations.ts",
   ],
   out: "./drizzle",
   dialect: "postgresql",

@@ -6,10 +6,12 @@ import { MatchRepository } from "./database/repositories/matchRepository.js";
 import { AttendanceRepository } from "./database/repositories/attendanceRepository.js";
 import { ReminderRepository } from "./database/repositories/reminderRepository.js";
 import { PlayerRepository } from "./database/repositories/playerRepository.js";
+import { AiConversationRepository } from "./database/repositories/aiConversationRepository.js";
 import { MatchService } from "./modules/matches/matchService.js";
 import { AttendanceService } from "./modules/attendance/attendanceService.js";
 import { DiscordRestClient } from "./discord/discordRest.js";
 import { AiService } from "./modules/ai/aiService.js";
+import { ConversationService } from "./modules/ai/conversationService.js";
 import { createLlmClient, type LlmClient } from "./services/ai/llmClient.js";
 
 /**
@@ -24,8 +26,8 @@ import { createLlmClient, type LlmClient } from "./services/ai/llmClient.js";
  * functions), which can't hold a WebSocket open between invocations, so
  * all outbound Discord calls go through REST instead.
  *
- * Grows over time: Phase 5 adds a PlayerRepository (below); later phases
- * add their own (plan section 7 `database/repositories/`).
+ * Grows over time: Phase 5 adds a PlayerRepository (below), Phase 7 the
+ * conversation repository/service; later phases add their own (plan section 7 `database/repositories/`).
  */
 export interface AppContext {
   discord: DiscordRestClient;
@@ -38,11 +40,13 @@ export interface AppContext {
     attendance: AttendanceRepository;
     reminders: ReminderRepository;
     players: PlayerRepository;
+    aiConversations: AiConversationRepository;
   };
   services: {
     matches: MatchService;
     attendance: AttendanceService;
     ai: AiService;
+    conversations: ConversationService;
   };
 }
 
@@ -59,8 +63,10 @@ export function buildAppContext(params: {
   const attendanceRepo = new AttendanceRepository(params.db);
   const reminderRepo = new ReminderRepository(params.db);
   const playerRepo = new PlayerRepository(params.db);
+  const aiConversationRepo = new AiConversationRepository(params.db);
   const { llm: llmOverride, ...contextParams } = params;
   const llm = llmOverride !== undefined ? llmOverride : createLlmClient(params.env, params.logger);
+  const aiService = new AiService(llm, params.logger);
   return {
     ...contextParams,
     repositories: {
@@ -69,11 +75,13 @@ export function buildAppContext(params: {
       attendance: attendanceRepo,
       reminders: reminderRepo,
       players: playerRepo,
+      aiConversations: aiConversationRepo,
     },
     services: {
       matches: new MatchService(matchRepo, serverConfigRepo),
       attendance: new AttendanceService(matchRepo, attendanceRepo, serverConfigRepo),
-      ai: new AiService(llm, params.logger),
+      ai: aiService,
+      conversations: new ConversationService(aiConversationRepo, playerRepo, matchRepo, aiService),
     },
   };
 }

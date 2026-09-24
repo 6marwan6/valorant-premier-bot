@@ -6,6 +6,9 @@
     },
     "api/cron/reminders.ts": {
       "maxDuration": 30
+    },
+    "api/cron/dm-replies.ts": {
+      "maxDuration": 30
     }
   }
 }

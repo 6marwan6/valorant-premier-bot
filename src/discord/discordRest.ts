@@ -8,6 +8,13 @@ export function createDiscordRest(botToken: string): DiscordRest {
   return new REST({ version: "10" }).setToken(botToken);
 }
 
+/** The subset of a Discord message the DM poller reads. */
+export interface DiscordChannelMessage {
+  id: string;
+  content: string;
+  author: { id: string; bot?: boolean };
+}
+
 export interface ReplyPayload {
   content: string;
   components?: ActionRowBuilder<ButtonBuilder>[];
@@ -37,6 +44,62 @@ export class DiscordRestClient {
   async sendChannelMessage(channelId: string, payload: ReplyPayload): Promise<{ id: string }> {
     return (await this.rest.post(Routes.channelMessages(channelId), {
       body: { content: payload.content, components: serializeComponents(payload.components) },
+    })) as { id: string };
+  }
+
+  /**
+   * Opens (or fetches — Discord returns the existing one) the DM channel
+   * between the bot and a user. Phase 7: private conversations (plan
+   * section 59). Fails with Discord error 50007 when the user doesn't
+   * accept DMs from this bot; callers treat any failure as "can't DM".
+   */
+  async createDmChannel(userId: string): Promise<{ id: string }> {
+    return (await this.rest.post(Routes.userChannels(), { body: { recipient_id: userId } })) as { id: string };
+  }
+
+  /**
+   * Sends a message into a DM channel. Unlike `sendChannelMessage` this
+   * always sets `allowed_mentions: { parse: [] }` — the text includes
+   * player- and model-written content, and nothing in a private DM should
+   * ever be able to ping anyone (aiOutput.ts neutralizes mentions too; this
+   * is the second layer).
+   */
+  async sendDirectMessage(channelId: string, payload: ReplyPayload): Promise<{ id: string }> {
+    return (await this.rest.post(Routes.channelMessages(channelId), {
+      body: {
+        content: payload.content,
+        components: serializeComponents(payload.components),
+        allowed_mentions: { parse: [] },
+      },
+    })) as { id: string };
+  }
+
+  /**
+   * Reads messages from a channel, oldest first, optionally only those
+   * after a given message id. Works from a stateless function (no gateway),
+   * which is what lets the DM poller pick up typed replies. Message content
+   * in DMs with the bot is readable without the privileged Message Content
+   * intent.
+   */
+  async listChannelMessages(
+    channelId: string,
+    options: { after?: string | null; limit?: number } = {},
+  ): Promise<DiscordChannelMessage[]> {
+    const query = new URLSearchParams({ limit: String(options.limit ?? 50) });
+    if (options.after) query.set("after", options.after);
+    const raw = (await this.rest.get(Routes.channelMessages(channelId), { query })) as DiscordChannelMessage[];
+    // Discord's ordering with `after` isn't something to lean on; sort by snowflake.
+    return [...raw].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0));
+  }
+
+  /**
+   * Public message that @mentions exactly one user (attendance reactions).
+   * `allowed_mentions` restricts pings to that user, so nothing else in the
+   * text — model-written or otherwise — can ping anyone.
+   */
+  async sendMentionMessage(channelId: string, content: string, mentionUserId: string): Promise<{ id: string }> {
+    return (await this.rest.post(Routes.channelMessages(channelId), {
+      body: { content: `<@${mentionUserId}> ${content}`, allowed_mentions: { parse: [], users: [mentionUserId] } },
     })) as { id: string };
   }
 

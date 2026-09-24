@@ -3,19 +3,27 @@ import type { AppContext } from "../../appContext.js";
 import { parseAttendanceCustomId } from "../../modules/attendance/customId.js";
 import { buildRosterMessage } from "../../modules/attendance/rosterMessage.js";
 import { resolveDisplayName } from "../displayName.js";
+import { startConsoleDm } from "../consoleConversation.js";
 import type { MatchRow } from "../../database/schema/matches.js";
 import type { PlayerRow } from "../../database/schema/players.js";
 import type { AttendanceRow } from "../../database/schema/attendance.js";
 
 /**
- * Plan section 15 step 6 / section 17: "Start the corresponding AI flow"
- * — Phase 6 delivers it as a private (ephemeral) followup; real DMs are
- * Phase 7. Runs strictly AFTER the attendance write and public roster
- * update have succeeded, and is fully isolated: nothing in here can turn
- * a recorded response into a "something went wrong" message (plan
- * sections 48 and 66 #8). Skipped when the AI isn't configured, when the
- * click didn't change anything (idempotency, section 50), or when the
- * clicker has no active player profile.
+ * Plan section 15 step 6 / section 17 — amended: reactions are PUBLIC.
+ *
+ * - PLAYING (CELEBRATE) / CANNOT_PLAY (ROAST): the AI message is posted in
+ *   the match channel, @mentioning the player.
+ * - WANTS_TO_BUT_CANNOT (CONSOLE): the public channel only gets a fixed,
+ *   non-roasting "can't make it" line (no AI text, no reason). The
+ *   conversation about why happens in a private DM (Phase 7); the click gets
+ *   an ephemeral pointer to it. If no DM is possible (AI follow-ups off,
+ *   closed DMs) the player gets Phase 6's single ephemeral message instead.
+ * - If the AI fails, the safe fallback goes to the player privately, never
+ *   into the channel.
+ *
+ * Runs strictly AFTER the attendance write and roster update, fully isolated
+ * (plan sections 48, 66 #8). Skipped when the AI isn't configured, on an
+ * unchanged click (section 50), or without an active player profile.
  */
 async function sendAiFollowUp(
   interaction: ButtonInteraction,
@@ -25,14 +33,41 @@ async function sendAiFollowUp(
   if (!params.changed || !ctx.services.ai.enabled) return;
   const player = params.roster.find((p) => p.discordUserId === interaction.user.id);
   if (!player) return;
+  const channelId = params.match.announcementChannelId;
 
   try {
+    await ctx.services.conversations.endForAttendanceChange(player.id, params.match.id, params.status);
+
+    let dmFailed = false;
+    if (params.status === "WANTS_TO_BUT_CANNOT") {
+      const started = await startConsoleDm(ctx, { player, match: params.match });
+      if (started === "already_open") return;
+      if (channelId) {
+        await ctx.discord.sendMentionMessage(channelId, "can't make it this time 🟡", player.discordUserId);
+      }
+      if (started === "started") {
+        await interaction.followUp({ content: "📩 I sent you a DM — let's talk there.", ephemeral: true });
+        return;
+      }
+      dmFailed = started === "dm_failed";
+      // "unavailable" / "dm_failed": fall through to the private single message.
+    }
+
     const outcome = await ctx.services.ai.respondToAttendance({
       player,
       match: params.match,
       status: params.status,
     });
-    await interaction.followUp({ content: outcome.text, ephemeral: true });
+
+    if (params.status !== "WANTS_TO_BUT_CANNOT" && outcome.source === "ai" && channelId) {
+      await ctx.discord.sendMentionMessage(channelId, outcome.text, player.discordUserId);
+      return;
+    }
+
+    const note = dmFailed
+      ? "\n\n_(I tried to DM you but couldn't — allow DMs from server members if you'd like to chat.)_"
+      : "";
+    await interaction.followUp({ content: `${outcome.text}${note}`, ephemeral: true });
   } catch (err) {
     ctx.logger.error(
       {

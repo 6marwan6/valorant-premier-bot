@@ -28,6 +28,12 @@ export type PlayerProfileFields = Pick<
 export class PlayerRepository {
   constructor(private readonly db: Database) {}
 
+  /** By primary key — used by the DM conversation flow (Phase 7), which only has a `player_id` from `ai_conversations`. */
+  async getById(id: number): Promise<PlayerRow | undefined> {
+    const rows = await this.db.select().from(players).where(eq(players.id, id)).limit(1);
+    return rows[0];
+  }
+
   async getByDiscordUserId(guildId: string, discordUserId: string): Promise<PlayerRow | undefined> {
     const rows = await this.db
       .select()

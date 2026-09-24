@@ -9,6 +9,16 @@ import { verifyDiscordRequest } from "./verifyInteraction.js";
 import { buildCommandInteractionAdapter, buildButtonInteractionAdapter } from "./httpInteractionAdapter.js";
 import { dispatchCommand } from "./interactions/dispatchCommand.js";
 import { dispatchButton } from "./interactions/dispatchButton.js";
+import {
+  handleConsoleReplyModal,
+  buildReplyModal,
+  unrecognizedReplyButtonResponse,
+} from "./consoleConversation.js";
+import {
+  isConsoleModalCustomId,
+  isConsoleReplyCustomId,
+  parseConsoleReplyCustomId,
+} from "../modules/ai/conversationCustomId.js";
 
 /**
  * The whole request/response cycle for Discord's HTTP Interactions model,
@@ -90,6 +100,17 @@ export async function handleDiscordInteraction(params: {
   }
 
   if (interaction.type === InteractionType.MessageComponent) {
+    // Phase 7: the "💬 Reply" button under a private DM. Opening a modal
+    // has to be the interaction's very first response (it can't follow a
+    // defer), so this is answered here, before any ctx/database work — the
+    // conversation id is carried in the custom_id and only checked once the
+    // modal is *submitted*.
+    if (isConsoleReplyCustomId(interaction.data.custom_id)) {
+      const conversationId = parseConsoleReplyCustomId(interaction.data.custom_id);
+      params.sendInitialResponse(200, conversationId === null ? unrecognizedReplyButtonResponse() : buildReplyModal(conversationId));
+      return;
+    }
+
     const ctx = params.buildCtx();
     // Deferred as an update to the message the button lives on (the
     // public roster) — see rosterMessage.ts / dispatchButton.ts for why
@@ -101,6 +122,16 @@ export async function handleDiscordInteraction(params: {
     return;
   }
 
-  // Autocomplete, modal submit, etc. — none exist in this app yet.
+  if (interaction.type === InteractionType.ModalSubmit && isConsoleModalCustomId(interaction.data.custom_id)) {
+    const ctx = params.buildCtx();
+    // The modal was opened from a button on the bot's DM message, so a
+    // deferred *update* is valid and lets the handler edit that message
+    // (removing its now-answered Reply button) via @original.
+    params.sendInitialResponse(200, { type: InteractionResponseType.DeferredMessageUpdate });
+    await handleConsoleReplyModal(interaction, ctx);
+    return;
+  }
+
+  // Autocomplete, other modals, etc. — none exist in this app.
   params.sendInitialResponse(400, { error: "unsupported interaction type" });
 }
