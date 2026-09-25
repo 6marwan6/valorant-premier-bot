@@ -6,6 +6,7 @@ import {
   type AiConversationEndReason,
   type AiConversationRow,
   type AiMessageRow,
+  type MemoryCandidateStatus,
 } from "../schema/aiConversations.js";
 
 export interface OpenConversationInput {
@@ -155,6 +156,8 @@ export class AiConversationRepository {
     role: AiMessageRow["role"];
     content: string;
     sourceRef?: string;
+    /** Phase 8: a proposed memory riding on this (always ASSISTANT) message — see aiConversations.ts's schema doc. */
+    memoryCandidate?: { type: string; content: string };
   }): Promise<AiMessageRow | null> {
     const [row] = await this.db
       .insert(aiMessages)
@@ -163,6 +166,10 @@ export class AiConversationRepository {
         role: input.role,
         content: input.content,
         sourceRef: input.sourceRef ?? null,
+        memoryCandidate: input.memoryCandidate ?? null,
+        // Set together with the candidate itself — never PENDING without a
+        // candidate, never a candidate stuck permanently un-decidable.
+        memoryCandidateStatus: input.memoryCandidate ? "PENDING" : null,
       })
       .onConflictDoNothing({ target: [aiMessages.conversationId, aiMessages.sourceRef] })
       .returning();
@@ -175,5 +182,28 @@ export class AiConversationRepository {
       .from(aiMessages)
       .where(eq(aiMessages.conversationId, conversationId))
       .orderBy(asc(aiMessages.id));
+  }
+
+  async getMessageById(id: number): Promise<AiMessageRow | undefined> {
+    const rows = await this.db.select().from(aiMessages).where(eq(aiMessages.id, id)).limit(1);
+    return rows[0];
+  }
+
+  /**
+   * Resolves a pending memory candidate exactly once — plan section 50
+   * ("duplicate AI interaction processing"), same claim-then-act shape as
+   * `reminders.status` (PENDING -> CLAIMED/SENT). The single
+   * `UPDATE ... WHERE memory_candidate_status = 'PENDING'` is the entire
+   * guard: a double-tapped Remember/Don't Remember button can only ever
+   * win this race once, and the loser gets back the already-decided row
+   * (`memoryDecision.ts` treats that as "already handled," not an error).
+   */
+  async claimMemoryCandidate(messageId: number, resolution: MemoryCandidateStatus): Promise<AiMessageRow | null> {
+    const [row] = await this.db
+      .update(aiMessages)
+      .set({ memoryCandidateStatus: resolution })
+      .where(and(eq(aiMessages.id, messageId), eq(aiMessages.memoryCandidateStatus, "PENDING")))
+      .returning();
+    return row ?? null;
   }
 }

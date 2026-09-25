@@ -5,9 +5,9 @@ Private Discord bot for a 6–7 person Valorant Premier team. See
 the single source of truth for scope and behavior; this README only covers
 how to run what's built so far and the decisions made while building it.
 
-## Status: Phase 7 — Private AI Conversations ✅ (Phases 1–6 also complete)
+## Status: Phase 8 — Memory System ✅ (Phases 1–7 also complete)
 
-Jump to [Phase 7 — private conversations](#phase-7--private-ai-conversations-what-was-built-and-the-choices-made)
+Jump to [Phase 8 — memory system](#phase-8--memory-system-what-was-built-and-the-choices-made)
 for the newest work. The Phase 5 notes below are kept as they were.
 
 ### Phase 5 — Player Profiles (previous status header)
@@ -236,18 +236,6 @@ neutralization, protected-topic check on the *output*) → one private
 (ephemeral) followup. Every failure resolves to the plan section 48 fallback
 and never affects attendance.
 
-### Amendment to plan sections 17/19/61: attendance reactions are public
-
-Decided after Phase 7: roasts and hype only work if the team sees them, so
-`PLAYING` (CELEBRATE) and `CANNOT_PLAY` (ROAST) are now posted in the match
-channel, @mentioning the player (`allowed_mentions` limits pings to that one
-user). `WANTS_TO_BUT_CANNOT` posts only a fixed "can't make it this time 🟡"
-line — no AI text, no reason, no roast — and the *why* stays in the private
-DM. If the AI fails, the safe fallback goes to the player privately, never
-into the channel. Not built: letting a player allow a public roast from
-inside the DM chat (needs Phase 8's consent/memory flow), and any
-one-public-message-per-player-per-match limit (flipping answers posts again).
-
 ### Phase 7 — Private AI Conversations: what was built and the choices made
 
 Plan section 59 scope: *Discord DM, conversation state, follow-up questions,
@@ -260,10 +248,11 @@ continues. So:
   button click only gets a short private pointer ("I sent you a DM").
 - **CELEBRATE and ROAST are unchanged** — single private messages (sections
   18/19; nothing in the plan gives them a back-and-forth).
-- **Memory is still Phase 8.** `memory_candidate` is accepted and discarded
+- **Memory is Phase 8.** `memory_candidate` is accepted and discarded
   exactly like Phase 6, and the prompt forbids the model from offering to
   "remember" anything. The `[Remember]/[Don't Remember]` buttons from
   section 61's example belong to Phase 8 (section 21), so they aren't here.
+  (Update from Phase 8: this is exactly what got built — see below.)
 
 **The ordering tension (same style as the Phase 3 notes above): a typed DM
 reply can't reach an HTTP-Interactions app.** Discord only pushes
@@ -277,10 +266,12 @@ the same `ConversationService.handlePlayerReply`:
    interaction. The reply is echoed back as a quote above the bot's answer
    (text entered in a modal never appears in the chat by itself), and the
    answered message's button is removed.
-2. **Typed replies, via an optional cron poll** (`api/cron/dm-replies.ts`) —
-   the same cron-polling design already decided for Phase 8. Not instant, and
-   only works once you schedule it. A burst of typed messages is joined into
-   one turn.
+2. **Typed replies, via an optional cron poll** (`api/cron/dm-replies.ts`).
+   Not instant, and only works once you schedule it. A burst of typed
+   messages is joined into one turn. (Phase 8 note: this cron-polling
+   design was once assumed to extend to scanning whole channels for
+   memorable content too — see the resolved item below for why that
+   turned out not to be the right call.)
 
 Both are idempotent against retries *and against each other* — see below.
 
@@ -378,8 +369,14 @@ talk to the team AI"). **Not built yet** — player context now exists
 be worth anything; this only fixes *which* trigger mechanism it'll use
 once that exists.
 
-**2. Phase 8's passive message-listening will be replaced by cron-based
-REST polling of allow-listed channels, not a gateway connection —** but
+**2. Resolved in Phase 8: passive message-listening was NOT built — see the
+"Section 59's raw message storage" note in the Phase 8 section below for the
+full reasoning.** The question below is preserved as it was written during
+Phase 7, since the reasoning that led to the opposite conclusion is worth
+keeping visible rather than quietly edited away.
+
+~~Phase 8's passive message-listening will be replaced by cron-based
+REST polling of allow-listed channels, not a gateway connection —~~ but
 with one open question carried forward rather than silently decided.
 Discord's `GET /channels/{id}/messages?after=...` works from a stateless
 function (needs `Message Content Intent` enabled in the Developer
@@ -398,6 +395,143 @@ false memories" posture leans the same way. Polling solves the
 it doesn't settle *whether* passive scanning is still the right design
 once Phase 8 actually starts. Recorded here so that choice gets made
 deliberately then, not defaulted into now.
+
+### Phase 8 — Memory System: what was built and the choices made
+
+Plan section 59 scope: *raw message storage, AI conversation storage, memory
+table, memory evidence, memory visibility, memory approval.* AI conversation
+storage was already Phase 7's `ai_conversations`/`ai_messages`. That leaves
+four things, plus one the plan doesn't scope to any single phase but groups
+under the same theme: sections 42/43's `/memories` player command.
+
+- **`memories` / `memory_evidence`** (migration `0006_add_memories.sql`) —
+  section 23's schema and section 25's evidence table, field-for-field: the
+  nine categories from section 22 as a fixed enum (`memory_type`), the four
+  visibility levels from section 24 (`memory_visibility`), `confidence` /
+  `importance` / `ai_usable` / `last_used_at` all present per section 23 even
+  though only `confidence` has a real writer yet (see below). `playerId` is a
+  real FK to `players.id` — `players.ts`'s own Phase-5-era comment guessed
+  this table would key off `discord_user_id` instead; Phase 7's
+  `ai_conversations.player_id` already set the actual precedent (an FK,
+  because players are soft-deleted, never dropped), and this follows it.
+
+- **Memory approval is entirely consent-first (section 21), and only ever
+  happens inside a CONSOLE conversation.** CELEBRATE and ROAST have no
+  free-text player input to draw a fact from at all — the player never types
+  anything in those flows, just clicks a button — so there's structurally
+  nothing for a memory candidate to come from outside a conversation. A
+  candidate now rides on the same `ai_messages` row that proposed it (two new
+  columns, `memory_candidate` and `memory_candidate_status`), rather than a
+  separate staging table: that row already *is* the evidence (section 25's
+  own example — "AI conversation #52") for whichever memory it becomes.
+  `aiOutput.ts` validates the candidate's shape and drops (not rejects) it
+  outright if `requires_confirmation` isn't literally `true` or its content
+  touches a forbidden topic — the response text next to it still goes
+  through either way (section 37: the model only ever *suggests*, so a bad
+  suggestion shouldn't sink a good reply).
+
+- **The prompt can only propose a memory when wrapping up, and only when
+  the player's own "Memory usage" setting (section 9) allows it** — signaled
+  as a data line (`Memory usage: disabled`) exactly the way
+  `valorantReferencesEnabled`/`personalReferencesEnabled` already are, not as
+  a different system prompt. That's the first of three independent gates,
+  all enforced by the backend regardless of what the model does (section 37):
+  `aiService.ts` drops the candidate again if `shouldFollowUp` is true (i.e.
+  it isn't actually a wrap-up turn) or if the player's setting is off, and
+  `aiOutput.ts` has already dropped anything malformed or forbidden-topic
+  before that. Even past all three, nothing is written yet — the player still
+  has to press a button.
+
+- **Remember/Don't Remember buttons, attached via a follow-up edit.** The
+  button's `custom_id` needs the `ai_messages` row's own id, which only
+  exists once persisted — so the DM goes out first (keeping Phase 7's
+  invariant that a message is only ever recorded after Discord confirms
+  delivery), then gets one follow-up `editChannelMessage` call adding the
+  buttons once the row exists. A continuing conversation's Reply button and
+  a wrap-up's Remember/Don't Remember buttons are mutually exclusive by
+  construction (a candidate can only be non-null when `!continues`), so a
+  message never needs both.
+
+- **Deciding is a single atomic claim, not a read-then-write** — `UPDATE
+  ai_messages SET memory_candidate_status = 'APPROVED' WHERE ... =
+  'PENDING'`, the same shape `reminders.status` already uses (section 50:
+  a double-tapped button can't create two memories, and the loser of the
+  race can't silently overwrite the winner's decision). Ownership is
+  re-checked against the conversation's actual player before that claim
+  runs, not just before the write (section 44 rule 3) — someone else's
+  button click gets the same "I couldn't find that" whether the candidate
+  exists and isn't theirs, or doesn't exist at all, so a wrong guess can't
+  be used to fish for whether a candidate exists.
+
+- **`/memories`** (sections 42/43) — self-service, no admin gate, categorized
+  by the section 22 types, one 🗑️ delete button per entry. Deleting is
+  scoped to `(memoryId, playerId)` in the repository's own `WHERE` clause
+  (section 44 rule 4: a guessed id can't touch someone else's memory), and
+  cascades to that memory's evidence rows. This is the plan's own named
+  alternative to a separate `/memory-delete <id>` command ("or an
+  interactive memory-management flow") — chosen because a player should
+  never have to know or type a raw memory id to forget something about
+  themselves.
+
+**Confidence and importance, honestly scoped.** Section 26 describes
+confidence rising with repeated evidence; Phase 8 has exactly one way a
+memory gets created — an explicit, player-confirmed fact — so confidence is
+always `1.0` (section 61's own example). Nothing here re-derives or bumps
+confidence from a second, similar mention; that needs comparing a new
+candidate against existing memories, which is retrieval territory (section
+33's ranking formula, Phase 9). `importance` defaults to `50` (the same
+"normal" midpoint `roastIntensity` uses) and is otherwise inert — nothing
+reads it until Phase 9 has a context to rank memories into.
+
+**Section 59's "raw message storage" — deliberately not built, and why.**
+The "Two decisions locked in for later phases" note above (written during
+Phase 7) flagged this exact question and left it open on purpose: passive
+scanning of `#valorant`/`#premier`/`#general` for memorable content
+(sections 27/28/45/46) needs its own infrastructure surface — Message
+Content Intent, a channel allow-list, a cron job, a *second* LLM call just
+for extraction (section 46) — separate from anything the consent-first flow
+above needs. `schema/index.ts`'s own Phase-5-era "still to come" comment
+already only ever named two new files for Phase 8 (`memories.ts`,
+`memoryEvidence.ts`) — no raw-messages table — which matches the conclusion
+reached independently here: sections 21 and 47 both point toward
+consent-first (an explicit ask beats mining chat for facts), and a 6-7
+person team generates approval-worthy moments mostly through the CONSOLE
+conversations that already exist, not through incidental chatter in
+`#general`. If usage ever shows the CONSOLE-only path isn't producing enough
+memories, passive scanning is still exactly the escape hatch the plan
+describes — it just isn't built speculatively now (design principle #11).
+
+**Privacy (section 44):** all four rules that apply so far hold — private
+conversations never leak their contents to the public channel (unchanged
+from Phase 7); a memory's visibility defaults to `PRIVATE` (section 21:
+"default visibility should be conservative") and nothing in Phase 8 ever
+writes `TEAM`, `PUBLIC` or `PROTECTED` (those are Phase 9 retrieval
+concerns — `PROTECTED` specifically exists as a value the *filtering* side
+can check for, not one this phase produces); `/memories` and every delete
+only ever resolve against the caller's own player row; and a forbidden or
+nonexistent candidate id gets an identical reply either way.
+
+**Not verified from this sandbox** (no route to Discord): that
+`editChannelMessage`'s two-step send-then-edit actually renders as a single
+clean update in a real Discord client for a DM message specifically (versus
+a guild channel, which is where every other `editChannelMessage` caller in
+this codebase uses it), and that a `🗑️`-emoji `ButtonStyle.Danger` button
+labeled with a bare number reads clearly on mobile. Both are worth a manual
+pass alongside Phase 7's own pending manual checks.
+
+**258 unit / 118 integration tests passing** (up from 223/106 at the end of
+Phase 7's notes). New coverage: `aiOutput.test.ts`'s candidate validation
+(every section 22 category, the consent-first `requires_confirmation` gate,
+the forbidden-topic drop); `memoryCustomId.test.ts` for both custom_id
+families; `memoryRepository.test.ts` for evidence-cascade and per-player
+deletion scoping; and `phase8MemoryE2E.test.ts`, a full Postgres-backed run
+through propose → button-attach → approve/decline → double-click
+idempotency → cross-player rejection → `memoryUsageEnabled: false` →
+`/memories` → delete. One integration run flaked once during development (a
+single test failed, then passed clean on three immediate reruns with
+nothing in the diagnostics pointing at the new code); noting it here rather
+than silently re-running until it disappeared, since no cause was pinned
+down.
 
 ## A dependency vulnerability found and fixed (Phase 2)
 
@@ -546,19 +680,20 @@ api/
 
 src/
 ├── discord/
-│   ├── commands/      # setup, createMatch, editMatch, cancelMatch, listMatches, postMatch, addPlayer, editPlayer, removePlayer, player
+│   ├── commands/      # setup, createMatch, editMatch, cancelMatch, listMatches, postMatch, addPlayer, editPlayer, removePlayer, player, memories
 │   ├── interactions/  # dispatchCommand, dispatchButton
 │   ├── discordRest.ts, verifyInteraction.ts, httpInteractionAdapter.ts, handleDiscordInteraction.ts
 │   ├── permissions.ts, commandGuards.ts, displayName.ts, announcementSync.ts, timezone.ts
 │   ├── consoleConversation.ts   # Phase 7: DM opener, Reply modal, reply delivery
+│   ├── memoryDecision.ts, memoryDelete.ts   # Phase 8: Remember/Don't Remember + 🗑️ delete button handlers
 ├── modules/
 │   ├── matches/     # matchService, matchLifecycle, dateTime
 │   ├── attendance/  # attendanceService, rosterMessage, customId
 │   ├── reminders/   # reminderScheduling (pure planning), reminderMessages (nudge text)
 │   ├── players/     # playerValidation (agent/topic parsing, role choices) — Phase 5
 │   ├── ai/          # aiService, aiContextBuilder, aiOutput, aiMode (Phase 6); conversationService, conversationContextBuilder, conversationCustomId (Phase 7)
-│   └── memories/    # empty until Phase 8
-├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders, players, aiConversations
+│   └── memories/    # memoryService, memoryCustomId, memoryManageCustomId — Phase 8
+├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders, players, aiConversations, memories, memoryEvidence
 ├── services/
 │   ├── scheduling/   # cronAuth, reminderCronJob (Phase 4), dmReplyPollJob (Phase 7)
 │   ├── ai/           # llmClient (Phase 6)
@@ -637,9 +772,9 @@ minutes-apart reminders — so an **external** scheduler drives
 Mirrors plan section 60's split between unit and integration tests:
 
 ```bash
-npm test               # unit tests only — no infrastructure needed (223 tests)
+npm test               # unit tests only — no infrastructure needed (258 tests)
 npm run test:integration  # requires DATABASE_URL pointing at a disposable
-                           # Postgres with migrations applied (106 tests)
+                           # Postgres with migrations applied (118 tests)
 ```
 
 Every `tests/integration/*.test.ts` file self-skips (rather than failing)
@@ -688,9 +823,12 @@ What's covered so far, mapped to plan section 60's checklist:
   input validation and the User-option adapter resolution
   (`tests/unit/playerValidation.test.ts`,
   `tests/unit/httpInteractionAdapter.test.ts`)
-- ⬜ Protected-topic *filtering into an AI context*: N/A yet — the topics
-  are now captured and storable (`/edit-player`), but there's no AI
-  context builder to filter them out of until Phase 8/9
+- ⬜ Protected-topic *filtering into an AI context*: N/A yet for stored
+  memories specifically — Phase 8's candidate validation already rejects a
+  proposed memory whose own content touches a forbidden topic
+  (`tests/unit/aiOutput.test.ts`), but filtering *retrieved* memories back
+  out of a context is Phase 9's job, once there's a retrieval pipeline to
+  filter within
 - ✅ `server_config` / `matches` / `attendance` / `reminders` / `players`
   repository semantics, including database-level constraints (unique
   indexes, FK cascade) (`tests/integration/serverConfigRepository.test.ts`,
@@ -720,9 +858,16 @@ What's covered so far, mapped to plan section 60's checklist:
   and the full cron-tick flow — announcement vs. nudge routing, same-tick
   multi-offset ordering, a reverted-then-retried failed send
   (`tests/integration/phase4E2E.test.ts`)
-- ⬜ Memory visibility, protected-topic filtering, AI output validation —
-  depend on tables/features that don't exist until later phases; will be
-  added alongside each phase, not retrofitted at the end
+- ⬜ Memory *retrieval* into an AI context (structured + semantic filtering)
+  — depends on Phase 9's retrieval pipeline, which doesn't exist yet; will
+  be added alongside that phase, not retrofitted at the end
+- ✅ Memory table, evidence, visibility defaults, and approval (plan
+  sections 21-25, 42-44): candidate validation and every section 22
+  category (`tests/unit/aiOutput.test.ts`), evidence-cascade and
+  per-player deletion scoping (`tests/integration/memoryRepository.test.ts`),
+  and the full propose → approve/decline → double-click idempotency →
+  cross-player rejection → `memoryUsageEnabled: false` → `/memories` →
+  delete flow (`tests/integration/phase8MemoryE2E.test.ts`)
 
 **Phase 4's integration suite was actually run**, not just written: this
 sandbox has no route to Neon, so I installed Postgres locally
@@ -750,7 +895,10 @@ have hit it, rather than being a theoretical gap in coverage.
 - [x] Phase 6 — Basic AI (CELEBRATE / ROAST / CONSOLE, no memory yet)
 - [x] Phase 7 — Private AI Conversations (CONSOLE DM flow: Reply-button modal +
       optional typed-reply poller, follow-ups, turn/idle/match-state limits)
-- [ ] Phase 8 — Memory System
+- [x] Phase 8 — Memory System (`memories`/`memory_evidence`, consent-first
+      approval via Remember/Don't Remember buttons on a CONSOLE wrap-up,
+      `/memories` self-service view + delete) — passive channel-message
+      scanning deliberately not built; see the Phase 8 notes above for why
 - [ ] Phase 9 — Retrieval (structured + semantic + privacy filtering)
 - [ ] Phase 10 — Match Hype / Recaps
 

@@ -49,13 +49,7 @@ describeIfDb("Phase 6 — attendance click -> private AI followup (integration)"
   let db: Database;
   let pool: Pool;
   const guildId = `phase6-guild-${Date.now()}`;
-  const publicPosts: Array<{ channelId: string; content: string; userId: string }> = [];
-  const discord = {
-    sendMentionMessage: vi.fn(async (channelId: string, content: string, userId: string) => {
-      publicPosts.push({ channelId, content, userId });
-      return { id: "pub" };
-    }),
-  } as unknown as DiscordRestClient;
+  const discord = {} as DiscordRestClient;
 
   function ctxWith(llm: LlmClient | null): AppContext {
     return buildAppContext({ discord, db, env: {} as never, logger, llm });
@@ -104,8 +98,7 @@ describeIfDb("Phase 6 — attendance click -> private AI followup (integration)"
     const first = fakeButton(`attendance:${match.id}:PLAYING`, guildId, "player-a", "Ahmed");
     await dispatchButton(first.interaction, ctx);
     expect(first.update).toHaveBeenCalledTimes(1);
-    expect(publicPosts).toEqual([{ channelId: "chan", content: "hype!", userId: "player-a" }]);
-    expect(first.followUp).not.toHaveBeenCalled();
+    expect(first.followUp).toHaveBeenCalledWith({ content: "hype!", ephemeral: true });
 
     const repeat = fakeButton(`attendance:${match.id}:PLAYING`, guildId, "player-a", "Ahmed");
     await dispatchButton(repeat.interaction, ctx);
@@ -115,8 +108,7 @@ describeIfDb("Phase 6 — attendance click -> private AI followup (integration)"
 
     const changed = fakeButton(`attendance:${match.id}:CANNOT_PLAY`, guildId, "player-a", "Ahmed");
     await dispatchButton(changed.interaction, ctx);
-    expect(publicPosts.at(-1)).toEqual({ channelId: "chan", content: "roast!", userId: "player-a" });
-    expect(publicPosts).toHaveLength(2);
+    expect(changed.followUp).toHaveBeenCalledWith({ content: "roast!", ephemeral: true });
 
     const rows = (await ctx.services.attendance.getMatchWithAttendance(guildId, match.id))!.attendanceRows;
     expect(rows).toHaveLength(1);

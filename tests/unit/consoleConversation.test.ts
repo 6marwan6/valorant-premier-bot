@@ -79,20 +79,28 @@ describe("quoteForDm", () => {
   });
 });
 
-function fakeCtx(sendImpl?: () => Promise<{ id: string }>) {
+function fakeCtx(sendImpl?: () => Promise<{ id: string }>, savedMessage: { id: number; memoryCandidate: { type: string; content: string } | null } | null = { id: 501, memoryCandidate: null }) {
   const sendDirectMessage = vi.fn(sendImpl ?? (async () => ({ id: "m-1" })));
-  const recordAssistantMessage = vi.fn(async () => undefined);
+  const editChannelMessage = vi.fn(async () => undefined);
+  const recordAssistantMessage = vi.fn(async () => savedMessage);
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const ctx = {
     logger,
-    discord: { sendDirectMessage },
+    discord: { sendDirectMessage, editChannelMessage },
     services: { conversations: { recordAssistantMessage } },
   } as unknown as AppContext;
-  return { ctx, sendDirectMessage, recordAssistantMessage, logger };
+  return { ctx, sendDirectMessage, editChannelMessage, recordAssistantMessage, logger };
 }
 
 describe("deliverConversationReply", () => {
-  const base = { kind: "reply" as const, conversation: conversation(), text: "That's valid 😭", continues: true, source: "ai" as const };
+  const base = {
+    kind: "reply" as const,
+    conversation: conversation(),
+    text: "That's valid 😭",
+    continues: true,
+    source: "ai" as const,
+    memoryCandidate: null,
+  };
 
   it("continuing: reply gets the Reply button + hint, and the player's own words are quoted above it (modal path)", async () => {
     const t = fakeCtx();
@@ -109,7 +117,8 @@ describe("deliverConversationReply", () => {
     expect(payload.content).toContain("That's valid 😭");
     expect(payload.content).toContain("Tap **Reply**");
     expect(payload.components).toHaveLength(1);
-    expect(t.recordAssistantMessage).toHaveBeenCalledWith(9, "That's valid 😭");
+    expect(t.recordAssistantMessage).toHaveBeenCalledWith(9, "That's valid 😭", null);
+    expect(t.editChannelMessage).not.toHaveBeenCalled();
   });
 
   it("final message: no button, no hint, and the stored text is the model's text only (no quote/footer)", async () => {
@@ -122,7 +131,33 @@ describe("deliverConversationReply", () => {
     const [, payload] = t.sendDirectMessage.mock.calls[0] as unknown as [string, { content: string; components: unknown[] }];
     expect(payload.components).toEqual([]);
     expect(payload.content).toBe("That's valid 😭");
-    expect(t.recordAssistantMessage).toHaveBeenCalledWith(9, "That's valid 😭");
+    expect(t.recordAssistantMessage).toHaveBeenCalledWith(9, "That's valid 😭", null);
+  });
+
+  it("a wrap-up reply carrying a memory candidate (plan section 21) gets a follow-up edit adding Remember/Don't Remember buttons", async () => {
+    const candidate = { type: "MATCH_EVENT" as const, content: "Ahmed had an exam." };
+    const t = fakeCtx(undefined, { id: 501, memoryCandidate: candidate });
+    const outcome = { ...base, continues: false, memoryCandidate: candidate };
+    const ok = await deliverConversationReply(t.ctx, { conversation: base.conversation, dmChannelId: "dm-1", outcome });
+    expect(ok).toBe(true);
+    expect(t.recordAssistantMessage).toHaveBeenCalledWith(9, "That's valid 😭", candidate);
+    expect(t.editChannelMessage).toHaveBeenCalledTimes(1);
+    const [channel, messageId, payload] = t.editChannelMessage.mock.calls[0] as unknown as [
+      string,
+      string,
+      { content: string; components: Array<{ toJSON: () => { components: Array<{ custom_id: string }> } }> },
+    ];
+    expect(channel).toBe("dm-1");
+    expect(messageId).toBe("m-1");
+    const buttonIds = payload.components[0]!.toJSON().components.map((c) => c.custom_id);
+    expect(buttonIds).toEqual(["memory:remember:501", "memory:decline:501"]);
+  });
+
+  it("no candidate on the saved row: no edit call at all, even on a wrap-up turn", async () => {
+    const t = fakeCtx(undefined, { id: 501, memoryCandidate: null });
+    const outcome = { ...base, continues: false };
+    await deliverConversationReply(t.ctx, { conversation: base.conversation, dmChannelId: "dm-1", outcome });
+    expect(t.editChannelMessage).not.toHaveBeenCalled();
   });
 
   it("never exceeds Discord's 2000-character limit even with a long quote", async () => {

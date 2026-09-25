@@ -106,9 +106,37 @@ describe("buildConversationContext (plan sections 20, 34, 56)", () => {
     expect(build([], { personalReferencesEnabled: true }).user).not.toContain("Personal references: disabled");
   });
 
-  it("never lets the model promise to remember (memories are Phase 8) or invent reasons (plan section 35)", () => {
+  it("allows a memory proposal only when memory usage is enabled — and drops the old Phase 6/7 hard 'never' rule", () => {
     const { system } = build([]);
-    expect(system).toMatch(/cannot remember, save/i);
+    expect(system).not.toMatch(/cannot remember, save, note down/i);
+    expect(system).toMatch(/memory_candidate/);
+    expect(system).toMatch(/ONLY when you are wrapping up/);
+    expect(system).toMatch(/At most one candidate per conversation/);
+    expect(system).toMatch(/Never propose remembering anything under FORBIDDEN TOPICS/);
+  });
+
+  it("plan section 9: memory_usage_enabled = false disables the capability via a data line, not a different system prompt", () => {
+    const enabled = build([], { memoryUsageEnabled: true });
+    const disabled = build([], { memoryUsageEnabled: false });
+    // Same system rules either way (plan section 37: the model only ever
+    // suggests; whether it's ALLOWED to suggest is data, checked by the
+    // same rule, exactly like valorantReferencesEnabled/personalReferencesEnabled).
+    expect(disabled.system).toBe(enabled.system);
+    expect(disabled.user).toContain("Memory usage: disabled");
+    expect(enabled.user).not.toContain("Memory usage: disabled");
+  });
+
+  it("only CONSOLE has this capability at all — CELEBRATE/ROAST have no free-text player input to draw a candidate from", () => {
+    // buildAIContext (Phase 6, attendance responses) has no memory_candidate
+    // prompt language at all — see aiContextBuilder.ts, unchanged since
+    // Phase 6. This spec only covers the conversation builder, which is the
+    // only place memory_candidate is ever prompted for.
+    const { system } = build([]);
+    expect(system).toMatch(/memory_candidate/);
+  });
+
+  it("never invents or guesses attendance-unrelated facts, and never claims to change attendance (plan section 35)", () => {
+    const { system } = build([]);
     expect(system).toMatch(/Never invent or guess/);
     expect(system).toMatch(/Never claim to change, confirm or record attendance/);
   });

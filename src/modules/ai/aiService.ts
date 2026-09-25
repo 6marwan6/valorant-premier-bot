@@ -5,7 +5,7 @@ import type { PlayerRow } from "../../database/schema/players.js";
 import { LlmError, type LlmClient } from "../../services/ai/llmClient.js";
 import { buildAIContext } from "./aiContextBuilder.js";
 import { modeForStatus } from "./aiMode.js";
-import { parseAiOutput } from "./aiOutput.js";
+import { parseAiOutput, type MemoryCandidate } from "./aiOutput.js";
 import { buildConversationContext, type ConversationTranscriptEntry } from "./conversationContextBuilder.js";
 
 /** Plan section 48's own example fallback wording. */
@@ -22,9 +22,14 @@ export interface AiOutcome {
  * its own fallback wording (the right words for "opening a conversation"
  * and "answering someone mid-conversation" differ), so this deliberately
  * doesn't invent one.
+ *
+ * `memoryCandidate` (Phase 8) is always `null` when `player.memoryUsageEnabled`
+ * is false — enforced right here, not just by omitting the instruction from
+ * the prompt (plan section 37: the model only ever suggests; the backend
+ * decides, and here that means it doesn't even get the chance to suggest).
  */
 export type ConversationAiOutcome =
-  | { source: "ai"; text: string; shouldFollowUp: boolean }
+  | { source: "ai"; text: string; shouldFollowUp: boolean; memoryCandidate: MemoryCandidate | null }
   | { source: "fallback" };
 
 /**
@@ -148,7 +153,12 @@ export class AiService {
       }
 
       this.logger.info({ ...base, ...metrics, success: true }, "AI conversation turn generated");
-      return { source: "ai", text: parsed.value.response, shouldFollowUp: parsed.value.shouldFollowUp };
+      // Defensive, not decorative: even if the prompt failed to suppress it
+      // (buildConversationContext already tells the model not to bother
+      // when memory usage is off), a candidate never survives here unless
+      // the player's own setting allows it.
+      const memoryCandidate = params.player.memoryUsageEnabled ? parsed.value.memoryCandidate : null;
+      return { source: "ai", text: parsed.value.response, shouldFollowUp: parsed.value.shouldFollowUp, memoryCandidate };
     } catch (err) {
       this.logger.error(
         {

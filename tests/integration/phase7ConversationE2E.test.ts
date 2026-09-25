@@ -30,14 +30,9 @@ function fakeDiscord(opts: { dmFails?: boolean; sendFailsAfter?: number } = {}) 
   const channels = new Map<string, Array<DiscordChannelMessage & { components?: unknown[] }>>();
   const followups: ReplyPayload[] = [];
   const originalEdits: ReplyPayload[] = [];
-  const publicPosts: Array<{ channelId: string; content: string; userId: string }> = [];
   let sends = 0;
 
   const discord = {
-    sendMentionMessage: vi.fn(async (channelId: string, content: string, userId: string) => {
-      publicPosts.push({ channelId, content, userId });
-      return { id: "pub" };
-    }),
     createDmChannel: vi.fn(async (userId: string) => {
       if (opts.dmFails) throw Object.assign(new Error("Cannot send messages to this user"), { code: 50007 });
       const id = `dm-${userId}`;
@@ -70,7 +65,6 @@ function fakeDiscord(opts: { dmFails?: boolean; sendFailsAfter?: number } = {}) 
     raw: discord,
     followups,
     originalEdits,
-    publicPosts,
     dm(userId: string) {
       return channels.get(`dm-${userId}`) ?? [];
     },
@@ -243,45 +237,6 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
     expect(b.followUp).toHaveBeenCalledTimes(1);
     expect((b.followUp.mock.calls[0] as unknown as [{ content: string }])[0].content).toMatch(/DM/);
     expect(b.reply).not.toHaveBeenCalled();
-  });
-
-  it("public reactions: PLAYING and CANNOT_PLAY are posted in the match channel @mentioning the player; WANTS gets only a fixed neutral line, never AI text or the DM", async () => {
-    const d = fakeDiscord();
-    const { llm } = fakeLlm(({ system }) => json(system.includes("MODE: CELEBRATE.") ? "hype!" : system.includes("MODE: ROAST.") ? "roast!" : "SECRET opener"));
-    const ctx = ctxWith(d, llm);
-
-    const m1 = await openMatch(ctx);
-    const b1 = await click(ctx, m1.id, "PLAYING");
-    const b2 = await click(ctx, m1.id, "CANNOT_PLAY");
-    expect(d.publicPosts).toEqual([
-      { channelId: "chan", content: "hype!", userId: "player-a" },
-      { channelId: "chan", content: "roast!", userId: "player-a" },
-    ]);
-    expect(b1.followUp).not.toHaveBeenCalled();
-    expect(b2.followUp).not.toHaveBeenCalled();
-
-    const m2 = await openMatch(ctx);
-    d.publicPosts.length = 0;
-    await click(ctx, m2.id, "WANTS_TO_BUT_CANNOT", "player-b", "Omar");
-    expect(d.publicPosts).toEqual([{ channelId: "chan", content: "can't make it this time 🟡", userId: "player-b" }]);
-    expect(JSON.stringify(d.publicPosts)).not.toContain("SECRET");
-    expect(d.dm("player-b")[0]!.content).toContain("SECRET opener"); // the opener is private
-
-    // A repeated click posts nothing new.
-    await click(ctx, m2.id, "WANTS_TO_BUT_CANNOT", "player-b", "Omar");
-    expect(d.publicPosts).toHaveLength(1);
-  });
-
-  it("an AI failure on CANNOT_PLAY is never posted publicly — only the private fallback", async () => {
-    const d = fakeDiscord();
-    const { llm } = fakeLlm(() => {
-      throw new LlmError("HTTP 500", "http", 500);
-    });
-    const ctx = ctxWith(d, llm);
-    const match = await openMatch(ctx);
-    const b = await click(ctx, match.id, "CANNOT_PLAY");
-    expect(d.publicPosts).toHaveLength(0);
-    expect(b.followUp).toHaveBeenCalledWith({ content: AI_FALLBACK_MESSAGE, ephemeral: true });
   });
 
   it("re-clicking the same button does nothing (no second conversation, no second DM, no second LLM call)", async () => {
@@ -873,7 +828,7 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
     expect(all).toContain("ai.conversation.turn"); // metadata IS logged
   });
 
-  it("the public channel never sees the conversation: for a WANTS click the only in-server outputs are the neutral line and a private pointer", async () => {
+  it("the public roster message and channel never see any of it: the only in-server output for a WANTS click is the private pointer", async () => {
     const d = fakeDiscord();
     const { llm } = fakeLlm(() => json("private opener text"));
     const ctx = ctxWith(d, llm);

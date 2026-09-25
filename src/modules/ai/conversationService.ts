@@ -4,11 +4,13 @@ import type { PlayerRepository } from "../../database/repositories/playerReposit
 import type {
   AiConversationEndReason,
   AiConversationRow,
+  AiMessageRow,
 } from "../../database/schema/aiConversations.js";
 import type { MatchRow } from "../../database/schema/matches.js";
 import type { PlayerRow } from "../../database/schema/players.js";
 import type { AttendanceRow } from "../../database/schema/attendance.js";
 import type { AiService } from "./aiService.js";
+import type { MemoryCandidate } from "./aiOutput.js";
 import { modeForStatus } from "./aiMode.js";
 import {
   CONSOLE_STATIC_OPENER,
@@ -56,6 +58,12 @@ export type ReplyOutcome =
       /** True when the conversation stays open and the message should carry a Reply button. */
       continues: boolean;
       source: "ai" | "fallback";
+      /**
+       * Phase 8: non-null only when `!continues` (a candidate is only ever
+       * proposed on a wrap-up turn — see aiService.ts's gate) — mutually
+       * exclusive with the Reply button by construction, never both.
+       */
+      memoryCandidate: MemoryCandidate | null;
     };
 
 /**
@@ -154,10 +162,26 @@ export class ConversationService {
    * cursor: the player may have typed something while the model was
    * thinking, and jumping the cursor to our own (newer) message would skip
    * it. The poller advances the cursor itself, only past what it has read.
+   *
+   * `memoryCandidate` (Phase 8) rides on this same row — see
+   * schema/aiConversations.ts's doc comment on why there's no separate
+   * staging table. Returns the stored row (or null if the insert didn't
+   * happen — see AiConversationRepository.addMessage) so the caller has the
+   * row id a Remember/Don't Remember button needs.
    */
-  async recordAssistantMessage(conversationId: number, text: string): Promise<void> {
-    await this.conversations.addMessage({ conversationId, role: "ASSISTANT", content: text });
+  async recordAssistantMessage(
+    conversationId: number,
+    text: string,
+    memoryCandidate?: MemoryCandidate | null,
+  ): Promise<AiMessageRow | null> {
+    const row = await this.conversations.addMessage({
+      conversationId,
+      role: "ASSISTANT",
+      content: text,
+      memoryCandidate: memoryCandidate ?? undefined,
+    });
     await this.conversations.touch(conversationId);
+    return row;
   }
 
   /** Poll bookkeeping: the poller has seen everything up to (and including) this Discord message id. */
@@ -259,7 +283,14 @@ export class ConversationService {
       // Plan section 48: a failure never breaks anything else; wrap up
       // gracefully rather than leaving the player in a half-broken chat.
       await this.conversations.end(conversation.id, "AI_FAILURE");
-      return { kind: "reply", conversation, text: CONVERSATION_FALLBACK_MESSAGE, continues: false, source: "fallback" };
+      return {
+        kind: "reply",
+        conversation,
+        text: CONVERSATION_FALLBACK_MESSAGE,
+        continues: false,
+        source: "fallback",
+        memoryCandidate: null,
+      };
     }
 
     const atTurnLimit = playerTurns >= this.maxPlayerTurns;
@@ -267,7 +298,14 @@ export class ConversationService {
     if (!continues) {
       await this.conversations.end(conversation.id, atTurnLimit ? "TURN_LIMIT" : "COMPLETED");
     }
-    return { kind: "reply", conversation, text: generated.text, continues, source: "ai" };
+    return {
+      kind: "reply",
+      conversation,
+      text: generated.text,
+      continues,
+      source: "ai",
+      memoryCandidate: generated.memoryCandidate,
+    };
   }
 
   private async loadTranscript(conversationId: number): Promise<ConversationTranscriptEntry[]> {

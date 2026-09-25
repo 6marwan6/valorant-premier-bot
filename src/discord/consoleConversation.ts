@@ -18,6 +18,7 @@ import {
   buildConsoleReplyCustomId,
   parseConsoleModalCustomId,
 } from "../modules/ai/conversationCustomId.js";
+import { buildMemoryDecisionRow } from "./memoryDecision.js";
 import type { ReplyOutcome } from "../modules/ai/conversationService.js";
 
 /**
@@ -36,9 +37,12 @@ import type { ReplyOutcome } from "../modules/ai/conversationService.js";
  *      *is* an interaction, so it arrives instantly over the existing
  *      endpoint. Works with zero extra setup.
  *   2. **Typed DMs**, picked up by an optional cron poll of open
- *      conversations' DM channels (services/scheduling/dmReplyPollJob.ts) —
- *      the same cron-polling design already decided for Phase 8's channel
- *      messages. Not instant; only works once that cron job is scheduled.
+ *      conversations' DM channels (services/scheduling/dmReplyPollJob.ts).
+ *      Not instant; only works once that cron job is scheduled. (Phase 7's
+ *      own note here once assumed Phase 8 would reuse this same
+ *      cron-polling idea for scanning whole channels for memorable
+ *      content — see README's "Phase 8" section for why that turned out
+ *      not to be the right call after all.)
  *
  * Both are idempotent against each other and against retries (see
  * ai_messages.source_ref).
@@ -221,11 +225,13 @@ export async function deliverConversationReply(
     if (quote.length > 0) body = `${quote}\n${body}`;
   }
 
+  let sentMessageId: string;
   try {
-    await ctx.discord.sendDirectMessage(params.dmChannelId, {
+    const sent = await ctx.discord.sendDirectMessage(params.dmChannelId, {
       content: body,
       components: outcome.continues ? [buildReplyRow(conversation.id)] : [],
     });
+    sentMessageId = sent.id;
   } catch (err) {
     ctx.logger.error(
       {
@@ -240,7 +246,20 @@ export async function deliverConversationReply(
   }
 
   try {
-    await ctx.services.conversations.recordAssistantMessage(conversation.id, outcome.text);
+    const saved = await ctx.services.conversations.recordAssistantMessage(conversation.id, outcome.text, outcome.memoryCandidate);
+    // A proposed memory (Phase 8, plan section 21) needs the row's own id
+    // for its buttons' custom_id, which only exists once persisted — so
+    // the buttons go on with a follow-up edit rather than delaying the DM
+    // itself on a database write (plan section 48's spirit: never let
+    // bookkeeping stand between the player and their answer). `saved`
+    // being null (an extremely unlikely insert race) just means no
+    // buttons — the reply itself already reached the player either way.
+    if (saved?.memoryCandidate) {
+      await ctx.discord.editChannelMessage(params.dmChannelId, sentMessageId, {
+        content: body,
+        components: [buildMemoryDecisionRow(saved.id)],
+      });
+    }
   } catch (err) {
     ctx.logger.error(
       {

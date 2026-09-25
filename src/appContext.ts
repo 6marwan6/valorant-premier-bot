@@ -7,11 +7,13 @@ import { AttendanceRepository } from "./database/repositories/attendanceReposito
 import { ReminderRepository } from "./database/repositories/reminderRepository.js";
 import { PlayerRepository } from "./database/repositories/playerRepository.js";
 import { AiConversationRepository } from "./database/repositories/aiConversationRepository.js";
+import { MemoryRepository } from "./database/repositories/memoryRepository.js";
 import { MatchService } from "./modules/matches/matchService.js";
 import { AttendanceService } from "./modules/attendance/attendanceService.js";
 import { DiscordRestClient } from "./discord/discordRest.js";
 import { AiService } from "./modules/ai/aiService.js";
 import { ConversationService } from "./modules/ai/conversationService.js";
+import { MemoryService } from "./modules/memories/memoryService.js";
 import { createLlmClient, type LlmClient } from "./services/ai/llmClient.js";
 
 /**
@@ -26,8 +28,9 @@ import { createLlmClient, type LlmClient } from "./services/ai/llmClient.js";
  * functions), which can't hold a WebSocket open between invocations, so
  * all outbound Discord calls go through REST instead.
  *
- * Grows over time: Phase 5 adds a PlayerRepository (below), Phase 7 the
- * conversation repository/service; later phases add their own (plan section 7 `database/repositories/`).
+ * Grows over time: Phase 5 adds a PlayerRepository, Phase 7 the
+ * conversation repository/service, Phase 8 the memory repository/service
+ * (below); later phases add their own (plan section 7 `database/repositories/`).
  */
 export interface AppContext {
   discord: DiscordRestClient;
@@ -41,12 +44,14 @@ export interface AppContext {
     reminders: ReminderRepository;
     players: PlayerRepository;
     aiConversations: AiConversationRepository;
+    memories: MemoryRepository;
   };
   services: {
     matches: MatchService;
     attendance: AttendanceService;
     ai: AiService;
     conversations: ConversationService;
+    memories: MemoryService;
   };
 }
 
@@ -64,6 +69,7 @@ export function buildAppContext(params: {
   const reminderRepo = new ReminderRepository(params.db);
   const playerRepo = new PlayerRepository(params.db);
   const aiConversationRepo = new AiConversationRepository(params.db);
+  const memoryRepo = new MemoryRepository(params.db);
   const { llm: llmOverride, ...contextParams } = params;
   const llm = llmOverride !== undefined ? llmOverride : createLlmClient(params.env, params.logger);
   const aiService = new AiService(llm, params.logger);
@@ -76,12 +82,14 @@ export function buildAppContext(params: {
       reminders: reminderRepo,
       players: playerRepo,
       aiConversations: aiConversationRepo,
+      memories: memoryRepo,
     },
     services: {
       matches: new MatchService(matchRepo, serverConfigRepo),
       attendance: new AttendanceService(matchRepo, attendanceRepo, serverConfigRepo),
       ai: aiService,
       conversations: new ConversationService(aiConversationRepo, playerRepo, matchRepo, aiService),
+      memories: new MemoryService(memoryRepo, aiConversationRepo, playerRepo),
     },
   };
 }

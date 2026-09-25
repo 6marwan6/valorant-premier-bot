@@ -33,7 +33,7 @@ describe("command registry", () => {
     expect(json.dm_permission).toBe(false);
   });
 
-  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 commands", () => {
+  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 + Phase 8 commands", () => {
     const names = commands.map((c) => c.data.name).sort();
     expect(names).toEqual(
       [
@@ -47,6 +47,7 @@ describe("command registry", () => {
         "edit-player",
         "remove-player",
         "player",
+        "memories",
       ].sort(),
     );
   });
@@ -102,5 +103,12 @@ describe("command registry", () => {
       if (option.name === "player") continue;
       expect((option as { required?: boolean }).required ?? false, option.name).toBe(false);
     }
+  });
+
+  it("/memories is guild-only, self-service (no admin permission gate, no target-player option)", () => {
+    const json = commandsByName.get("memories")!.data.toJSON();
+    expect(json.dm_permission).toBe(false);
+    expect(json.default_member_permissions).toBeUndefined();
+    expect(json.options ?? []).toHaveLength(0);
   });
 });

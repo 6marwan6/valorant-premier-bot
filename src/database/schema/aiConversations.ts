@@ -1,4 +1,4 @@
-import { pgTable, pgEnum, serial, text, integer, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, pgEnum, serial, text, integer, jsonb, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { matches } from "./matches.js";
 import { players } from "./players.js";
@@ -94,6 +94,18 @@ export const aiConversations = pgTable(
 export const aiMessageRoleEnum = pgEnum("ai_message_role", ["USER", "ASSISTANT", "SYSTEM"]);
 
 /**
+ * Where a proposed memory (plan section 21) currently stands. `PENDING` is
+ * set the moment the model's `memory_candidate` is accepted onto an
+ * ASSISTANT row; the player's button click resolves it. An
+ * `UPDATE ... WHERE memory_candidate_status = 'PENDING'` is the actual
+ * duplicate-decision guard (see MemoryRepository.claimCandidate) — the same
+ * claim-then-act pattern `reminders.status` already uses, chosen for the
+ * same reason: a double-tapped button can't decide the same candidate
+ * twice (plan section 50).
+ */
+export const memoryCandidateStatusEnum = pgEnum("memory_candidate_status", ["PENDING", "APPROVED", "DECLINED"]);
+
+/**
  * One message inside a conversation — plan section 29:
  *
  *   id / conversation_id / role / content / created_at
@@ -108,8 +120,17 @@ export const aiMessageRoleEnum = pgEnum("ai_message_role", ["USER", "ASSISTANT",
  *
  * Section 29: "The complete conversation should not automatically be
  * injected into future AI requests." Nothing outside the conversation's
- * own turns ever reads this table in Phase 7; Phase 8 distills it into
- * memories.
+ * own turns read this table in Phase 7; Phase 8 distills it into
+ * memories via exactly two extra columns on an ASSISTANT row:
+ *
+ * - `memoryCandidate` — the `{type, content}` the model proposed
+ *   remembering (plan section 36), or null. This IS the memory's evidence
+ *   once approved (section 25: "AI conversation #52") — no separate
+ *   staging table, because the ASSISTANT message that proposed it already
+ *   is the record of when/why/from-what-conversation it was proposed.
+ * - `memoryCandidateStatus` — see `memoryCandidateStatusEnum` above. Null
+ *   when there's no candidate on this row at all (the overwhelming
+ *   majority of ASSISTANT messages).
  */
 export const aiMessages = pgTable(
   "ai_messages",
@@ -124,6 +145,9 @@ export const aiMessages = pgTable(
     content: text("content").notNull(),
     sourceRef: text("source_ref"),
 
+    memoryCandidate: jsonb("memory_candidate").$type<{ type: string; content: string } | null>(),
+    memoryCandidateStatus: memoryCandidateStatusEnum("memory_candidate_status"),
+
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -137,3 +161,4 @@ export type NewAiConversationRow = typeof aiConversations.$inferInsert;
 export type AiMessageRow = typeof aiMessages.$inferSelect;
 export type NewAiMessageRow = typeof aiMessages.$inferInsert;
 export type AiConversationEndReason = NonNullable<AiConversationRow["endReason"]>;
+export type MemoryCandidateStatus = NonNullable<AiMessageRow["memoryCandidateStatus"]>;

@@ -10,6 +10,8 @@ export default defineConfig({
     "./src/database/schema/reminders.ts",
     "./src/database/schema/players.ts",
     "./src/database/schema/aiConversations.ts",
+    "./src/database/schema/memories.ts",
+    "./src/database/schema/memoryEvidence.ts",
   ],
   out: "./drizzle",
   dialect: "postgresql",

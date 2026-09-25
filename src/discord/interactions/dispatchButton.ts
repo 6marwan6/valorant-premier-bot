@@ -4,26 +4,36 @@ import { parseAttendanceCustomId } from "../../modules/attendance/customId.js";
 import { buildRosterMessage } from "../../modules/attendance/rosterMessage.js";
 import { resolveDisplayName } from "../displayName.js";
 import { startConsoleDm } from "../consoleConversation.js";
+import { isMemoryDecisionCustomId } from "../../modules/memories/memoryCustomId.js";
+import { isMemoryDeleteCustomId } from "../../modules/memories/memoryManageCustomId.js";
+import { handleMemoryDecisionButton } from "../memoryDecision.js";
+import { handleMemoryDeleteButton } from "../memoryDelete.js";
 import type { MatchRow } from "../../database/schema/matches.js";
 import type { PlayerRow } from "../../database/schema/players.js";
 import type { AttendanceRow } from "../../database/schema/attendance.js";
 
 /**
- * Plan section 15 step 6 / section 17 — amended: reactions are PUBLIC.
+ * Plan section 15 step 6 / section 17: "Start the corresponding AI flow".
  *
- * - PLAYING (CELEBRATE) / CANNOT_PLAY (ROAST): the AI message is posted in
- *   the match channel, @mentioning the player.
- * - WANTS_TO_BUT_CANNOT (CONSOLE): the public channel only gets a fixed,
- *   non-roasting "can't make it" line (no AI text, no reason). The
- *   conversation about why happens in a private DM (Phase 7); the click gets
- *   an ephemeral pointer to it. If no DM is possible (AI follow-ups off,
- *   closed DMs) the player gets Phase 6's single ephemeral message instead.
- * - If the AI fails, the safe fallback goes to the player privately, never
- *   into the channel.
+ * - CELEBRATE / ROAST (plan sections 18/19): one private (ephemeral)
+ *   message, unchanged since Phase 6.
+ * - CONSOLE (WANTS_TO_BUT_CANNOT, plan sections 20/61) — Phase 7: a real
+ *   private conversation in the player's Discord DMs. The click only gets a
+ *   short ephemeral pointer to the DM. If the conversation can't happen (the
+ *   player turned "AI follow-ups" off — plan section 9 — or their DMs are
+ *   closed to the bot) it falls back to Phase 6's single ephemeral message,
+ *   so the player always gets *something* truthful.
  *
- * Runs strictly AFTER the attendance write and roster update, fully isolated
- * (plan sections 48, 66 #8). Skipped when the AI isn't configured, on an
- * unchanged click (section 50), or without an active player profile.
+ * Any change of answer also ends an open conversation about the previous
+ * one (a "wanted to but can't" chat is meaningless once they say they're
+ * playing).
+ *
+ * Runs strictly AFTER the attendance write and public roster update have
+ * succeeded, and is fully isolated: nothing in here can turn a recorded
+ * response into a "something went wrong" message (plan sections 48 and 66
+ * #8). Skipped when the AI isn't configured, when the click didn't change
+ * anything (idempotency, section 50), or when the clicker has no active
+ * player profile.
  */
 async function sendAiFollowUp(
   interaction: ButtonInteraction,
@@ -46,11 +56,11 @@ async function sendAiFollowUp(
         await ctx.discord.sendMentionMessage(channelId, "can't make it this time 🟡", player.discordUserId);
       }
       if (started === "started") {
-        await interaction.followUp({ content: "📩 I sent you a DM — let's talk there.", ephemeral: true });
+        await interaction.followUp({ content: "📩 I sent you a DM, let's talk there.", ephemeral: true });
         return;
       }
       dmFailed = started === "dm_failed";
-      // "unavailable" / "dm_failed": fall through to the private single message.
+      // "unavailable" / "dm_failed": fall through to the single message.
     }
 
     const outcome = await ctx.services.ai.respondToAttendance({
@@ -82,12 +92,28 @@ async function sendAiFollowUp(
 }
 
 /**
- * Routes a button click. Currently only attendance buttons exist
- * (custom_id `attendance:<matchId>:<status>`, plan section 15); anything
- * else is logged and ignored rather than crashing, the same
- * fail-safe posture as dispatchCommand's "unknown command" branch.
+ * Routes a button click. Three kinds exist: attendance buttons (custom_id
+ * `attendance:<matchId>:<status>`, plan section 15); since Phase 8, the
+ * memory Remember/Don't Remember buttons under a wrapped-up CONSOLE DM
+ * (`memory:remember:<id>` / `memory:decline:<id>`, plan section 21); and
+ * the `/memories` delete buttons (`memory:del:<id>`, plan sections 42/43).
+ * The two memory kinds are routed to discord/memoryDecision.ts and
+ * discord/memoryDelete.ts before the attendance-specific guild check
+ * below, since both run in contexts an attendance click never does (a DM,
+ * or an ephemeral command reply) and neither touches attendance or match
+ * state at all. Anything else is logged and ignored rather than crashing,
+ * the same fail-safe posture as dispatchCommand's "unknown command" branch.
  */
 export async function dispatchButton(interaction: ButtonInteraction, ctx: AppContext): Promise<void> {
+  if (isMemoryDecisionCustomId(interaction.customId)) {
+    await handleMemoryDecisionButton(interaction, ctx);
+    return;
+  }
+  if (isMemoryDeleteCustomId(interaction.customId)) {
+    await handleMemoryDeleteButton(interaction, ctx);
+    return;
+  }
+
   const parsed = parseAttendanceCustomId(interaction.customId);
   if (!parsed) {
     ctx.logger.warn(

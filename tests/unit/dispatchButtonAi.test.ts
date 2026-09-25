@@ -19,7 +19,6 @@ function setup(
     status?: "PLAYING" | "CANNOT_PLAY" | "WANTS_TO_BUT_CANNOT";
     startOutcome?: StartOutcome;
     dmThrows?: boolean;
-    aiFallback?: boolean;
   } = {},
 ) {
   const {
@@ -31,13 +30,12 @@ function setup(
     status = "PLAYING",
     startOutcome = { kind: "unavailable" } as StartOutcome,
     dmThrows = false,
-    aiFallback = false,
   } = opts;
   const match = makeMatch();
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const respondToAttendance = vi.fn(async () => {
     if (aiThrows) throw new Error("ai exploded");
-    return aiFallback ? { text: "recorded", source: "fallback" as const } : { text: "LET'S GOOO", source: "ai" as const };
+    return { text: "LET'S GOOO", source: "ai" as const };
   });
   const conversations = {
     endForAttendanceChange: vi.fn(async () => undefined),
@@ -46,7 +44,6 @@ function setup(
     abandon: vi.fn(async () => undefined),
   };
   const discord = {
-    sendMentionMessage: vi.fn(async () => ({ id: "pub-1" })),
     createDmChannel: vi.fn(async () => {
       if (dmThrows) throw Object.assign(new Error("Cannot send messages to this user"), { code: 50007 });
       return { id: "dm-1" };
@@ -87,20 +84,12 @@ function setup(
 }
 
 describe("dispatchButton — Phase 6 AI followup", () => {
-  it.each(["PLAYING", "CANNOT_PLAY"] as const)("%s: posts the AI message publicly, @mentioning the player, after updating the roster", async (status) => {
-    const t = setup({ status });
+  it("sends the AI response as an ephemeral followup after updating the roster", async () => {
+    const t = setup();
     await t.run();
     expect(t.interaction.update).toHaveBeenCalledTimes(1);
-    expect(t.respondToAttendance).toHaveBeenCalledWith(expect.objectContaining({ status }));
-    expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "LET'S GOOO", "user-1");
-    expect(t.interaction.followUp).not.toHaveBeenCalled();
-  });
-
-  it("an AI failure never posts the fallback publicly — it goes to the player privately", async () => {
-    const t = setup({ aiFallback: true });
-    await t.run();
-    expect(t.discord.sendMentionMessage).not.toHaveBeenCalled();
-    expect(t.interaction.followUp).toHaveBeenCalledWith({ content: "recorded", ephemeral: true });
+    expect(t.respondToAttendance).toHaveBeenCalledWith(expect.objectContaining({ status: "PLAYING" }));
+    expect(t.interaction.followUp).toHaveBeenCalledWith({ content: "LET'S GOOO", ephemeral: true });
   });
 
   it("does nothing AI-related for a repeated identical click (idempotency, plan section 50)", async () => {
@@ -177,9 +166,6 @@ describe("dispatchButton — Phase 6 AI followup", () => {
         expect.objectContaining({ conversationId: 7, dmChannelId: "dm-1", discordMessageId: "dm-msg-1" }),
       );
       expect(t.respondToAttendance).not.toHaveBeenCalled();
-      // Publicly: only the fixed neutral line — no AI text, no reason, no roast.
-      expect(t.discord.sendMentionMessage).toHaveBeenCalledTimes(1);
-      expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "can't make it this time 🟡", "user-1");
       expect(t.interaction.followUp).toHaveBeenCalledTimes(1);
       expect(t.interaction.followUp).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true, content: expect.stringContaining("DM") }));
     });
@@ -188,9 +174,7 @@ describe("dispatchButton — Phase 6 AI followup", () => {
       const t = setup({ status: "WANTS_TO_BUT_CANNOT", startOutcome: { kind: "unavailable" } });
       await t.run();
       expect(t.respondToAttendance).toHaveBeenCalledWith(expect.objectContaining({ status: "WANTS_TO_BUT_CANNOT" }));
-      expect(t.interaction.followUp).toHaveBeenCalledWith({ content: "LET'S GOOO", ephemeral: true }); // private
-      expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "can't make it this time 🟡", "user-1");
-      expect(t.discord.sendMentionMessage).toHaveBeenCalledTimes(1);
+      expect(t.interaction.followUp).toHaveBeenCalledWith({ content: "LET'S GOOO", ephemeral: true });
     });
 
     it("says nothing at all when a conversation is already open (idempotency, plan section 50)", async () => {
@@ -198,7 +182,6 @@ describe("dispatchButton — Phase 6 AI followup", () => {
       await t.run();
       expect(t.respondToAttendance).not.toHaveBeenCalled();
       expect(t.interaction.followUp).not.toHaveBeenCalled();
-      expect(t.discord.sendMentionMessage).not.toHaveBeenCalled();
     });
 
     it("closed DMs: abandons the conversation and falls back to the single message plus a short note", async () => {
