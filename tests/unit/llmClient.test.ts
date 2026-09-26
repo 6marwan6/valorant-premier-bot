@@ -47,15 +47,38 @@ describe("OpenAiCompatibleLlmClient", () => {
     expect(body.temperature).toBe(0.2);
   });
 
-  it("throws LlmError(http) on non-2xx without leaking the body", async () => {
+  it("throws LlmError(http) with a short message (never the body) but carries the body in `detail` for diagnostics", async () => {
     const client = new OpenAiCompatibleLlmClient({
       ...baseConfig,
-      fetchImpl: (async () => new Response("secret provider detail", { status: 429 })) as never,
+      fetchImpl: (async () => new Response("provider error detail", { status: 429 })) as never,
     });
     const err = await client.complete({ system: "s", user: "u" }).catch((e) => e);
     expect(err).toBeInstanceOf(LlmError);
     expect(err).toMatchObject({ kind: "http", status: 429 });
-    expect(err.message).not.toContain("secret");
+    // `message` is a fixed, generic string — never interpolates the body.
+    expect(err.message).not.toContain("provider error detail");
+    // `detail` is the whole point of capturing it: without it, an
+    // intermittent provider-side rejection (bad IP allowlist, rate limit,
+    // exhausted quota — anything that isn't simply "wrong key") is
+    // indistinguishable from any other 401/429 in the logs.
+    expect(err.detail).toBe("provider error detail");
+  });
+
+  it("truncates an oversized error body rather than logging it in full", async () => {
+    const client = new OpenAiCompatibleLlmClient({
+      ...baseConfig,
+      fetchImpl: (async () => new Response("x".repeat(2000), { status: 500 })) as never,
+    });
+    const err = await client.complete({ system: "s", user: "u" }).catch((e) => e);
+    expect(err.detail).toHaveLength(500);
+  });
+
+  it("still throws cleanly if the error body can't even be read", async () => {
+    const badResponse = { ok: false, status: 500, text: () => Promise.reject(new Error("body already consumed")) };
+    const client = new OpenAiCompatibleLlmClient({ ...baseConfig, fetchImpl: (async () => badResponse) as never });
+    const err = await client.complete({ system: "s", user: "u" }).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmError);
+    expect(err.detail).toBeUndefined();
   });
 
   it("throws LlmError(empty) when content is missing or blank (e.g. thinking ate max_tokens)", async () => {
@@ -130,11 +153,16 @@ describe("createLlmClient", () => {
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: '{"reasoning_effort":"low"}' })).not.toBeNull();
   });
 
-  it("logs a one-line confirmation (model + host, no key) once AI is actually enabled", () => {
+  it("logs a one-line confirmation (model + resolved URL + a redacted key preview, never the real key) once AI is actually enabled", () => {
     const logger = fakeLogger();
     createLlmClient(env, logger);
     expect(logger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "ai.config.enabled", model: "m", baseHost: "x" }),
+      expect.objectContaining({
+        event: "ai.config.enabled",
+        model: "m",
+        resolvedUrl: "https://x/v1/chat/completions",
+        apiKeyPreview: expect.stringContaining("(len=21)"),
+      }),
       expect.any(String),
     );
   });

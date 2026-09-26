@@ -25,12 +25,24 @@ export interface LlmClient {
   complete(request: LlmRequest): Promise<LlmResult>;
 }
 
-/** `kind` lets callers log a reason without ever touching the response body (plan section 51). */
+/**
+ * `kind`/`status` let callers log a reason without ever touching the
+ * *response content* the model itself generated (plan section 51) — that
+ * restriction is about player conversation data, not about the provider's
+ * own error messages. `detail` is different: it's a truncated snippet of
+ * the provider's error body on an HTTP failure specifically, e.g. `{"error":
+ * "insufficient quota"}` or `{"error": "IP not allowlisted"}` — operational
+ * information about the account/key/deployment, not about any player.
+ * Deliberately truncated (plan section 51's "keep prompts/logs compact"
+ * spirit) and only ever populated for `kind: "http"`, never for a
+ * successful call.
+ */
 export class LlmError extends Error {
   constructor(
     message: string,
     readonly kind: "http" | "timeout" | "network" | "empty",
     readonly status?: number,
+    readonly detail?: string,
   ) {
     super(message);
     this.name = "LlmError";
@@ -91,7 +103,17 @@ export class OpenAiCompatibleLlmClient implements LlmClient {
       });
 
       if (!response.ok) {
-        throw new LlmError(`LLM request failed with HTTP ${response.status}`, "http", response.status);
+        // Read defensively: some providers send a JSON error object, some
+        // send plain text, and a body can only be read once — whatever
+        // happens here, the HTTP error itself is still what gets thrown.
+        let detail: string | undefined;
+        try {
+          const bodyText = await response.text();
+          detail = bodyText.slice(0, 500);
+        } catch {
+          detail = undefined;
+        }
+        throw new LlmError(`LLM request failed with HTTP ${response.status}`, "http", response.status, detail);
       }
 
       const json = (await response.json()) as ChatCompletionResponse;
@@ -170,15 +192,20 @@ export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "wa
 
   // Never logs the API key itself — just enough to confirm "yes, AI is on,
   // and here's what it's pointed at" is visible without grepping through
-  // every request.
-  let baseHost: string;
+  // every request. The full resolved path (not just host) matters because
+  // a base URL missing e.g. `/v1` still "looks" configured but hits the
+  // wrong route; the key preview lets you eyeball-compare against a key
+  // you tested by hand (e.g. via curl) without ever printing the real one.
+  let resolvedUrl: string;
   try {
-    baseHost = new URL(env.LLM_BASE_URL).host;
+    resolvedUrl = new URL("chat/completions", env.LLM_BASE_URL.replace(/\/?$/, "/")).toString();
   } catch {
-    baseHost = env.LLM_BASE_URL;
+    resolvedUrl = env.LLM_BASE_URL;
   }
+  const key = env.LLM_API_KEY;
+  const apiKeyPreview = key.length > 8 ? `${key.slice(0, 4)}...${key.slice(-4)} (len=${key.length})` : `(len=${key.length})`;
   logger?.info(
-    { event: "ai.config.enabled", model: env.LLM_MODEL, baseHost, timeoutMs: env.LLM_TIMEOUT_MS, maxTokens: env.LLM_MAX_TOKENS },
+    { event: "ai.config.enabled", model: env.LLM_MODEL, resolvedUrl, apiKeyPreview, timeoutMs: env.LLM_TIMEOUT_MS, maxTokens: env.LLM_MAX_TOKENS },
     "AI enabled",
   );
 
