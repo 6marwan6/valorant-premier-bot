@@ -100,11 +100,15 @@ describe("dispatchButton — Phase 6 AI followup", () => {
     expect(t.interaction.followUp).not.toHaveBeenCalled();
   });
 
-  it("behaves exactly like Phase 5 when the AI is not configured", async () => {
+  it("behaves exactly like Phase 5 when the AI is not configured, and logs why (this used to be silent)", async () => {
     const t = setup({ aiEnabled: false });
     await t.run();
     expect(t.respondToAttendance).not.toHaveBeenCalled();
     expect(t.interaction.followUp).not.toHaveBeenCalled();
+    expect(t.logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "ai.followup.skipped", reason: "ai_disabled" }),
+      expect.any(String),
+    );
   });
 
   it("skips the AI for a clicker with no active player profile", async () => {

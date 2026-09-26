@@ -119,10 +119,21 @@ function withReplyFooter(text: string): string {
   return `${text}${REPLY_FOOTER}`;
 }
 
-function discordErrorCode(err: unknown): number | undefined {
-  return typeof err === "object" && err !== null && "code" in err && typeof (err as { code: unknown }).code === "number"
-    ? (err as { code: number }).code
-    : undefined;
+/**
+ * Discord API errors (via discord.js's REST client) carry both a
+ * Discord-specific `code` (e.g. 50007 "Cannot send messages to this user")
+ * and an HTTP `status` (401/403/404/...). Logging both is the difference
+ * between "the bot's DMs are closed for this one player" and "the bot's
+ * token/permissions are wrong for everyone" — two very different fixes.
+ */
+function discordErrorDetail(err: unknown): { code?: number; status?: number; message?: string } {
+  if (typeof err !== "object" || err === null) return {};
+  const e = err as { code?: unknown; status?: unknown; rawError?: { message?: unknown } };
+  return {
+    code: typeof e.code === "number" ? e.code : undefined,
+    status: typeof e.status === "number" ? e.status : undefined,
+    message: typeof e.rawError?.message === "string" ? e.rawError.message : undefined,
+  };
 }
 
 export type StartConsoleDmResult = "started" | "already_open" | "unavailable" | "dm_failed";
@@ -140,7 +151,31 @@ export async function startConsoleDm(
   params: { player: PlayerRow; match: MatchRow },
 ): Promise<StartConsoleDmResult> {
   const outcome = await ctx.services.conversations.startConsole(params);
-  if (outcome.kind !== "started") return outcome.kind;
+  if (outcome.kind !== "started") {
+    // Both of these used to return completely silently — indistinguishable
+    // in the logs from "nothing happened because nothing should have". The
+    // two reasons behind "unavailable" point at very different fixes (AI
+    // config vs. a per-player toggle), so they're told apart here rather
+    // than lumped together.
+    if (outcome.kind === "unavailable") {
+      const reason = !ctx.services.ai.enabled ? "ai_disabled" : "player_ai_followups_disabled";
+      ctx.logger.info(
+        { event: "ai.conversation.unavailable", reason, playerId: params.player.id, matchId: params.match.id },
+        reason === "ai_disabled"
+          ? "AI is not configured — no CONSOLE conversation started, falling back to the single ephemeral message"
+          : "Player has AI follow-ups turned off — no CONSOLE conversation started",
+      );
+    } else {
+      // "already_open": plan section 50 — correct to no-op, but worth a
+      // trace so a run of clicks that all silently do nothing is
+      // explainable instead of looking like the bot ignored them.
+      ctx.logger.info(
+        { event: "ai.conversation.alreadyOpen", playerId: params.player.id, matchId: params.match.id },
+        "A CONSOLE conversation is already open for this player/match — not starting a second one",
+      );
+    }
+    return outcome.kind;
+  }
 
   const { conversation, openerText } = outcome;
   let dmChannelId: string;
@@ -160,7 +195,7 @@ export async function startConsoleDm(
         conversationId: conversation.id,
         playerId: params.player.id,
         matchId: params.match.id,
-        discordErrorCode: discordErrorCode(err),
+        ...discordErrorDetail(err),
         err: err instanceof Error ? err.message : String(err),
       },
       "Could not DM the player; falling back to an in-channel private message",
@@ -237,7 +272,7 @@ export async function deliverConversationReply(
       {
         event: "ai.conversation.replyDeliveryFailed",
         conversationId: conversation.id,
-        discordErrorCode: discordErrorCode(err),
+        ...discordErrorDetail(err),
         err: err instanceof Error ? err.message : String(err),
       },
       "Failed to deliver a conversation reply",

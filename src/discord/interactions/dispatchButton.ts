@@ -40,11 +40,23 @@ async function sendAiFollowUp(
   ctx: AppContext,
   params: { match: MatchRow; status: AttendanceRow["status"]; changed: boolean; roster: PlayerRow[] },
 ): Promise<void> {
-  if (!params.changed || !ctx.services.ai.enabled) return;
+  if (!params.changed) return;
+  if (!ctx.services.ai.enabled) {
+    // The single most useful line in this whole file when "the bot went
+    // quiet": tells you immediately that no AI call was even attempted,
+    // rather than leaving you to guess between this and an LLM call that
+    // failed further down (which logs its own "AI request failed"/"AI
+    // output rejected" separately — see aiService.ts).
+    ctx.logger.info(
+      { event: "ai.followup.skipped", reason: "ai_disabled", matchId: params.match.id, status: params.status },
+      "AI is not configured (LLM_API_KEY/LLM_BASE_URL/LLM_MODEL) — skipping the AI follow-up entirely",
+    );
+    return;
+  }
   const player = params.roster.find((p) => p.discordUserId === interaction.user.id);
   if (!player) return;
-  const channelId = params.match.announcementChannelId;
 
+  const channelId = params.match.announcementChannelId;
   try {
     await ctx.services.conversations.endForAttendanceChange(player.id, params.match.id, params.status);
 
@@ -56,11 +68,16 @@ async function sendAiFollowUp(
         await ctx.discord.sendMentionMessage(channelId, "can't make it this time 🟡", player.discordUserId);
       }
       if (started === "started") {
-        await interaction.followUp({ content: "📩 I sent you a DM, let's talk there.", ephemeral: true });
+        await interaction.followUp({
+          content: "📩 I sent you a DM — let's talk there.",
+          ephemeral: true,
+        });
         return;
       }
+      
       dmFailed = started === "dm_failed";
       // "unavailable" / "dm_failed": fall through to the single message.
+      // (startConsoleDm already logged which one, and why.)
     }
 
     const outcome = await ctx.services.ai.respondToAttendance({
@@ -68,12 +85,11 @@ async function sendAiFollowUp(
       match: params.match,
       status: params.status,
     });
-
-    if (params.status !== "WANTS_TO_BUT_CANNOT" && outcome.source === "ai" && channelId) {
+     if (params.status !== "WANTS_TO_BUT_CANNOT" && outcome.source === "ai" && channelId) {
       await ctx.discord.sendMentionMessage(channelId, outcome.text, player.discordUserId);
       return;
     }
-
+    
     const note = dmFailed
       ? "\n\n_(I tried to DM you but couldn't — allow DMs from server members if you'd like to chat.)_"
       : "";

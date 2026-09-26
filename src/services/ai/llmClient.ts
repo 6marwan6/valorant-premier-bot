@@ -130,9 +130,24 @@ type LlmEnv = Pick<
  * configured or LLM_EXTRA_BODY is malformed: plan design principle #8 —
  * attendance must keep working no matter what the AI layer's state is, so
  * a bad AI env var must never take down the whole interaction handler.
+ *
+ * Both ways this can come back disabled are logged (this used to fall
+ * through to `return null` completely silently for a missing key/URL/model
+ * — the single most likely explanation for "the AI never seems to run and
+ * nothing in the logs says why"). Logged once per cold start, not per
+ * request, since createLlmClient runs once when AppContext is built.
  */
-export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "warn">): LlmClient | null {
+export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "warn" | "info">): LlmClient | null {
   if (!env.LLM_API_KEY || !env.LLM_BASE_URL || !env.LLM_MODEL) {
+    const missing = [
+      !env.LLM_API_KEY && "LLM_API_KEY",
+      !env.LLM_BASE_URL && "LLM_BASE_URL",
+      !env.LLM_MODEL && "LLM_MODEL",
+    ].filter((v): v is string => Boolean(v));
+    logger?.warn(
+      { event: "ai.config.missing", missing },
+      `AI disabled — missing env var(s): ${missing.join(", ")}. Attendance and DMs still work, just without AI (plan design principle #8).`,
+    );
     return null;
   }
 
@@ -152,6 +167,20 @@ export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "wa
       return null;
     }
   }
+
+  // Never logs the API key itself — just enough to confirm "yes, AI is on,
+  // and here's what it's pointed at" is visible without grepping through
+  // every request.
+  let baseHost: string;
+  try {
+    baseHost = new URL(env.LLM_BASE_URL).host;
+  } catch {
+    baseHost = env.LLM_BASE_URL;
+  }
+  logger?.info(
+    { event: "ai.config.enabled", model: env.LLM_MODEL, baseHost, timeoutMs: env.LLM_TIMEOUT_MS, maxTokens: env.LLM_MAX_TOKENS },
+    "AI enabled",
+  );
 
   return new OpenAiCompatibleLlmClient({
     apiKey: env.LLM_API_KEY,

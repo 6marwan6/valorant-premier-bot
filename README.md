@@ -10,6 +10,49 @@ how to run what's built so far and the decisions made while building it.
 Jump to [Phase 8 — memory system](#phase-8--memory-system-what-was-built-and-the-choices-made)
 for the newest work. The Phase 5 notes below are kept as they were.
 
+### Diagnosing "AI isn't working" / "DM isn't working"
+
+A handful of failure points that used to return silently now log clearly —
+if you're chasing this, redeploy and reproduce, then search your logs for
+these `event` names, roughly in the order to check them:
+
+1. **`ai.config.missing`** (warn, logged once at cold start) — AI never got
+   configured at all; the message names exactly which of `LLM_API_KEY` /
+   `LLM_BASE_URL` / `LLM_MODEL` is missing in your deployment's env vars.
+   If you see this, that's the whole story: fix the env var and redeploy.
+2. **`ai.config.enabled`** (info, cold start) — the flip side: confirms AI
+   *is* on and shows the model + base URL host (never the key). If you see
+   this but still get generic responses, the problem is downstream (3-5).
+3. **`ai.followup.skipped`** (info, `reason: "ai_disabled"`) — fires on
+   every attendance click while AI is off; if `ai.config.enabled` logged at
+   startup but you still see this, something disabled it between boot and
+   this request (shouldn't happen — the client is built once — worth a bug
+   report if it does).
+4. **`ai.response` with `success: false`, or the message "AI request
+   failed"** — the LLM call itself failed (wrong API key rejected by the
+   provider, wrong model name, network issue). `reason`/`status` say which;
+   this is almost certainly what "default fallback messages" means if
+   `ai.config.enabled` also logged.
+5. **`ai.conversation.unavailable`** (info, `reason: "ai_disabled"` or
+   `"player_ai_followups_disabled"`) and **`ai.conversation.alreadyOpen`**
+   (info) — both explain "no DM arrived" with *nothing else in the logs at
+   all* for that click: either AI/the player's own setting has it turned
+   off, or (more likely if you were testing repeatedly) a CONSOLE
+   conversation from an earlier click never ended and is still open, so
+   every subsequent "Can't play" click is a correct, silent no-op. Check
+   `ai_conversations` for a row with `ended_at IS NULL` for that
+   player/match; if AI was fully broken during earlier testing it may need
+   ending manually.
+6. **`ai.conversation.dmFailed`** (warn) — the DM was attempted and Discord
+   rejected it; now logs both `code` (Discord's own code, e.g. `50007` =
+   DMs closed to the bot) and `status` (HTTP status, e.g. `401`/`403` =
+   bot token or permissions problem) side by side.
+
+If none of these fire at all for a click that should have triggered AI,
+the click likely isn't reaching this code — check the Discord Interactions
+Endpoint URL in the Developer Portal and `verifyDiscordRequest`'s 401s
+(the literal front door, before any of the above ever runs).
+
 ### Phase 5 — Player Profiles (previous status header)
 
 Per plan section 59, Phase 5 scope is: `/add-player`, `/edit-player`,
@@ -532,6 +575,20 @@ single test failed, then passed clean on three immediate reruns with
 nothing in the diagnostics pointing at the new code); noting it here rather
 than silently re-running until it disappeared, since no cause was pinned
 down.
+
+**Post-deploy fix: several silent failure paths now log clearly.** Live
+testing after this phase surfaced "the AI seems to just not run, and DMs
+never arrive" with nothing in the logs to explain why. Reading back through
+`sendAiFollowUp`, `startConsole`, and `createLlmClient` found genuinely
+silent early returns predating Phase 8 (Phase 6/7 code) — `!this.llm`,
+`{kind: "unavailable"}`, `{kind: "already_open"}`, and a missing
+`LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL` env var all fell through with zero
+log output. These now log (see the "Diagnosing" section near the top of
+this README for the exact event names and what each one means), and the
+existing Discord-DM-failure log now captures the HTTP status alongside
+Discord's own error code. No behavior changed — every one of these paths
+already did the right *thing* (fall back safely, don't duplicate a
+conversation); they just did it invisibly.
 
 ## A dependency vulnerability found and fixed (Phase 2)
 

@@ -204,17 +204,39 @@ describe("deliverConversationReply", () => {
 });
 
 describe("startConsoleDm", () => {
-  it("passes non-'started' outcomes straight through without touching Discord", async () => {
-    for (const kind of ["unavailable", "already_open"] as const) {
+  it("passes non-'started' outcomes straight through without touching Discord, and logs which one and why", async () => {
+    for (const aiEnabled of [true, false]) {
       const createDmChannel = vi.fn();
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
       const ctx = {
-        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        logger,
         discord: { createDmChannel },
-        services: { conversations: { startConsole: vi.fn(async () => ({ kind })) } },
+        services: {
+          ai: { enabled: aiEnabled },
+          conversations: { startConsole: vi.fn(async () => ({ kind: "unavailable" as const })) },
+        },
       } as unknown as AppContext;
-      expect(await startConsoleDm(ctx, { player: makePlayer(), match: makeMatch() })).toBe(kind);
+      expect(await startConsoleDm(ctx, { player: makePlayer(), match: makeMatch() })).toBe("unavailable");
       expect(createDmChannel).not.toHaveBeenCalled();
+      // Used to be completely silent either way — now says which of the
+      // two very different reasons it was (plan design principle #8's own
+      // "AI off" case vs. a player's individual setting).
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.objectContaining({ event: "ai.conversation.unavailable", reason: aiEnabled ? "player_ai_followups_disabled" : "ai_disabled" }),
+        expect.any(String),
+      );
     }
+
+    const createDmChannel2 = vi.fn();
+    const logger2 = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const ctx2 = {
+      logger: logger2,
+      discord: { createDmChannel: createDmChannel2 },
+      services: { ai: { enabled: true }, conversations: { startConsole: vi.fn(async () => ({ kind: "already_open" as const })) } },
+    } as unknown as AppContext;
+    expect(await startConsoleDm(ctx2, { player: makePlayer(), match: makeMatch() })).toBe("already_open");
+    expect(createDmChannel2).not.toHaveBeenCalled();
+    expect(logger2.info).toHaveBeenCalledWith(expect.objectContaining({ event: "ai.conversation.alreadyOpen" }), expect.any(String));
   });
 
   it("a bookkeeping failure after the DM went out is NOT reported as a DM failure", async () => {
@@ -223,6 +245,7 @@ describe("startConsoleDm", () => {
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       discord: { createDmChannel: vi.fn(async () => ({ id: "dm-1" })), sendDirectMessage: vi.fn(async () => ({ id: "m-1" })) },
       services: {
+        ai: { enabled: true },
         conversations: {
           startConsole: vi.fn(async () => ({ kind: "started", conversation: conversation(), openerText: "hi" })),
           recordOpener: vi.fn(async () => {
@@ -234,5 +257,28 @@ describe("startConsoleDm", () => {
     } as unknown as AppContext;
     expect(await startConsoleDm(ctx, { player: makePlayer(), match: makeMatch() })).toBe("started");
     expect(abandon).not.toHaveBeenCalled();
+  });
+
+  it("a closed-DM failure logs both the Discord error code AND HTTP status (plan section 51: metadata, not content)", async () => {
+    const abandon = vi.fn();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const ctx = {
+      logger,
+      discord: {
+        createDmChannel: vi.fn(async () => {
+          throw Object.assign(new Error("Cannot send messages to this user"), { code: 50007, status: 403 });
+        }),
+      },
+      services: {
+        ai: { enabled: true },
+        conversations: {
+          startConsole: vi.fn(async () => ({ kind: "started", conversation: conversation(), openerText: "hi" })),
+          abandon,
+        },
+      },
+    } as unknown as AppContext;
+    expect(await startConsoleDm(ctx, { player: makePlayer(), match: makeMatch() })).toBe("dm_failed");
+    expect(abandon).toHaveBeenCalledWith(conversation().id, "DM_UNAVAILABLE");
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ code: 50007, status: 403 }), expect.any(String));
   });
 });

@@ -86,7 +86,8 @@ describe("OpenAiCompatibleLlmClient", () => {
 });
 
 describe("createLlmClient", () => {
-  const env = { LLM_API_KEY: "k", LLM_BASE_URL: "https://x/v1", LLM_MODEL: "m", LLM_EXTRA_BODY: undefined, LLM_TIMEOUT_MS: 1000, LLM_MAX_TOKENS: 100 };
+  const env = { LLM_API_KEY: "sk-supersecrettestkey", LLM_BASE_URL: "https://x/v1", LLM_MODEL: "m", LLM_EXTRA_BODY: undefined, LLM_TIMEOUT_MS: 1000, LLM_MAX_TOKENS: 100 };
+  const fakeLogger = () => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() });
 
   it("returns null unless key, base URL and model are all set", () => {
     expect(createLlmClient({ ...env, LLM_API_KEY: undefined })).toBeNull();
@@ -95,8 +96,31 @@ describe("createLlmClient", () => {
     expect(createLlmClient(env)?.model).toBe("m");
   });
 
+  it("logs exactly which env var(s) are missing — this used to be completely silent", () => {
+    const logger = fakeLogger();
+    createLlmClient({ ...env, LLM_API_KEY: undefined }, logger);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "ai.config.missing", missing: ["LLM_API_KEY"] }),
+      expect.stringContaining("LLM_API_KEY"),
+    );
+
+    const logger2 = fakeLogger();
+    createLlmClient({ ...env, LLM_API_KEY: undefined, LLM_BASE_URL: undefined, LLM_MODEL: undefined }, logger2);
+    expect(logger2.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ missing: ["LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"] }),
+      expect.any(String),
+    );
+  });
+
+  it("never logs anything resembling the API key itself", () => {
+    const logger = fakeLogger();
+    createLlmClient(env, logger);
+    const serialized = JSON.stringify([...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls]);
+    expect(serialized).not.toContain(env.LLM_API_KEY);
+  });
+
   it("disables AI (and logs) instead of throwing on malformed LLM_EXTRA_BODY", () => {
-    const logger = { error: vi.fn(), warn: vi.fn() };
+    const logger = fakeLogger();
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: "{nope" }, logger)).toBeNull();
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: "[1]" }, logger)).toBeNull();
     expect(logger.error).toHaveBeenCalledTimes(2);
@@ -104,5 +128,19 @@ describe("createLlmClient", () => {
 
   it("accepts a JSON object for LLM_EXTRA_BODY", () => {
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: '{"reasoning_effort":"low"}' })).not.toBeNull();
+  });
+
+  it("logs a one-line confirmation (model + host, no key) once AI is actually enabled", () => {
+    const logger = fakeLogger();
+    createLlmClient(env, logger);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "ai.config.enabled", model: "m", baseHost: "x" }),
+      expect.any(String),
+    );
+  });
+
+  it("works with no logger at all (logger is optional)", () => {
+    expect(createLlmClient(env)).not.toBeNull();
+    expect(createLlmClient({ ...env, LLM_API_KEY: undefined })).toBeNull();
   });
 });
