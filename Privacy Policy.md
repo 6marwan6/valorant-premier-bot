@@ -32,11 +32,20 @@ If enabled, M.A.R.I. may store information such as:
 
 * Valorant role and agent preferences.
 * Match attendance and reminder-related information.
-* User-approved jokes or personalization preferences.
+* Personalization facts, jokes, and context the bot picks up from your own private conversations with it.
 * User-provided reasons or context related to match attendance.
 * Other information explicitly provided for supported personalization features.
 
 The specific data stored depends on the features enabled and the user's interactions with the application.
+
+### How Memory Works
+
+When you're chatting privately with M.A.R.I. (for example, after telling it why you can't make a match), it may save a short fact about what you said so it can be more personal next time — the same "remembers things about you by default" approach used by assistants like Claude and ChatGPT, rather than asking permission before every single fact.
+
+* Memory is on by default; it can be turned off entirely per user via the AI settings, and once off, nothing new is remembered from that user's conversations.
+* Every time something is saved, you're told about it in the moment, with a one-tap button to have it forgotten immediately.
+* You can review or delete anything remembered about you at any time with `/memories`.
+* The application will never save anything from a topic you've marked as protected/off-limits.
 
 ## 2. How We Use Information
 
@@ -45,7 +54,7 @@ We may use collected information to:
 * Provide reminders and attendance functionality.
 * Respond to user commands and conversations.
 * Generate AI-powered responses.
-* Support user-approved personalization features.
+* Support personalization features (see "How Memory Works" above).
 * Maintain and improve the reliability and security of the application.
 * Respond to support requests and data deletion requests.
 * Comply with applicable legal obligations.

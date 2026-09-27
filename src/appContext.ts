@@ -72,7 +72,7 @@ export function buildAppContext(params: {
   const memoryRepo = new MemoryRepository(params.db);
   const { llm: llmOverride, ...contextParams } = params;
   const llm = llmOverride !== undefined ? llmOverride : createLlmClient(params.env, params.logger);
-  const aiService = new AiService(llm, params.logger);
+  const aiService = new AiService(llm, params.logger, memoryRepo); // Phase 9: retrieval reads through the same MemoryRepository instance /memories already uses
   return {
     ...contextParams,
     repositories: {

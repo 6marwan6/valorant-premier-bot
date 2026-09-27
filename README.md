@@ -5,53 +5,10 @@ Private Discord bot for a 6–7 person Valorant Premier team. See
 the single source of truth for scope and behavior; this README only covers
 how to run what's built so far and the decisions made while building it.
 
-## Status: Phase 8 — Memory System ✅ (Phases 1–7 also complete)
+## Status: Phase 9 — Retrieval ✅ (Phases 1–8 also complete)
 
-Jump to [Phase 8 — memory system](#phase-8--memory-system-what-was-built-and-the-choices-made)
+Jump to [Phase 9 — retrieval](#phase-9--retrieval-what-was-built-and-the-choices-made)
 for the newest work. The Phase 5 notes below are kept as they were.
-
-### Diagnosing "AI isn't working" / "DM isn't working"
-
-A handful of failure points that used to return silently now log clearly —
-if you're chasing this, redeploy and reproduce, then search your logs for
-these `event` names, roughly in the order to check them:
-
-1. **`ai.config.missing`** (warn, logged once at cold start) — AI never got
-   configured at all; the message names exactly which of `LLM_API_KEY` /
-   `LLM_BASE_URL` / `LLM_MODEL` is missing in your deployment's env vars.
-   If you see this, that's the whole story: fix the env var and redeploy.
-2. **`ai.config.enabled`** (info, cold start) — the flip side: confirms AI
-   *is* on and shows the model + base URL host (never the key). If you see
-   this but still get generic responses, the problem is downstream (3-5).
-3. **`ai.followup.skipped`** (info, `reason: "ai_disabled"`) — fires on
-   every attendance click while AI is off; if `ai.config.enabled` logged at
-   startup but you still see this, something disabled it between boot and
-   this request (shouldn't happen — the client is built once — worth a bug
-   report if it does).
-4. **`ai.response` with `success: false`, or the message "AI request
-   failed"** — the LLM call itself failed (wrong API key rejected by the
-   provider, wrong model name, network issue). `reason`/`status` say which;
-   this is almost certainly what "default fallback messages" means if
-   `ai.config.enabled` also logged.
-5. **`ai.conversation.unavailable`** (info, `reason: "ai_disabled"` or
-   `"player_ai_followups_disabled"`) and **`ai.conversation.alreadyOpen`**
-   (info) — both explain "no DM arrived" with *nothing else in the logs at
-   all* for that click: either AI/the player's own setting has it turned
-   off, or (more likely if you were testing repeatedly) a CONSOLE
-   conversation from an earlier click never ended and is still open, so
-   every subsequent "Can't play" click is a correct, silent no-op. Check
-   `ai_conversations` for a row with `ended_at IS NULL` for that
-   player/match; if AI was fully broken during earlier testing it may need
-   ending manually.
-6. **`ai.conversation.dmFailed`** (warn) — the DM was attempted and Discord
-   rejected it; now logs both `code` (Discord's own code, e.g. `50007` =
-   DMs closed to the bot) and `status` (HTTP status, e.g. `401`/`403` =
-   bot token or permissions problem) side by side.
-
-If none of these fire at all for a click that should have triggered AI,
-the click likely isn't reaching this code — check the Discord Interactions
-Endpoint URL in the Developer Portal and `verifyDiscordRequest`'s 401s
-(the literal front door, before any of the above ever runs).
 
 ### Phase 5 — Player Profiles (previous status header)
 
@@ -458,12 +415,13 @@ under the same theme: sections 42/43's `/memories` player command.
   `ai_conversations.player_id` already set the actual precedent (an FK,
   because players are soft-deleted, never dropped), and this follows it.
 
-- **Memory approval is entirely consent-first (section 21), and only ever
-  happens inside a CONSOLE conversation.** CELEBRATE and ROAST have no
+- **Memory creation is auto-save with after-the-fact control (section 21,
+  revised 2026-09-26 — see the plan's own changelog note there), and only
+  ever happens inside a CONSOLE conversation.** CELEBRATE and ROAST have no
   free-text player input to draw a fact from at all — the player never types
   anything in those flows, just clicks a button — so there's structurally
   nothing for a memory candidate to come from outside a conversation. A
-  candidate now rides on the same `ai_messages` row that proposed it (two new
+  candidate rides on the same `ai_messages` row that proposed it (two
   columns, `memory_candidate` and `memory_candidate_status`), rather than a
   separate staging table: that row already *is* the evidence (section 25's
   own example — "AI conversation #52") for whichever memory it becomes.
@@ -477,39 +435,42 @@ under the same theme: sections 42/43's `/memories` player command.
   the player's own "Memory usage" setting (section 9) allows it** — signaled
   as a data line (`Memory usage: disabled`) exactly the way
   `valorantReferencesEnabled`/`personalReferencesEnabled` already are, not as
-  a different system prompt. That's the first of three independent gates,
-  all enforced by the backend regardless of what the model does (section 37):
-  `aiService.ts` drops the candidate again if `shouldFollowUp` is true (i.e.
-  it isn't actually a wrap-up turn) or if the player's setting is off, and
-  `aiOutput.ts` has already dropped anything malformed or forbidden-topic
-  before that. Even past all three, nothing is written yet — the player still
-  has to press a button.
+  a different system prompt. Consent lives entirely in that one setting
+  (section 21's revision: expressed once, up front, not per fact) — there is
+  no button gating an individual candidate. `aiService.ts` drops the
+  candidate again regardless of what the model does when the setting is
+  off, `aiOutput.ts` has already dropped anything malformed or
+  forbidden-topic, and `consoleConversation.ts` itself only ever acts on a
+  candidate when `!outcome.continues` (section 37: the backend enforces
+  "only on a wrap-up turn," not just the prompt's cooperation).
 
-- **Remember/Don't Remember buttons, attached via a follow-up edit.** The
-  button's `custom_id` needs the `ai_messages` row's own id, which only
+- **Auto-saved via a follow-up edit, with a single Forget button.**
+  `MemoryService.autoSave` needs the `ai_messages` row's own id, which only
   exists once persisted — so the DM goes out first (keeping Phase 7's
   invariant that a message is only ever recorded after Discord confirms
-  delivery), then gets one follow-up `editChannelMessage` call adding the
-  buttons once the row exists. A continuing conversation's Reply button and
-  a wrap-up's Remember/Don't Remember buttons are mutually exclusive by
+  delivery), the memory gets created, then one follow-up `editChannelMessage`
+  call appends a short "Noted — I'll remember that" note and a single 🗑️
+  Forget button using the *real memory's* id. A continuing conversation's
+  Reply button and a wrap-up's Forget button are mutually exclusive by
   construction (a candidate can only be non-null when `!continues`), so a
   message never needs both.
 
-- **Deciding is a single atomic claim, not a read-then-write** — `UPDATE
+- **Saving is a single atomic claim, not a read-then-write** — `UPDATE
   ai_messages SET memory_candidate_status = 'APPROVED' WHERE ... =
-  'PENDING'`, the same shape `reminders.status` already uses (section 50:
-  a double-tapped button can't create two memories, and the loser of the
-  race can't silently overwrite the winner's decision). Ownership is
-  re-checked against the conversation's actual player before that claim
-  runs, not just before the write (section 44 rule 3) — someone else's
-  button click gets the same "I couldn't find that" whether the candidate
-  exists and isn't theirs, or doesn't exist at all, so a wrong guess can't
-  be used to fish for whether a candidate exists.
+  'PENDING'`, the same shape `reminders.status` already uses (section 50: a
+  retried delivery can't create two memories from the same candidate).
+  `PENDING`/`DECLINED` are otherwise vestigial now — nothing decides
+  anything anymore, the backend just claims-and-saves in one step.
 
-- **`/memories`** (sections 42/43) — self-service, no admin gate, categorized
-  by the section 22 types, one 🗑️ delete button per entry. Deleting is
-  scoped to `(memoryId, playerId)` in the repository's own `WHERE` clause
-  (section 44 rule 4: a guessed id can't touch someone else's memory), and
+- **`/memories`, and the DM's Forget button, are the exact same delete path**
+  (sections 42/43) — self-service, no admin gate, categorized by the section
+  22 types in the list, one 🗑️ button per entry there and one on a
+  fresh auto-save note. `MemoryService.deleteOwn` resolves ownership from
+  the memory's own `playerId` rather than `(guildId, discordUserId)` — a DM
+  interaction has no `guildId` at all — so the identical `memory:del:<id>`
+  handler works from a guild channel or a DM alike (section 44 rule 4: a
+  guessed id can't touch someone else's memory, and "not yours" and
+  "doesn't exist" look identical to the caller either way). Deletion
   cascades to that memory's evidence rows. This is the plan's own named
   alternative to a separate `/memory-delete <id>` command ("or an
   interactive memory-management flow") — chosen because a player should
@@ -518,13 +479,13 @@ under the same theme: sections 42/43's `/memories` player command.
 
 **Confidence and importance, honestly scoped.** Section 26 describes
 confidence rising with repeated evidence; Phase 8 has exactly one way a
-memory gets created — an explicit, player-confirmed fact — so confidence is
-always `1.0` (section 61's own example). Nothing here re-derives or bumps
+memory gets created — an explicit, in-conversation statement — so confidence
+is always `1.0` (section 61's own example). Nothing here re-derives or bumps
 confidence from a second, similar mention; that needs comparing a new
 candidate against existing memories, which is retrieval territory (section
-33's ranking formula, Phase 9). `importance` defaults to `50` (the same
-"normal" midpoint `roastIntensity` uses) and is otherwise inert — nothing
-reads it until Phase 9 has a context to rank memories into.
+33's ranking formula, Phase 9 — see below). `importance` defaults to `50`
+(the same "normal" midpoint `roastIntensity` uses) and, as of Phase 8, was
+otherwise inert; Phase 9's ranking formula is the first thing that reads it.
 
 **Section 59's "raw message storage" — deliberately not built, and why.**
 The "Two decisions locked in for later phases" note above (written during
@@ -547,11 +508,14 @@ describes — it just isn't built speculatively now (design principle #11).
 **Privacy (section 44):** all four rules that apply so far hold — private
 conversations never leak their contents to the public channel (unchanged
 from Phase 7); a memory's visibility defaults to `PRIVATE` (section 21:
-"default visibility should be conservative") and nothing in Phase 8 ever
-writes `TEAM`, `PUBLIC` or `PROTECTED` (those are Phase 9 retrieval
-concerns — `PROTECTED` specifically exists as a value the *filtering* side
-can check for, not one this phase produces); `/memories` and every delete
-only ever resolve against the caller's own player row; and a forbidden or
+"default visibility should be conservative") and nothing in this codebase
+writes `TEAM`, `PUBLIC` or `PROTECTED` yet — Phase 9's retrieval/filtering
+logic is written to respect all four values (`PROTECTED` specifically
+exists as a value the *filtering* side can check for, not one anything
+produces), but doesn't add a writer for the other three either; see the
+Phase 9 notes below for the concrete consequence of that; `/memories` and
+every delete only ever resolve against the caller's own player row; and a
+forbidden or
 nonexistent candidate id gets an identical reply either way.
 
 **Not verified from this sandbox** (no route to Discord): that
@@ -562,33 +526,115 @@ this codebase uses it), and that a `🗑️`-emoji `ButtonStyle.Danger` button
 labeled with a bare number reads clearly on mobile. Both are worth a manual
 pass alongside Phase 7's own pending manual checks.
 
-**258 unit / 118 integration tests passing** (up from 223/106 at the end of
-Phase 7's notes). New coverage: `aiOutput.test.ts`'s candidate validation
-(every section 22 category, the consent-first `requires_confirmation` gate,
-the forbidden-topic drop); `memoryCustomId.test.ts` for both custom_id
-families; `memoryRepository.test.ts` for evidence-cascade and per-player
-deletion scoping; and `phase8MemoryE2E.test.ts`, a full Postgres-backed run
-through propose → button-attach → approve/decline → double-click
-idempotency → cross-player rejection → `memoryUsageEnabled: false` →
-`/memories` → delete. One integration run flaked once during development (a
-single test failed, then passed clean on three immediate reruns with
-nothing in the diagnostics pointing at the new code); noting it here rather
-than silently re-running until it disappeared, since no cause was pinned
-down.
+**Test coverage (revised 2026-09-26 alongside the section 21 consent-model
+change and Phase 9):** `aiOutput.test.ts`'s candidate validation (every
+section 22 category, the `requires_confirmation` shape gate, the
+forbidden-topic drop); `memoryRepository.test.ts` for evidence-cascade,
+per-player deletion scoping, and `touchLastUsed`; and
+`phase8MemoryE2E.test.ts`, a full Postgres-backed run through
+propose → auto-save → Forget-button delete → double-delete idempotency →
+cross-player rejection → `memoryUsageEnabled: false` → `/memories` →
+delete. (The original Remember/Don't Remember button flow's own coverage,
+including `memoryCustomId.test.ts`, was removed along with that code —
+see the section 21 revision above.)
 
-**Post-deploy fix: several silent failure paths now log clearly.** Live
-testing after this phase surfaced "the AI seems to just not run, and DMs
-never arrive" with nothing in the logs to explain why. Reading back through
-`sendAiFollowUp`, `startConsole`, and `createLlmClient` found genuinely
-silent early returns predating Phase 8 (Phase 6/7 code) — `!this.llm`,
-`{kind: "unavailable"}`, `{kind: "already_open"}`, and a missing
-`LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL` env var all fell through with zero
-log output. These now log (see the "Diagnosing" section near the top of
-this README for the exact event names and what each one means), and the
-existing Discord-DM-failure log now captures the HTTP status alongside
-Discord's own error code. No behavior changed — every one of these paths
-already did the right *thing* (fall back safely, don't duplicate a
-conversation); they just did it invisibly.
+## Phase 9 — Retrieval: what was built and the choices made
+
+Per plan section 59, Phase 9 is: structured retrieval, semantic retrieval,
+ranking, privacy filtering, context builder — "only now should the AI
+become deeply personalized." Built: everything except semantic retrieval
+(design principle #11 — a 6-7 person team with a consent-first,
+in-conversation-only memory writer will have a handful of memories per
+player, not a corpus that needs an embedding index; section 32 itself
+says embeddings "may be introduced," not must). New module:
+`src/modules/memories/memoryRetrieval.ts`.
+
+**The pipeline, plan section 30 minus its semantic-retrieval step:**
+`AiService` fetches a player's memories (`MemoryRepository.listByPlayer`
+— already existed for `/memories`, reused rather than duplicated),
+`retrieveMemories` filters for eligibility, scores what's left, and
+returns the top few; `aiContextBuilder.ts`/`conversationContextBuilder.ts`
+render whatever they're handed as a `RELEVANT MEMORIES` block (section
+34's own example) — those two files never touch the database or do any
+ranking themselves, same split every AI-adjacent piece of this codebase
+already keeps.
+
+**Privacy filtering runs before ranking, not after** — section 10's flow
+("apply privacy/protection filters" is a step of its own, before "build AI
+context"), and there's no reason to rank, then limit, then discard
+something that could never have been shown in the first place. Three
+gates, all in `isEligible`: `aiUsable`/`PROTECTED` are never eligible
+anywhere; forbidden topics are re-checked at *read* time using the exact
+matcher `aiOutput.ts` already uses at *write* time (`mentionsForbiddenTopic`,
+now exported) — a player who protects a topic after a memory about it was
+already saved is protected retroactively, without rewriting the old row;
+and — the one genuinely new privacy decision this phase had to make —
+**a PRIVATE memory is only ever eligible for the audience it was written
+for.** Section 44 rule 1 ("private information should never automatically
+become public AI content") reads very differently after the Phase 6 change
+that made CELEBRATE/ROAST post publicly in the match channel instead of
+staying ephemeral (see that section above): Phase 8's *only* writer always
+saves `PRIVATE`, so as implemented, retrieval currently finds **zero**
+eligible memories for CELEBRATE/ROAST — every memory that exists right now
+is scoped to the player's own private CONSOLE conversation, which is the
+only place any of them actually surface today. This is the conservative
+outcome given what's been built, not a bug: `isEligible` and its tests are
+written against `PUBLIC`/`TEAM` visibility in general, ready for whenever
+a future writer produces one (a Phase 10 post-match recap marking a
+teamwide `MATCH_EVENT` `TEAM` or `PUBLIC`, say) — Phase 9 doesn't add that
+writer itself, only the machinery that will respect it once one exists.
+
+**Ranking (section 33's formula, semantic-similarity term dropped):**
+`mode_relevance * 2 + importance + confidence + recency`, each normalized
+to `[0, 1]`. `mode_relevance` reuses section 31's own worked lists
+verbatim for ROAST (`RUNNING_JOKE`/`VALORANT_PREFERENCE`/`TEAM_JOKE`/
+`MATCH_EVENT`) and CONSOLE (`PLAYER_PREFERENCE`/`PERSONALITY_TRAIT`/
+recent events, avoiding "aggressive roast material" — `RUNNING_JOKE`/
+`TEAM_JOKE` score exactly `0` for CONSOLE, not just lower); CELEBRATE
+reuses ROAST's set plus `ACHIEVEMENT`, since section 31 doesn't give it
+its own list and it's ROAST's closest sibling (single-shot, banter-
+flavored, just the positive side). It's a weighted hybrid, not a hard type
+filter, everywhere except that one CONSOLE exclusion: a highly important,
+highly confident, very recent memory of a non-preferred type can still
+outrank a stale, low-importance preferred one (there's a test for exactly
+this). Recency is an exponential decay off `created_at` with a 21-day
+half-life — the plan specifies a recency *term*, not its shape, so this is
+a starting point tuned by feel, flagged in the code as exactly that kind
+of thing (section 33: "implemented and tuned after the basic system
+works").
+
+**`last_used_at` (section 23) finally has a writer.** `MemoryRepository.touchLastUsed`
+is called, fire-and-forget, for whichever memories actually made it into a
+context — never every memory a player has. Nothing reads it back yet (no
+recency-of-*use* tie-breaker layered on top of section 33's recency-of-
+*creation* term), but it's real data now instead of permanently `null`.
+
+**Backward compatible by construction, not by special-casing.**
+`AiService`'s constructor takes the memory repository as a third,
+optional argument (default `null`); every 2-argument call site — every
+test written before this phase existed — behaves exactly as it did
+before: no repository means retrieval always returns `[]`, the same shape
+a player with zero memories produces. `buildAIContext`/
+`buildConversationContext` both take memories as an optional param for
+the same reason. Nothing about Phase 6/7/8's own behavior changed; Phase 9
+is purely additive.
+
+**271 unit / 122 integration tests passing** (up from 258/118 before this
+revision + Phase 9). New: `memoryRetrieval.test.ts` (scoring, eligibility,
+end-to-end ranking — 18 tests), plus `RELEVANT MEMORIES` rendering
+coverage in `aiContextBuilder.test.ts`/`conversationContextBuilder.test.ts`,
+retrieval-wiring coverage in `aiService.test.ts` (fetch → retrieve →
+prompt → `touchLastUsed`, including the audience/visibility gate with a
+real repository fake), a `touchLastUsed` case in
+`memoryRepository.test.ts`, and `phase9RetrievalE2E.test.ts` — a
+Postgres-backed run proving a `PUBLIC` memory reaches a real public
+CELEBRATE post while a `PRIVATE` one for the same player never does,
+`last_used_at` is actually persisted, and a CONSOLE DM can use a player's
+own `PRIVATE` memories. Not independently re-run against a live database
+from the environment this phase was built in — no DB route available
+there — so a real `npm run test:integration` pass is worth doing before
+treating this phase as fully verified, same caveat as Phase 8's original
+notes.
 
 ## A dependency vulnerability found and fixed (Phase 2)
 
@@ -742,14 +788,14 @@ src/
 │   ├── discordRest.ts, verifyInteraction.ts, httpInteractionAdapter.ts, handleDiscordInteraction.ts
 │   ├── permissions.ts, commandGuards.ts, displayName.ts, announcementSync.ts, timezone.ts
 │   ├── consoleConversation.ts   # Phase 7: DM opener, Reply modal, reply delivery
-│   ├── memoryDecision.ts, memoryDelete.ts   # Phase 8: Remember/Don't Remember + 🗑️ delete button handlers
+│   ├── memoryDelete.ts                       # Phase 8: 🗑️ delete button handler (list + auto-save Forget note)
 ├── modules/
 │   ├── matches/     # matchService, matchLifecycle, dateTime
 │   ├── attendance/  # attendanceService, rosterMessage, customId
 │   ├── reminders/   # reminderScheduling (pure planning), reminderMessages (nudge text)
 │   ├── players/     # playerValidation (agent/topic parsing, role choices) — Phase 5
 │   ├── ai/          # aiService, aiContextBuilder, aiOutput, aiMode (Phase 6); conversationService, conversationContextBuilder, conversationCustomId (Phase 7)
-│   └── memories/    # memoryService, memoryCustomId, memoryManageCustomId — Phase 8
+│   └── memories/    # memoryService, memoryManageCustomId (Phase 8); memoryRetrieval (Phase 9)
 ├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders, players, aiConversations, memories, memoryEvidence
 ├── services/
 │   ├── scheduling/   # cronAuth, reminderCronJob (Phase 4), dmReplyPollJob (Phase 7)
@@ -880,12 +926,12 @@ What's covered so far, mapped to plan section 60's checklist:
   input validation and the User-option adapter resolution
   (`tests/unit/playerValidation.test.ts`,
   `tests/unit/httpInteractionAdapter.test.ts`)
-- ⬜ Protected-topic *filtering into an AI context*: N/A yet for stored
-  memories specifically — Phase 8's candidate validation already rejects a
-  proposed memory whose own content touches a forbidden topic
-  (`tests/unit/aiOutput.test.ts`), but filtering *retrieved* memories back
-  out of a context is Phase 9's job, once there's a retrieval pipeline to
-  filter within
+- ✅ Protected-topic *filtering into an AI context*: Phase 8's candidate
+  validation rejects a proposed memory whose own content touches a
+  forbidden topic at write time (`tests/unit/aiOutput.test.ts`); Phase 9's
+  `isEligible` re-applies the exact same check at *read* time, against
+  whatever the player's protected topics are *now* — not just what they
+  were when the memory was saved (`tests/unit/memoryRetrieval.test.ts`)
 - ✅ `server_config` / `matches` / `attendance` / `reminders` / `players`
   repository semantics, including database-level constraints (unique
   indexes, FK cascade) (`tests/integration/serverConfigRepository.test.ts`,
@@ -915,16 +961,19 @@ What's covered so far, mapped to plan section 60's checklist:
   and the full cron-tick flow — announcement vs. nudge routing, same-tick
   multi-offset ordering, a reverted-then-retried failed send
   (`tests/integration/phase4E2E.test.ts`)
-- ⬜ Memory *retrieval* into an AI context (structured + semantic filtering)
-  — depends on Phase 9's retrieval pipeline, which doesn't exist yet; will
-  be added alongside that phase, not retrofitted at the end
-- ✅ Memory table, evidence, visibility defaults, and approval (plan
-  sections 21-25, 42-44): candidate validation and every section 22
+- ✅ Memory *retrieval* into an AI context (structured filtering + ranking
+  + privacy filtering; semantic/embedding filtering deliberately not
+  built — design principle #11, see the Phase 9 notes above)
+  (`tests/unit/memoryRetrieval.test.ts`,
+  `tests/integration/phase9RetrievalE2E.test.ts`)
+- ✅ Memory table, evidence, visibility defaults, and auto-save (plan
+  sections 21-25, 42-44, section 21 revised 2026-09-26): candidate
+  validation and every section 22
   category (`tests/unit/aiOutput.test.ts`), evidence-cascade and
   per-player deletion scoping (`tests/integration/memoryRepository.test.ts`),
-  and the full propose → approve/decline → double-click idempotency →
-  cross-player rejection → `memoryUsageEnabled: false` → `/memories` →
-  delete flow (`tests/integration/phase8MemoryE2E.test.ts`)
+  and the full propose → auto-save → Forget-button delete → double-delete
+  idempotency → cross-player rejection → `memoryUsageEnabled: false` →
+  `/memories` → delete flow (`tests/integration/phase8MemoryE2E.test.ts`)
 
 **Phase 4's integration suite was actually run**, not just written: this
 sandbox has no route to Neon, so I installed Postgres locally
@@ -952,11 +1001,16 @@ have hit it, rather than being a theoretical gap in coverage.
 - [x] Phase 6 — Basic AI (CELEBRATE / ROAST / CONSOLE, no memory yet)
 - [x] Phase 7 — Private AI Conversations (CONSOLE DM flow: Reply-button modal +
       optional typed-reply poller, follow-ups, turn/idle/match-state limits)
-- [x] Phase 8 — Memory System (`memories`/`memory_evidence`, consent-first
-      approval via Remember/Don't Remember buttons on a CONSOLE wrap-up,
-      `/memories` self-service view + delete) — passive channel-message
-      scanning deliberately not built; see the Phase 8 notes above for why
-- [ ] Phase 9 — Retrieval (structured + semantic + privacy filtering)
+- [x] Phase 8 — Memory System (`memories`/`memory_evidence`, auto-save on a
+      CONSOLE wrap-up with a one-tap Forget button — revised 2026-09-26 from
+      the original consent-first Remember/Don't Remember design, see plan
+      section 21's changelog note — plus `/memories` self-service view +
+      delete) — passive channel-message scanning deliberately not built; see
+      the Phase 8 notes above for why
+- [x] Phase 9 — Retrieval (structured filtering + ranking + privacy
+      filtering + context builder — semantic/embedding retrieval
+      deliberately not built; a 6-7 person team's per-player memory count
+      doesn't justify it yet, see the Phase 9 notes above for why)
 - [ ] Phase 10 — Match Hype / Recaps
 
 Each phase will be checked against `Full_Development_Plan.md` before

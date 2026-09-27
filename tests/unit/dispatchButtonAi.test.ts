@@ -49,6 +49,7 @@ function setup(
       return { id: "dm-1" };
     }),
     sendDirectMessage: vi.fn(async () => ({ id: "dm-msg-1" })),
+    sendMentionMessage: vi.fn(async () => undefined),
   };
   const ctx = {
     logger,
@@ -84,12 +85,13 @@ function setup(
 }
 
 describe("dispatchButton — Phase 6 AI followup", () => {
-  it("sends the AI response as an ephemeral followup after updating the roster", async () => {
+  it("sends the AI response publicly in the match channel, @mentioning the player, after updating the roster (ROAST/CELEBRATE must be visible to the team — plan sections 18/19)", async () => {
     const t = setup();
     await t.run();
     expect(t.interaction.update).toHaveBeenCalledTimes(1);
     expect(t.respondToAttendance).toHaveBeenCalledWith(expect.objectContaining({ status: "PLAYING" }));
-    expect(t.interaction.followUp).toHaveBeenCalledWith({ content: "LET'S GOOO", ephemeral: true });
+    expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "LET'S GOOO", "user-1");
+    expect(t.interaction.followUp).not.toHaveBeenCalled();
   });
 
   it("does nothing AI-related for a repeated identical click (idempotency, plan section 50)", async () => {
@@ -98,17 +100,15 @@ describe("dispatchButton — Phase 6 AI followup", () => {
     expect(t.interaction.update).toHaveBeenCalledTimes(1);
     expect(t.respondToAttendance).not.toHaveBeenCalled();
     expect(t.interaction.followUp).not.toHaveBeenCalled();
+    expect(t.discord.sendMentionMessage).not.toHaveBeenCalled();
   });
 
-  it("behaves exactly like Phase 5 when the AI is not configured, and logs why (this used to be silent)", async () => {
+  it("behaves exactly like Phase 5 when the AI is not configured", async () => {
     const t = setup({ aiEnabled: false });
     await t.run();
     expect(t.respondToAttendance).not.toHaveBeenCalled();
     expect(t.interaction.followUp).not.toHaveBeenCalled();
-    expect(t.logger.info).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "ai.followup.skipped", reason: "ai_disabled" }),
-      expect.any(String),
-    );
+    expect(t.discord.sendMentionMessage).not.toHaveBeenCalled();
   });
 
   it("skips the AI for a clicker with no active player profile", async () => {
@@ -145,12 +145,13 @@ describe("dispatchButton — Phase 6 AI followup", () => {
     expect(t.conversations.startConsole).not.toHaveBeenCalled();
   });
 
-  it("CELEBRATE / ROAST never open a conversation", async () => {
+  it("CELEBRATE / ROAST never open a conversation, and both go out publicly, not just PLAYING", async () => {
     for (const status of ["PLAYING", "CANNOT_PLAY"] as const) {
       const t = setup({ status });
       await t.run();
       expect(t.conversations.startConsole).not.toHaveBeenCalled();
       expect(t.discord.sendDirectMessage).not.toHaveBeenCalled();
+      expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "LET'S GOOO", "user-1");
     }
   });
 

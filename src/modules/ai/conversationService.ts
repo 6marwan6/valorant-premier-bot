@@ -167,7 +167,7 @@ export class ConversationService {
    * schema/aiConversations.ts's doc comment on why there's no separate
    * staging table. Returns the stored row (or null if the insert didn't
    * happen — see AiConversationRepository.addMessage) so the caller has the
-   * row id a Remember/Don't Remember button needs.
+   * row id `MemoryService.autoSave` needs.
    */
   async recordAssistantMessage(
     conversationId: number,

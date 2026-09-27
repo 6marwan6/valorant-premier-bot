@@ -22,7 +22,7 @@ export const memoryTypeEnum = pgEnum("memory_type", [
 
 /**
  * Plan section 24 "Memory Visibility" — all four, in the plan's own order.
- * Phase 8's only creation path (an approved CONSOLE conversation candidate,
+ * Phase 8's only creation path (an auto-saved CONSOLE conversation candidate,
  * section 61) always writes PRIVATE (see memoryService.ts); TEAM/PUBLIC
  * have no writer yet (nothing in V1 asks a player to loosen a memory's
  * visibility) and PROTECTED has no writer either — it exists here as a
@@ -53,7 +53,7 @@ export const memoryVisibilityEnum = pgEnum("memory_visibility", ["PUBLIC", "TEAM
  *   player's memories", `/memories`, future retrieval) already has
  *   `players.id` in hand rather than a raw Discord snowflake.
  * - `confidence` is a `real` in `[0, 1]` (section 26's own scale: "0.87",
- *   "1.0"). Phase 8's only writer is an explicit, player-confirmed fact
+ *   "1.0"). Phase 8's only writer is an explicit, in-conversation statement
  *   (section 61: "Confidence: 1.0") — always 1.0. Nothing yet lowers it
  *   for a one-off inferred statement (section 26's other case, "repeated
  *   behavior" raising confidence over time) because Phase 8 has no

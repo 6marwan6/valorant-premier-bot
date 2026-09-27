@@ -79,17 +79,22 @@ describe("quoteForDm", () => {
   });
 });
 
-function fakeCtx(sendImpl?: () => Promise<{ id: string }>, savedMessage: { id: number; memoryCandidate: { type: string; content: string } | null } | null = { id: 501, memoryCandidate: null }) {
+function fakeCtx(
+  sendImpl?: () => Promise<{ id: string }>,
+  savedMessage: { id: number; memoryCandidate: { type: string; content: string } | null } | null = { id: 501, memoryCandidate: null },
+  autoSaveResult: { id: number } | null = null,
+) {
   const sendDirectMessage = vi.fn(sendImpl ?? (async () => ({ id: "m-1" })));
   const editChannelMessage = vi.fn(async () => undefined);
   const recordAssistantMessage = vi.fn(async () => savedMessage);
+  const autoSave = vi.fn(async () => autoSaveResult);
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const ctx = {
     logger,
     discord: { sendDirectMessage, editChannelMessage },
-    services: { conversations: { recordAssistantMessage } },
+    services: { conversations: { recordAssistantMessage }, memories: { autoSave } },
   } as unknown as AppContext;
-  return { ctx, sendDirectMessage, editChannelMessage, recordAssistantMessage, logger };
+  return { ctx, sendDirectMessage, editChannelMessage, recordAssistantMessage, autoSave, logger };
 }
 
 describe("deliverConversationReply", () => {
@@ -134,13 +139,14 @@ describe("deliverConversationReply", () => {
     expect(t.recordAssistantMessage).toHaveBeenCalledWith(9, "That's valid 😭", null);
   });
 
-  it("a wrap-up reply carrying a memory candidate (plan section 21) gets a follow-up edit adding Remember/Don't Remember buttons", async () => {
+  it("a wrap-up reply carrying a memory candidate (plan section 21, revised) is saved automatically and gets a follow-up edit adding a single Forget button", async () => {
     const candidate = { type: "MATCH_EVENT" as const, content: "Ahmed had an exam." };
-    const t = fakeCtx(undefined, { id: 501, memoryCandidate: candidate });
+    const t = fakeCtx(undefined, { id: 501, memoryCandidate: candidate }, { id: 900 });
     const outcome = { ...base, continues: false, memoryCandidate: candidate };
     const ok = await deliverConversationReply(t.ctx, { conversation: base.conversation, dmChannelId: "dm-1", outcome });
     expect(ok).toBe(true);
     expect(t.recordAssistantMessage).toHaveBeenCalledWith(9, "That's valid 😭", candidate);
+    expect(t.autoSave).toHaveBeenCalledWith(501);
     expect(t.editChannelMessage).toHaveBeenCalledTimes(1);
     const [channel, messageId, payload] = t.editChannelMessage.mock.calls[0] as unknown as [
       string,
@@ -149,14 +155,36 @@ describe("deliverConversationReply", () => {
     ];
     expect(channel).toBe("dm-1");
     expect(messageId).toBe("m-1");
+    expect(payload.content).toContain("That's valid 😭");
+    expect(payload.content).toMatch(/noted/i);
     const buttonIds = payload.components[0]!.toJSON().components.map((c) => c.custom_id);
-    expect(buttonIds).toEqual(["memory:remember:501", "memory:decline:501"]);
+    expect(buttonIds).toEqual(["memory:del:900"]);
   });
 
-  it("no candidate on the saved row: no edit call at all, even on a wrap-up turn", async () => {
+  it("no candidate on the saved row: no auto-save, no edit call at all, even on a wrap-up turn", async () => {
     const t = fakeCtx(undefined, { id: 501, memoryCandidate: null });
     const outcome = { ...base, continues: false };
     await deliverConversationReply(t.ctx, { conversation: base.conversation, dmChannelId: "dm-1", outcome });
+    expect(t.autoSave).not.toHaveBeenCalled();
+    expect(t.editChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("a candidate on a CONTINUING turn is never auto-saved, even if present (backend enforces wrap-up-only, plan section 37, regardless of what the model returned)", async () => {
+    const candidate = { type: "MATCH_EVENT" as const, content: "Ahmed had an exam." };
+    const t = fakeCtx(undefined, { id: 501, memoryCandidate: candidate }, { id: 900 });
+    const outcome = { ...base, continues: true, memoryCandidate: candidate };
+    await deliverConversationReply(t.ctx, { conversation: base.conversation, dmChannelId: "dm-1", outcome });
+    expect(t.autoSave).not.toHaveBeenCalled();
+    expect(t.editChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("auto-save returning null (already saved on a retry, plan section 50) skips the edit rather than erroring", async () => {
+    const candidate = { type: "MATCH_EVENT" as const, content: "Ahmed had an exam." };
+    const t = fakeCtx(undefined, { id: 501, memoryCandidate: candidate }, null);
+    const outcome = { ...base, continues: false, memoryCandidate: candidate };
+    const ok = await deliverConversationReply(t.ctx, { conversation: base.conversation, dmChannelId: "dm-1", outcome });
+    expect(ok).toBe(true);
+    expect(t.autoSave).toHaveBeenCalledWith(501);
     expect(t.editChannelMessage).not.toHaveBeenCalled();
   });
 
@@ -204,39 +232,17 @@ describe("deliverConversationReply", () => {
 });
 
 describe("startConsoleDm", () => {
-  it("passes non-'started' outcomes straight through without touching Discord, and logs which one and why", async () => {
-    for (const aiEnabled of [true, false]) {
+  it("passes non-'started' outcomes straight through without touching Discord", async () => {
+    for (const kind of ["unavailable", "already_open"] as const) {
       const createDmChannel = vi.fn();
-      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
       const ctx = {
-        logger,
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
         discord: { createDmChannel },
-        services: {
-          ai: { enabled: aiEnabled },
-          conversations: { startConsole: vi.fn(async () => ({ kind: "unavailable" as const })) },
-        },
+        services: { conversations: { startConsole: vi.fn(async () => ({ kind })) } },
       } as unknown as AppContext;
-      expect(await startConsoleDm(ctx, { player: makePlayer(), match: makeMatch() })).toBe("unavailable");
+      expect(await startConsoleDm(ctx, { player: makePlayer(), match: makeMatch() })).toBe(kind);
       expect(createDmChannel).not.toHaveBeenCalled();
-      // Used to be completely silent either way — now says which of the
-      // two very different reasons it was (plan design principle #8's own
-      // "AI off" case vs. a player's individual setting).
-      expect(logger.info).toHaveBeenCalledWith(
-        expect.objectContaining({ event: "ai.conversation.unavailable", reason: aiEnabled ? "player_ai_followups_disabled" : "ai_disabled" }),
-        expect.any(String),
-      );
     }
-
-    const createDmChannel2 = vi.fn();
-    const logger2 = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const ctx2 = {
-      logger: logger2,
-      discord: { createDmChannel: createDmChannel2 },
-      services: { ai: { enabled: true }, conversations: { startConsole: vi.fn(async () => ({ kind: "already_open" as const })) } },
-    } as unknown as AppContext;
-    expect(await startConsoleDm(ctx2, { player: makePlayer(), match: makeMatch() })).toBe("already_open");
-    expect(createDmChannel2).not.toHaveBeenCalled();
-    expect(logger2.info).toHaveBeenCalledWith(expect.objectContaining({ event: "ai.conversation.alreadyOpen" }), expect.any(String));
   });
 
   it("a bookkeeping failure after the DM went out is NOT reported as a DM failure", async () => {
@@ -245,7 +251,6 @@ describe("startConsoleDm", () => {
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       discord: { createDmChannel: vi.fn(async () => ({ id: "dm-1" })), sendDirectMessage: vi.fn(async () => ({ id: "m-1" })) },
       services: {
-        ai: { enabled: true },
         conversations: {
           startConsole: vi.fn(async () => ({ kind: "started", conversation: conversation(), openerText: "hi" })),
           recordOpener: vi.fn(async () => {
@@ -257,28 +262,5 @@ describe("startConsoleDm", () => {
     } as unknown as AppContext;
     expect(await startConsoleDm(ctx, { player: makePlayer(), match: makeMatch() })).toBe("started");
     expect(abandon).not.toHaveBeenCalled();
-  });
-
-  it("a closed-DM failure logs both the Discord error code AND HTTP status (plan section 51: metadata, not content)", async () => {
-    const abandon = vi.fn();
-    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const ctx = {
-      logger,
-      discord: {
-        createDmChannel: vi.fn(async () => {
-          throw Object.assign(new Error("Cannot send messages to this user"), { code: 50007, status: 403 });
-        }),
-      },
-      services: {
-        ai: { enabled: true },
-        conversations: {
-          startConsole: vi.fn(async () => ({ kind: "started", conversation: conversation(), openerText: "hi" })),
-          abandon,
-        },
-      },
-    } as unknown as AppContext;
-    expect(await startConsoleDm(ctx, { player: makePlayer(), match: makeMatch() })).toBe("dm_failed");
-    expect(abandon).toHaveBeenCalledWith(conversation().id, "DM_UNAVAILABLE");
-    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ code: 50007, status: 403 }), expect.any(String));
   });
 });

@@ -47,38 +47,15 @@ describe("OpenAiCompatibleLlmClient", () => {
     expect(body.temperature).toBe(0.2);
   });
 
-  it("throws LlmError(http) with a short message (never the body) but carries the body in `detail` for diagnostics", async () => {
+  it("throws LlmError(http) on non-2xx without leaking the body", async () => {
     const client = new OpenAiCompatibleLlmClient({
       ...baseConfig,
-      fetchImpl: (async () => new Response("provider error detail", { status: 429 })) as never,
+      fetchImpl: (async () => new Response("secret provider detail", { status: 429 })) as never,
     });
     const err = await client.complete({ system: "s", user: "u" }).catch((e) => e);
     expect(err).toBeInstanceOf(LlmError);
     expect(err).toMatchObject({ kind: "http", status: 429 });
-    // `message` is a fixed, generic string — never interpolates the body.
-    expect(err.message).not.toContain("provider error detail");
-    // `detail` is the whole point of capturing it: without it, an
-    // intermittent provider-side rejection (bad IP allowlist, rate limit,
-    // exhausted quota — anything that isn't simply "wrong key") is
-    // indistinguishable from any other 401/429 in the logs.
-    expect(err.detail).toBe("provider error detail");
-  });
-
-  it("truncates an oversized error body rather than logging it in full", async () => {
-    const client = new OpenAiCompatibleLlmClient({
-      ...baseConfig,
-      fetchImpl: (async () => new Response("x".repeat(2000), { status: 500 })) as never,
-    });
-    const err = await client.complete({ system: "s", user: "u" }).catch((e) => e);
-    expect(err.detail).toHaveLength(500);
-  });
-
-  it("still throws cleanly if the error body can't even be read", async () => {
-    const badResponse = { ok: false, status: 500, text: () => Promise.reject(new Error("body already consumed")) };
-    const client = new OpenAiCompatibleLlmClient({ ...baseConfig, fetchImpl: (async () => badResponse) as never });
-    const err = await client.complete({ system: "s", user: "u" }).catch((e) => e);
-    expect(err).toBeInstanceOf(LlmError);
-    expect(err.detail).toBeUndefined();
+    expect(err.message).not.toContain("secret");
   });
 
   it("throws LlmError(empty) when content is missing or blank (e.g. thinking ate max_tokens)", async () => {
@@ -109,8 +86,7 @@ describe("OpenAiCompatibleLlmClient", () => {
 });
 
 describe("createLlmClient", () => {
-  const env = { LLM_API_KEY: "sk-supersecrettestkey", LLM_BASE_URL: "https://x/v1", LLM_MODEL: "m", LLM_EXTRA_BODY: undefined, LLM_TIMEOUT_MS: 1000, LLM_MAX_TOKENS: 100 };
-  const fakeLogger = () => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() });
+  const env = { LLM_API_KEY: "k", LLM_BASE_URL: "https://x/v1", LLM_MODEL: "m", LLM_EXTRA_BODY: undefined, LLM_TIMEOUT_MS: 1000, LLM_MAX_TOKENS: 100 };
 
   it("returns null unless key, base URL and model are all set", () => {
     expect(createLlmClient({ ...env, LLM_API_KEY: undefined })).toBeNull();
@@ -119,31 +95,8 @@ describe("createLlmClient", () => {
     expect(createLlmClient(env)?.model).toBe("m");
   });
 
-  it("logs exactly which env var(s) are missing — this used to be completely silent", () => {
-    const logger = fakeLogger();
-    createLlmClient({ ...env, LLM_API_KEY: undefined }, logger);
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "ai.config.missing", missing: ["LLM_API_KEY"] }),
-      expect.stringContaining("LLM_API_KEY"),
-    );
-
-    const logger2 = fakeLogger();
-    createLlmClient({ ...env, LLM_API_KEY: undefined, LLM_BASE_URL: undefined, LLM_MODEL: undefined }, logger2);
-    expect(logger2.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ missing: ["LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"] }),
-      expect.any(String),
-    );
-  });
-
-  it("never logs anything resembling the API key itself", () => {
-    const logger = fakeLogger();
-    createLlmClient(env, logger);
-    const serialized = JSON.stringify([...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls]);
-    expect(serialized).not.toContain(env.LLM_API_KEY);
-  });
-
   it("disables AI (and logs) instead of throwing on malformed LLM_EXTRA_BODY", () => {
-    const logger = fakeLogger();
+    const logger = { error: vi.fn(), warn: vi.fn() };
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: "{nope" }, logger)).toBeNull();
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: "[1]" }, logger)).toBeNull();
     expect(logger.error).toHaveBeenCalledTimes(2);
@@ -151,24 +104,5 @@ describe("createLlmClient", () => {
 
   it("accepts a JSON object for LLM_EXTRA_BODY", () => {
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: '{"reasoning_effort":"low"}' })).not.toBeNull();
-  });
-
-  it("logs a one-line confirmation (model + resolved URL + a redacted key preview, never the real key) once AI is actually enabled", () => {
-    const logger = fakeLogger();
-    createLlmClient(env, logger);
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: "ai.config.enabled",
-        model: "m",
-        resolvedUrl: "https://x/v1/chat/completions",
-        apiKeyPreview: expect.stringContaining("(len=21)"),
-      }),
-      expect.any(String),
-    );
-  });
-
-  it("works with no logger at all (logger is optional)", () => {
-    expect(createLlmClient(env)).not.toBeNull();
-    expect(createLlmClient({ ...env, LLM_API_KEY: undefined })).toBeNull();
   });
 });

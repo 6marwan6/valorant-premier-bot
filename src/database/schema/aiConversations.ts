@@ -94,14 +94,19 @@ export const aiConversations = pgTable(
 export const aiMessageRoleEnum = pgEnum("ai_message_role", ["USER", "ASSISTANT", "SYSTEM"]);
 
 /**
- * Where a proposed memory (plan section 21) currently stands. `PENDING` is
- * set the moment the model's `memory_candidate` is accepted onto an
- * ASSISTANT row; the player's button click resolves it. An
- * `UPDATE ... WHERE memory_candidate_status = 'PENDING'` is the actual
- * duplicate-decision guard (see MemoryRepository.claimCandidate) — the same
- * claim-then-act pattern `reminders.status` already uses, chosen for the
- * same reason: a double-tapped button can't decide the same candidate
- * twice (plan section 50).
+ * Where a proposed memory (plan section 21, revised) currently stands.
+ * `PENDING` is set the moment the model's `memory_candidate` is accepted
+ * onto an ASSISTANT row; the backend's own auto-save step (see
+ * memoryService.ts's `autoSave`) resolves it to `APPROVED` within the same
+ * turn — there is no player decision to wait for anymore. An
+ * `UPDATE ... WHERE memory_candidate_status = 'PENDING'` is still the
+ * actual duplicate-save guard (see AiConversationRepository.claimMemoryCandidate)
+ * — the same claim-then-act pattern `reminders.status` already uses,
+ * chosen for the same reason: a retried delivery can't save the same
+ * candidate twice (plan section 50). `DECLINED` is no longer written by
+ * anything — kept in the enum only because rows from before this revision
+ * may still carry it, and dropping a Postgres enum value is its own
+ * migration hazard for no benefit.
  */
 export const memoryCandidateStatusEnum = pgEnum("memory_candidate_status", ["PENDING", "APPROVED", "DECLINED"]);
 

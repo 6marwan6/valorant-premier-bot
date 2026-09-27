@@ -129,4 +129,26 @@ describeIfDb("MemoryRepository (integration)", () => {
     });
     expect(await db.select().from(memoryEvidence).where(eq(memoryEvidence.memoryId, memory.id))).toHaveLength(2);
   });
+
+  it("touchLastUsed (Phase 9) bumps last_used_at only for the given ids, and a call with no ids is a no-op", async () => {
+    const untouched = await memoriesRepo.create({
+      playerId: playerA,
+      type: "HABIT",
+      content: "Never retrieved.",
+      evidence: [{ sourceType: "AI_CONVERSATION", sourceId: "30" }],
+    });
+    const touched = await memoriesRepo.create({
+      playerId: playerA,
+      type: "HABIT",
+      content: "Actually retrieved this time.",
+      evidence: [{ sourceType: "AI_CONVERSATION", sourceId: "31" }],
+    });
+    expect((await memoriesRepo.getById(touched.id))!.lastUsedAt).toBeNull();
+
+    await memoriesRepo.touchLastUsed([]); // no-op, never throws
+    await memoriesRepo.touchLastUsed([touched.id]);
+
+    expect((await memoriesRepo.getById(touched.id))!.lastUsedAt).not.toBeNull();
+    expect((await memoriesRepo.getById(untouched.id))!.lastUsedAt).toBeNull();
+  });
 });

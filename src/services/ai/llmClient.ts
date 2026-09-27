@@ -25,18 +25,7 @@ export interface LlmClient {
   complete(request: LlmRequest): Promise<LlmResult>;
 }
 
-/**
- * `kind`/`status` let callers log a reason without ever touching the
- * *response content* the model itself generated (plan section 51) — that
- * restriction is about player conversation data, not about the provider's
- * own error messages. `detail` is different: it's a truncated snippet of
- * the provider's error body on an HTTP failure specifically, e.g. `{"error":
- * "insufficient quota"}` or `{"error": "IP not allowlisted"}` — operational
- * information about the account/key/deployment, not about any player.
- * Deliberately truncated (plan section 51's "keep prompts/logs compact"
- * spirit) and only ever populated for `kind: "http"`, never for a
- * successful call.
- */
+/** `kind` lets callers log a reason without ever touching the response body (plan section 51). */
 export class LlmError extends Error {
   constructor(
     message: string,
@@ -96,24 +85,14 @@ export class OpenAiCompatibleLlmClient implements LlmClient {
             { role: "user", content: request.user },
           ],
           max_tokens: this.config.maxTokens,
-          temperature: 0.7,
+          temperature: 0.9,
           ...this.config.extraBody,
         }),
         signal: controller.signal,
       });
 
       if (!response.ok) {
-        // Read defensively: some providers send a JSON error object, some
-        // send plain text, and a body can only be read once — whatever
-        // happens here, the HTTP error itself is still what gets thrown.
-        let detail: string | undefined;
-        try {
-          const bodyText = await response.text();
-          detail = bodyText.slice(0, 500);
-        } catch {
-          detail = undefined;
-        }
-        throw new LlmError(`LLM request failed with HTTP ${response.status}`, "http", response.status, detail);
+        throw new LlmError(`LLM request failed with HTTP ${response.status}`, "http", response.status);
       }
 
       const json = (await response.json()) as ChatCompletionResponse;
@@ -152,14 +131,8 @@ type LlmEnv = Pick<
  * configured or LLM_EXTRA_BODY is malformed: plan design principle #8 —
  * attendance must keep working no matter what the AI layer's state is, so
  * a bad AI env var must never take down the whole interaction handler.
- *
- * Both ways this can come back disabled are logged (this used to fall
- * through to `return null` completely silently for a missing key/URL/model
- * — the single most likely explanation for "the AI never seems to run and
- * nothing in the logs says why"). Logged once per cold start, not per
- * request, since createLlmClient runs once when AppContext is built.
  */
-export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "warn" | "info">): LlmClient | null {
+export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "warn">): LlmClient | null {
   if (!env.LLM_API_KEY || !env.LLM_BASE_URL || !env.LLM_MODEL) {
     const missing = [
       !env.LLM_API_KEY && "LLM_API_KEY",

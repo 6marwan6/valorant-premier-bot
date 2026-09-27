@@ -12,7 +12,7 @@ import { z } from "zod";
  * silently drift.
  */
 const MAX_RESPONSE_LENGTH = 1000; // section 35: concise; also far below Discord's 2000-char limit
-const MAX_MEMORY_CONTENT_LENGTH = 300; // shown back to the player verbatim in the Remember/Don't Remember prompt
+const MAX_MEMORY_CONTENT_LENGTH = 300; // shown back to the player verbatim in /memories (section 43)
 
 export const MEMORY_TYPES = [
   "PLAYER_PREFERENCE",

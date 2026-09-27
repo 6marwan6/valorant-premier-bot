@@ -4,9 +4,7 @@ import { parseAttendanceCustomId } from "../../modules/attendance/customId.js";
 import { buildRosterMessage } from "../../modules/attendance/rosterMessage.js";
 import { resolveDisplayName } from "../displayName.js";
 import { startConsoleDm } from "../consoleConversation.js";
-import { isMemoryDecisionCustomId } from "../../modules/memories/memoryCustomId.js";
 import { isMemoryDeleteCustomId } from "../../modules/memories/memoryManageCustomId.js";
-import { handleMemoryDecisionButton } from "../memoryDecision.js";
 import { handleMemoryDeleteButton } from "../memoryDelete.js";
 import type { MatchRow } from "../../database/schema/matches.js";
 import type { PlayerRow } from "../../database/schema/players.js";
@@ -40,23 +38,11 @@ async function sendAiFollowUp(
   ctx: AppContext,
   params: { match: MatchRow; status: AttendanceRow["status"]; changed: boolean; roster: PlayerRow[] },
 ): Promise<void> {
-  if (!params.changed) return;
-  if (!ctx.services.ai.enabled) {
-    // The single most useful line in this whole file when "the bot went
-    // quiet": tells you immediately that no AI call was even attempted,
-    // rather than leaving you to guess between this and an LLM call that
-    // failed further down (which logs its own "AI request failed"/"AI
-    // output rejected" separately — see aiService.ts).
-    ctx.logger.info(
-      { event: "ai.followup.skipped", reason: "ai_disabled", matchId: params.match.id, status: params.status },
-      "AI is not configured (LLM_API_KEY/LLM_BASE_URL/LLM_MODEL) — skipping the AI follow-up entirely",
-    );
-    return;
-  }
+  if (!params.changed || !ctx.services.ai.enabled) return;
   const player = params.roster.find((p) => p.discordUserId === interaction.user.id);
   if (!player) return;
-
   const channelId = params.match.announcementChannelId;
+
   try {
     await ctx.services.conversations.endForAttendanceChange(player.id, params.match.id, params.status);
 
@@ -68,16 +54,11 @@ async function sendAiFollowUp(
         await ctx.discord.sendMentionMessage(channelId, "can't make it this time 🟡", player.discordUserId);
       }
       if (started === "started") {
-        await interaction.followUp({
-          content: "📩 I sent you a DM — let's talk there.",
-          ephemeral: true,
-        });
+        await interaction.followUp({ content: "📩 I sent you a DM, let's talk there.", ephemeral: true });
         return;
       }
-      
       dmFailed = started === "dm_failed";
       // "unavailable" / "dm_failed": fall through to the single message.
-      // (startConsoleDm already logged which one, and why.)
     }
 
     const outcome = await ctx.services.ai.respondToAttendance({
@@ -85,11 +66,12 @@ async function sendAiFollowUp(
       match: params.match,
       status: params.status,
     });
-     if (params.status !== "WANTS_TO_BUT_CANNOT" && outcome.source === "ai" && channelId) {
+
+    if (params.status !== "WANTS_TO_BUT_CANNOT" && outcome.source === "ai" && channelId) {
       await ctx.discord.sendMentionMessage(channelId, outcome.text, player.discordUserId);
       return;
     }
-    
+
     const note = dmFailed
       ? "\n\n_(I tried to DM you but couldn't — allow DMs from server members if you'd like to chat.)_"
       : "";
@@ -108,23 +90,19 @@ async function sendAiFollowUp(
 }
 
 /**
- * Routes a button click. Three kinds exist: attendance buttons (custom_id
- * `attendance:<matchId>:<status>`, plan section 15); since Phase 8, the
- * memory Remember/Don't Remember buttons under a wrapped-up CONSOLE DM
- * (`memory:remember:<id>` / `memory:decline:<id>`, plan section 21); and
- * the `/memories` delete buttons (`memory:del:<id>`, plan sections 42/43).
- * The two memory kinds are routed to discord/memoryDecision.ts and
- * discord/memoryDelete.ts before the attendance-specific guild check
- * below, since both run in contexts an attendance click never does (a DM,
- * or an ephemeral command reply) and neither touches attendance or match
- * state at all. Anything else is logged and ignored rather than crashing,
- * the same fail-safe posture as dispatchCommand's "unknown command" branch.
+ * Routes a button click. Two kinds exist: attendance buttons (custom_id
+ * `attendance:<matchId>:<status>`, plan section 15); and the memory
+ * `/memories`-and-Forget-note delete buttons (`memory:del:<id>`, plan
+ * sections 42/43 — since the section 21 revision, this is the only memory
+ * button there is; memories save automatically, see consoleConversation.ts
+ * and memoryService.ts). Memory deletes route to discord/memoryDelete.ts
+ * before the attendance-specific guild check below, since it runs in
+ * contexts an attendance click never does (a DM, or an ephemeral command
+ * reply) and never touches attendance or match state at all. Anything else
+ * is logged and ignored rather than crashing, the same fail-safe posture
+ * as dispatchCommand's "unknown command" branch.
  */
 export async function dispatchButton(interaction: ButtonInteraction, ctx: AppContext): Promise<void> {
-  if (isMemoryDecisionCustomId(interaction.customId)) {
-    await handleMemoryDecisionButton(interaction, ctx);
-    return;
-  }
   if (isMemoryDeleteCustomId(interaction.customId)) {
     await handleMemoryDeleteButton(interaction, ctx);
     return;

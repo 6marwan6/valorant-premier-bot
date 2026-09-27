@@ -5,13 +5,14 @@ import {
   buildConversationContext,
   type ConversationTranscriptEntry,
 } from "../../src/modules/ai/conversationContextBuilder.js";
-import { makeMatch, makePlayer } from "./helpers/aiFixtures.js";
+import { makeMatch, makeMemory, makePlayer } from "./helpers/aiFixtures.js";
+import type { MemoryRow } from "../../src/database/schema/memories.js";
 
 const player = makePlayer();
 const match = makeMatch();
 
-function build(transcript: ConversationTranscriptEntry[], overrides: Parameters<typeof makePlayer>[0] = {}) {
-  return buildConversationContext({ player: makePlayer(overrides), match, transcript });
+function build(transcript: ConversationTranscriptEntry[], overrides: Parameters<typeof makePlayer>[0] = {}, memories: MemoryRow[] = []) {
+  return buildConversationContext({ player: makePlayer(overrides), match, transcript, memories });
 }
 
 describe("buildConversationContext (plan sections 20, 34, 56)", () => {
@@ -163,5 +164,27 @@ describe("buildConversationContext (plan sections 20, 34, 56)", () => {
     expect(ctx.user).not.toMatch(/memor/i);
     expect(ctx.user).toContain(`Match vs ${match.opponent}`);
     expect(player.displayName).toBe("Ahmed");
+  });
+
+  it("renders RELEVANT MEMORIES when given some, and omits it entirely when not (Phase 9)", () => {
+    const withMemories = build([], {}, [makeMemory({ content: "Ali usually has exams around this time of year." })]);
+    expect(withMemories.user).toContain("RELEVANT MEMORIES");
+    expect(withMemories.user).toContain('- Ali usually has exams around this time of year.');
+
+    const without = build([]);
+    expect(without.user).not.toContain("RELEVANT MEMORIES");
+  });
+
+  it("RELEVANT MEMORIES sits between CURRENT EVENT and FORBIDDEN TOPICS, before the conversation transcript (plan section 34's example order)", () => {
+    const ctx = build([{ role: "USER", content: "reasons" }], {}, [makeMemory({ content: "A fact." })]);
+    const lines = ctx.user.split("\n");
+    const eventIdx = lines.indexOf("CURRENT EVENT");
+    const memIdx = lines.indexOf("RELEVANT MEMORIES");
+    const forbiddenIdx = lines.findIndex((l) => l.startsWith("FORBIDDEN TOPICS"));
+    const convoIdx = lines.findIndex((l) => l.startsWith("CONVERSATION"));
+    expect(eventIdx).toBeGreaterThan(-1);
+    expect(memIdx).toBeGreaterThan(eventIdx);
+    expect(forbiddenIdx).toBeGreaterThan(memIdx);
+    expect(convoIdx).toBeGreaterThan(forbiddenIdx);
   });
 });

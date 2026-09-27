@@ -773,36 +773,50 @@ However, it should not pressure the player to disclose personal information.
 
 ---
 
-# 21. Memory Permission Flow
+# 21. Memory Creation (revised — see changelog note)
 
-If a potentially useful personal fact emerges:
+> **Revision, 2026-09-26:** this section originally specified an opt-in
+> Remember/Don't Remember button per candidate. Marwan (product owner)
+> changed this to opt-out: memories are treated as consented-to by
+> default, the same model Claude and ChatGPT use for their own memory
+> features, disclosed to the team up front in the onboarding/setup
+> material (see `Privacy Policy.md`) rather than re-confirmed per fact.
+> The original text is struck through below for history; the paragraph
+> after it is what's actually implemented.
+
+~~If a potentially useful personal fact emerges:~~
 
 ```text
 Player:
 "I can't play because I have an exam tomorrow."
 ```
 
-The bot may propose:
+~~The bot may propose:~~
 
 ```text
-"I could remember that you had an exam that prevented
-you from playing tonight.
+~~"I could remember that you had an exam that prevented~~
+~~you from playing tonight.~~
 
-Should I remember this?"
+~~Should I remember this?"~~
 
-[ 🧠 Remember ]
-[ ❌ Don't Remember ]
+~~[ 🧠 Remember ]~~
+~~[ ❌ Don't Remember ]~~
 ```
 
-If the user selects `Don't Remember`:
+~~If the user selects `Don't Remember`: do not create a reusable memory
+from that fact. If the user selects `Remember`: create a memory with
+appropriate visibility, record its source, record that the player
+explicitly approved it.~~
 
-- Do not create a reusable memory from that fact.
-
-If the user selects `Remember`:
-
-- Create a memory with appropriate visibility.
-- Record its source.
-- Record that the player explicitly approved it.
+**As implemented:** consent is expressed once, up front, via the
+player's own "Memory usage" AI setting (section 9) — off means nothing
+below ever runs for that player. When it's on and a candidate emerges
+from something the player explicitly said in a CONSOLE conversation, the
+application saves it automatically, the same turn, with appropriate
+visibility and a recorded source (section 25). The player is told what
+was saved right under the AI's message, with an immediate one-tap
+"Forget this" button (section 43) — undo instead of confirm. There is no
+per-fact approval step.
 
 Default visibility should be conservative.
 
@@ -1528,7 +1542,11 @@ The AI cannot reveal another player's private memories.
 
 ### Rule 5
 
-Users should have control over explicit personal memories.
+Users should have control over explicit personal memories. **Revised
+2026-09-26 (see section 21):** control is exercised after the fact —
+every memory is announced with an immediate undo, reviewable and
+deletable anytime via `/memories` — rather than as a before-the-fact
+approval gate.
 
 ### Rule 6
 
@@ -2158,6 +2176,13 @@ expired interaction
 
 # 61. Example End-to-End Scenario
 
+> **Revision, 2026-09-24:** CELEBRATE/ROAST responses below are shown as
+> ephemeral "Private response" per the original spec. As implemented,
+> these go out publicly in the match channel (an `@mention` of the
+> player), not privately — a private roast defeats its own purpose as
+> team hype/banter. CONSOLE (Ali's example further below) is unaffected
+> and stays a real private DM.
+
 ## Match creation
 
 Admin:
@@ -2316,14 +2341,14 @@ Ahh okay, that's valid 😭
 
 Go destroy that exam first.
 
-Want me to remember that you couldn't make this match
-because of an exam?
+Noted — I'll remember that you couldn't make this match
+because of an exam.
 
-[🧠 Remember]
-[❌ Don't Remember]
+[🗑️ Forget this]
 ```
 
-Ali clicks Remember.
+The memory is already saved by the time this message goes out (see
+section 21's revision note) — the button is an undo, not a confirmation.
 
 Database creates:
 
@@ -2342,9 +2367,6 @@ Confidence:
 
 Evidence:
 AIConversation #83
-
-User approved:
-true
 ```
 
 ---

@@ -194,9 +194,11 @@ export class AiConversationRepository {
    * ("duplicate AI interaction processing"), same claim-then-act shape as
    * `reminders.status` (PENDING -> CLAIMED/SENT). The single
    * `UPDATE ... WHERE memory_candidate_status = 'PENDING'` is the entire
-   * guard: a double-tapped Remember/Don't Remember button can only ever
-   * win this race once, and the loser gets back the already-decided row
-   * (`memoryDecision.ts` treats that as "already handled," not an error).
+   * guard: since the section 21 revision this claims the row for the
+   * backend's own auto-save step (memoryService.ts's `autoSave`), not a
+   * player's button click — a retried delivery can only ever win this
+   * race once, and the loser gets back `null` (treated as "already
+   * saved," not an error).
    */
   async claimMemoryCandidate(messageId: number, resolution: MemoryCandidateStatus): Promise<AiMessageRow | null> {
     const [row] = await this.db

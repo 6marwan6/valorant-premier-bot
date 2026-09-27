@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Database } from "../client.js";
 import { memories, type MemoryRow, type MemoryType, type MemoryVisibility } from "../schema/memories.js";
 import { memoryEvidence, type MemoryEvidenceRow } from "../schema/memoryEvidence.js";
@@ -73,8 +73,9 @@ export class MemoryRepository {
    * player's memory via a guessed id (plan section 44 rule 4). Cascades to
    * `memory_evidence` automatically (schema's `onDelete: "cascade"") —
    * "deleting a memory should also invalidate its retrieval
-   * representation," and there is no separate representation yet to worry
-   * about (Phase 9). Returns whether a row was actually removed, so the
+   * representation," which for this codebase just means this row itself —
+   * there's no separate embedding index (Phase 9 deliberately has none;
+   * see memoryRetrieval.ts) to go stale alongside it. Returns whether a row was actually removed, so the
    * command can tell "deleted" from "not yours / doesn't exist" without
    * leaking which.
    */
@@ -84,5 +85,21 @@ export class MemoryRepository {
       .where(and(eq(memories.id, id), eq(memories.playerId, playerId)))
       .returning({ id: memories.id });
     return rows.length > 0;
+  }
+
+  /**
+   * Plan section 23's `last_used_at` column, finally given a writer:
+   * bumped for exactly the memories `retrieveMemories` (Phase 9) actually
+   * selected for a context, not every memory a player has (see
+   * aiService.ts). Not read by anything yet — no recency-of-use tie-
+   * breaker exists on top of section 33's own `created_at`-based recency
+   * term — but it's real data now instead of permanently null, for
+   * whenever that's worth adding. Fire-and-forget from the caller's point
+   * of view: never lets a logging-adjacent bookkeeping write block or fail
+   * an AI response (plan section 48's spirit).
+   */
+  async touchLastUsed(ids: number[]): Promise<void> {
+    if (ids.length === 0) return;
+    await this.db.update(memories).set({ lastUsedAt: new Date() }).where(inArray(memories.id, ids));
   }
 }

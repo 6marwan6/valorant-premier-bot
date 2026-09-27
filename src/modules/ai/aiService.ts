@@ -2,29 +2,16 @@ import type { Logger } from "../../config/logger.js";
 import type { AttendanceRow } from "../../database/schema/attendance.js";
 import type { MatchRow } from "../../database/schema/matches.js";
 import type { PlayerRow } from "../../database/schema/players.js";
+import type { MemoryRepository } from "../../database/repositories/memoryRepository.js";
 import { LlmError, type LlmClient } from "../../services/ai/llmClient.js";
-import { buildAIContext } from "./aiContextBuilder.js";
-import { modeForStatus } from "./aiMode.js";
+import { buildAIContext, forbiddenTopicsFor } from "./aiContextBuilder.js";
+import { modeForStatus, type AiMode } from "./aiMode.js";
 import { parseAiOutput, type MemoryCandidate } from "./aiOutput.js";
 import { buildConversationContext, type ConversationTranscriptEntry } from "./conversationContextBuilder.js";
+import { retrieveMemories } from "../memories/memoryRetrieval.js";
 
 /** Plan section 48's own example fallback wording. */
 export const AI_FALLBACK_MESSAGE = "Your response has been recorded 👍";
-
-/**
- * Plan sections 51/58 say "metadata only — never prompt or response
- * content" for a good reason: a normal log shouldn't carry what a player
- * said. `!parsed.ok` is the one deliberate, narrow exception — if the
- * model's raw output can't even be parsed as the expected JSON shape,
- * there is no other way to see *why* (a stray markdown fence, an empty
- * `content` field on a "thinking" model that spent its whole budget on
- * hidden reasoning, a preamble before the JSON) than looking at what it
- * actually said. Truncated hard, logged only on this one failure path,
- * never on a successful turn.
- */
-function rawPreview(text: string): string {
-  return text.slice(0, 300);
-}
 
 export interface AiOutcome {
   text: string;
@@ -57,11 +44,38 @@ export class AiService {
   constructor(
     private readonly llm: LlmClient | null,
     private readonly logger: Logger,
+    /** Optional (defaults to none) so every existing 2-arg call site — including every test that predates Phase 9 — keeps working exactly as before: no repository means retrieval always returns zero memories, the same as if Phase 9 didn't exist yet. */
+    private readonly memories: MemoryRepository | null = null,
   ) {}
 
   /** False when no provider is configured — callers then behave exactly as they did before Phase 6. */
   get enabled(): boolean {
     return this.llm !== null;
+  }
+
+  /**
+   * Phase 9 (plan sections 30/33): fetches a player's memories, runs them
+   * through retrieveMemories, and best-effort bumps `last_used_at` on
+   * whatever was actually selected. Returns `[]` with no repository
+   * configured (see the constructor's doc comment) — the same shape a
+   * player with zero memories produces, so callers never need to branch
+   * on whether Phase 9 is "on".
+   *
+   * The `touchLastUsed` write is fire-and-forget on purpose: it's
+   * bookkeeping about a context that's already been built by the time this
+   * runs, so a failure here must never surface as an AI failure (plan
+   * section 48's spirit — same reasoning as this class's outer try/catch).
+   */
+  private async retrieveFor(player: PlayerRow, mode: AiMode, forbiddenTopics: string[]) {
+    if (!this.memories) return [];
+    const all = await this.memories.listByPlayer(player.id);
+    const selected = retrieveMemories({ memories: all, mode, forbiddenTopics });
+    if (selected.length > 0) {
+      void this.memories
+        .touchLastUsed(selected.map((m) => m.id))
+        .catch((err) => this.logger.warn({ event: "memory.touch_failed", err: err instanceof Error ? err.message : String(err) }, "Failed to bump memory last_used_at"));
+    }
+    return selected;
   }
 
   async respondToAttendance(params: {
@@ -73,7 +87,14 @@ export class AiService {
     if (!this.llm) return fallback;
 
     const mode = modeForStatus(params.status);
-    const context = buildAIContext({ player: params.player, mode, match: params.match });
+    // Section 34's own PLAYER->FORBIDDEN order means forbidden topics have
+    // to exist before retrieval does — buildAIContext computes the same
+    // list internally and returns it back out as `context.forbiddenTopics`
+    // for the *output* validation below; forbiddenTopicsFor is the one
+    // function both sides call so they can never drift apart.
+    const forbiddenTopics = forbiddenTopicsFor(params.player);
+    const memories = await this.retrieveFor(params.player, mode, forbiddenTopics);
+    const context = buildAIContext({ player: params.player, mode, match: params.match, memories });
     const startedAt = Date.now();
     // Plan sections 51/58: metadata only — never prompt or response content.
     const base = {
@@ -82,7 +103,7 @@ export class AiService {
       playerId: params.player.id,
       matchId: params.match.id,
       model: this.llm.model,
-      memoryCount: 0,
+      memoryCount: memories.length,
     };
 
     try {
@@ -95,10 +116,7 @@ export class AiService {
 
       const parsed = parseAiOutput(result.text, context.forbiddenTopics);
       if (!parsed.ok) {
-        this.logger.warn(
-          { ...base, ...metrics, success: false, reason: parsed.reason, rawPreview: rawPreview(result.text) },
-          "AI output rejected",
-        );
+        this.logger.warn({ ...base, ...metrics, success: false, reason: parsed.reason }, "AI output rejected");
         return fallback;
       }
 
@@ -112,7 +130,6 @@ export class AiService {
           success: false,
           reason: err instanceof LlmError ? err.kind : "unknown",
           status: err instanceof LlmError ? err.status : undefined,
-          detail: err instanceof LlmError ? err.detail : undefined,
           err: err instanceof Error ? err.message : String(err),
         },
         "AI request failed",
@@ -139,11 +156,14 @@ export class AiService {
   }): Promise<ConversationAiOutcome> {
     if (!this.llm) return { source: "fallback" };
 
+    const forbiddenTopics = forbiddenTopicsFor(params.player);
+    const memories = await this.retrieveFor(params.player, "CONSOLE", forbiddenTopics);
     const context = buildConversationContext({
       player: params.player,
       match: params.match,
       transcript: params.transcript,
       maxPlayerTurns: params.maxPlayerTurns,
+      memories,
     });
     const startedAt = Date.now();
     const base = {
@@ -154,7 +174,7 @@ export class AiService {
       matchId: params.match.id,
       conversationId: params.conversationId,
       model: this.llm.model,
-      memoryCount: 0,
+      memoryCount: memories.length,
     };
 
     try {
@@ -167,10 +187,7 @@ export class AiService {
 
       const parsed = parseAiOutput(result.text, context.forbiddenTopics);
       if (!parsed.ok) {
-        this.logger.warn(
-          { ...base, ...metrics, success: false, reason: parsed.reason, rawPreview: rawPreview(result.text) },
-          "AI conversation output rejected",
-        );
+        this.logger.warn({ ...base, ...metrics, success: false, reason: parsed.reason }, "AI conversation output rejected");
         return { source: "fallback" };
       }
 
@@ -189,7 +206,6 @@ export class AiService {
           success: false,
           reason: err instanceof LlmError ? err.kind : "unknown",
           status: err instanceof LlmError ? err.status : undefined,
-          detail: err instanceof LlmError ? err.detail : undefined,
           err: err instanceof Error ? err.message : String(err),
         },
         "AI conversation request failed",
