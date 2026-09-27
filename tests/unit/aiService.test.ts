@@ -72,19 +72,36 @@ describe("AiService", () => {
   });
 
   it("falls back on invalid JSON and on protected-topic violations", async () => {
+    const logger = fakeLogger();
     const invalid = new AiService(
       fakeLlm(async () => ({ text: "not json", model: "m", inputTokens: null, outputTokens: null })),
-      fakeLogger() as unknown as Logger,
-    );
-    expect((await invalid.respondToAttendance(params)).source).toBe("fallback");
-
-    const logger = fakeLogger();
-    const violating = new AiService(
-      fakeLlm(async () => ({ text: json("call your family"), model: "m", inputTokens: null, outputTokens: null })),
       logger as unknown as Logger,
     );
+    expect((await invalid.respondToAttendance(params)).source).toBe("fallback");
+    // A parse failure is the one deliberate exception to "metadata only"
+    // (plan sections 51/58) — without seeing what the model actually said,
+    // this failure mode is otherwise undiagnosable (a "thinking" model
+    // putting its real answer somewhere other than a clean JSON blob looks
+    // identical to any other malformed response in the logs).
+    expect(logger.warn.mock.calls[0]![0]).toMatchObject({ reason: "invalid_json", rawPreview: "not json" });
+
+    const violatingLogger = fakeLogger();
+    const violating = new AiService(
+      fakeLlm(async () => ({ text: json("call your family"), model: "m", inputTokens: null, outputTokens: null })),
+      violatingLogger as unknown as Logger,
+    );
     expect((await violating.respondToAttendance(params)).source).toBe("fallback");
-    expect(logger.warn.mock.calls[0]![0]).toMatchObject({ reason: "protected_topic", success: false });
+    expect(violatingLogger.warn.mock.calls[0]![0]).toMatchObject({ reason: "protected_topic", success: false });
+  });
+
+  it("truncates the rawPreview rather than logging an oversized response in full", async () => {
+    const logger = fakeLogger();
+    const service = new AiService(
+      fakeLlm(async () => ({ text: "x".repeat(2000), model: "m", inputTokens: null, outputTokens: null })),
+      logger as unknown as Logger,
+    );
+    await service.respondToAttendance(params);
+    expect((logger.warn.mock.calls[0]![0] as { rawPreview: string }).rawPreview).toHaveLength(300);
   });
 
   it("uses the mode matching the attendance status", async () => {

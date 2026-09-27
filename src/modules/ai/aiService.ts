@@ -11,6 +11,21 @@ import { buildConversationContext, type ConversationTranscriptEntry } from "./co
 /** Plan section 48's own example fallback wording. */
 export const AI_FALLBACK_MESSAGE = "Your response has been recorded 👍";
 
+/**
+ * Plan sections 51/58 say "metadata only — never prompt or response
+ * content" for a good reason: a normal log shouldn't carry what a player
+ * said. `!parsed.ok` is the one deliberate, narrow exception — if the
+ * model's raw output can't even be parsed as the expected JSON shape,
+ * there is no other way to see *why* (a stray markdown fence, an empty
+ * `content` field on a "thinking" model that spent its whole budget on
+ * hidden reasoning, a preamble before the JSON) than looking at what it
+ * actually said. Truncated hard, logged only on this one failure path,
+ * never on a successful turn.
+ */
+function rawPreview(text: string): string {
+  return text.slice(0, 300);
+}
+
 export interface AiOutcome {
   text: string;
   source: "ai" | "fallback";
@@ -80,7 +95,10 @@ export class AiService {
 
       const parsed = parseAiOutput(result.text, context.forbiddenTopics);
       if (!parsed.ok) {
-        this.logger.warn({ ...base, ...metrics, success: false, reason: parsed.reason }, "AI output rejected");
+        this.logger.warn(
+          { ...base, ...metrics, success: false, reason: parsed.reason, rawPreview: rawPreview(result.text) },
+          "AI output rejected",
+        );
         return fallback;
       }
 
@@ -94,6 +112,7 @@ export class AiService {
           success: false,
           reason: err instanceof LlmError ? err.kind : "unknown",
           status: err instanceof LlmError ? err.status : undefined,
+          detail: err instanceof LlmError ? err.detail : undefined,
           err: err instanceof Error ? err.message : String(err),
         },
         "AI request failed",
@@ -148,7 +167,10 @@ export class AiService {
 
       const parsed = parseAiOutput(result.text, context.forbiddenTopics);
       if (!parsed.ok) {
-        this.logger.warn({ ...base, ...metrics, success: false, reason: parsed.reason }, "AI conversation output rejected");
+        this.logger.warn(
+          { ...base, ...metrics, success: false, reason: parsed.reason, rawPreview: rawPreview(result.text) },
+          "AI conversation output rejected",
+        );
         return { source: "fallback" };
       }
 
@@ -167,6 +189,7 @@ export class AiService {
           success: false,
           reason: err instanceof LlmError ? err.kind : "unknown",
           status: err instanceof LlmError ? err.status : undefined,
+          detail: err instanceof LlmError ? err.detail : undefined,
           err: err instanceof Error ? err.message : String(err),
         },
         "AI conversation request failed",
