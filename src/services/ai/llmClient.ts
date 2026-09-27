@@ -96,7 +96,7 @@ export class OpenAiCompatibleLlmClient implements LlmClient {
             { role: "user", content: request.user },
           ],
           max_tokens: this.config.maxTokens,
-          temperature: 0.9,
+          temperature: 0.7,
           ...this.config.extraBody,
         }),
         signal: controller.signal,
