@@ -1,5 +1,5 @@
 import type { AppContext } from "../../appContext.js";
-import { planReminders, formatOffsetLabel } from "../../modules/reminders/reminderScheduling.js";
+import { planReminders } from "../../modules/reminders/reminderScheduling.js";
 import { buildReminderNudgeMessage } from "../../modules/reminders/reminderMessages.js";
 import { buildRosterMessage } from "../../modules/attendance/rosterMessage.js";
 
@@ -31,7 +31,11 @@ export interface ReminderCronSummary {
  *    has passed. The earliest-due reminder for a SCHEDULED match is the
  *    one that opens it for confirmation (absorbing what /post-match used
  *    to do manually — see that command's doc comment); every later
- *    reminder for the same match is a short nudge instead.
+ *    reminder for the same match is a short nudge instead. The nudge
+ *    closest to kickoff (plan section 38) is upgraded to a MATCH_HYPE
+ *    message when AI is on and there is more than one reminder offset —
+ *    same embed, AI-written flavor text on top; any AI failure just sends
+ *    the plain nudge (plan section 48).
  *
  * This function has no Discord/HTTP awareness of its own — api/cron/
  * reminders.ts is the thin Vercel entry point that authenticates the
@@ -101,32 +105,35 @@ export async function runReminderCronJob(ctx: AppContext, now: Date = new Date()
         if (!channelId) throw new Error("Match is open but has no announcement channel on record");
 
         const attendanceRows = await ctx.repositories.attendance.listByMatch(match.id);
-        let content = buildReminderNudgeMessage(match, attendanceRows, reminder.offsetMinutes);
 
-        // Plan section 38 "Match Hype": the example header ("🔥 15
-        // MINUTES") matches the closest-to-kickoff entry in the default
-        // reminder schedule (3h/1h/15m), so that's the one nudge this
-        // swaps for an AI-flavored hype message instead of the plain
-        // attendance count. A single-offset schedule never reaches this
-        // branch for its only reminder (that one always opens
-        // confirmation instead, in the `if` above), so hype simply
-        // doesn't fire in that setup — there's no non-announcement
-        // reminder left to attach it to.
+        // Plan section 38: hype rides on the nudge closest to kickoff. A
+        // single-offset schedule never hypes (its only reminder is the
+        // announcement, which must carry the buttons). Never throws
+        // (AiService returns a fallback outcome) — and if it somehow did,
+        // the outer catch would revert the reminder to PENDING, so guard
+        // it: a hype failure must never cost the team their reminder.
         const offsets = configsByGuildId.get(match.guildId)?.reminderScheduleMinutes ?? [];
-        const isClosestToKickoff = offsets.length > 0 && reminder.offsetMinutes === Math.min(...offsets);
+        const isClosestToKickoff = offsets.length > 1 && reminder.offsetMinutes === Math.min(...offsets);
+        let hypeText: string | null = null;
         if (isClosestToKickoff) {
-          const roster = await ctx.repositories.players.listActiveByGuild(match.guildId);
-          const hype = await ctx.services.ai.generateMatchHype({ match, roster });
-          if (hype.source === "ai") {
-            content = [`🔥 **${formatOffsetLabel(reminder.offsetMinutes).toUpperCase()}**`, "", `Match #${match.id} vs **${match.opponent}**`, "", hype.text].join("\n");
+          try {
+            const roster = await ctx.repositories.players.listActiveByGuild(match.guildId);
+            const hype = await ctx.services.ai.generateMatchHype({ match, roster });
+            if (hype.source === "ai") hypeText = hype.text;
+          } catch (err) {
+            ctx.logger.warn(
+              { event: "reminder.hypeFailed", matchId: match.id, reminderId: reminder.id, err: err instanceof Error ? err.message : String(err) },
+              "Match hype failed — sending the plain nudge",
+            );
           }
         }
 
-        const sent = await ctx.discord.sendChannelMessage(channelId, { content });
+        const { embeds } = buildReminderNudgeMessage(match, attendanceRows, reminder.offsetMinutes, hypeText);
+        const sent = await ctx.discord.sendChannelMessage(channelId, { embeds });
         await ctx.repositories.reminders.markSent(claimed.id, channelId, sent.id);
 
         ctx.logger.info(
-          { event: "reminder.nudgeSent", matchId: match.id, reminderId: reminder.id, offsetMinutes: reminder.offsetMinutes },
+          { event: "reminder.nudgeSent", matchId: match.id, reminderId: reminder.id, offsetMinutes: reminder.offsetMinutes, hype: hypeText !== null },
           "Reminder nudge sent",
         );
       }

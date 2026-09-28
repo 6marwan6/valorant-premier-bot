@@ -25,7 +25,6 @@ describeIfDb("AttendanceRepository (integration)", () => {
     await configRepo.upsert(guildId, { timezone: "Europe/Berlin" });
     const match = await matchRepo.create({
       guildId,
-      opponent: "Team Attendance",
       scheduledAt: new Date("2026-11-01T18:00:00Z"),
       timezone: "Europe/Berlin",
     });
@@ -92,7 +91,6 @@ describeIfDb("AttendanceRepository (integration)", () => {
   it("scopes attendance rows per match, not globally", async () => {
     const otherMatch = await matchRepo.create({
       guildId,
-      opponent: "Team Other",
       scheduledAt: new Date("2026-11-02T18:00:00Z"),
       timezone: "Europe/Berlin",
     });
@@ -113,7 +111,6 @@ describeIfDb("AttendanceRepository (integration)", () => {
   it("cascades delete when a match is deleted (FK ON DELETE CASCADE)", async () => {
     const throwawayMatch = await matchRepo.create({
       guildId,
-      opponent: "Team Throwaway",
       scheduledAt: new Date("2026-11-03T18:00:00Z"),
       timezone: "Europe/Berlin",
     });

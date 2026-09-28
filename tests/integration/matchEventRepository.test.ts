@@ -29,7 +29,6 @@ describeIfDb("MatchEventRepository (integration, plan section 40)", () => {
     await new ServerConfigRepository(db).upsert(guildId, { timezone: "Europe/Berlin" });
     const match = await matches.create({
       guildId,
-      opponent: "Team Alpha",
       scheduledAt: new Date("2026-10-01T18:00:00Z"),
       timezone: "Europe/Berlin",
     });
@@ -76,7 +75,6 @@ describeIfDb("MatchEventRepository (integration, plan section 40)", () => {
   it("cascades on match deletion (onDelete: cascade)", async () => {
     const throwaway = await matches.create({
       guildId,
-      opponent: "Throwaway Opponent",
       scheduledAt: new Date("2026-10-09T18:00:00Z"),
       timezone: "Europe/Berlin",
     });

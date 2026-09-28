@@ -19,6 +19,7 @@ function setup(
     status?: "PLAYING" | "CANNOT_PLAY" | "WANTS_TO_BUT_CANNOT";
     startOutcome?: StartOutcome;
     dmThrows?: boolean;
+    mentionThrows?: boolean;
   } = {},
 ) {
   const {
@@ -30,6 +31,7 @@ function setup(
     status = "PLAYING",
     startOutcome = { kind: "unavailable" } as StartOutcome,
     dmThrows = false,
+    mentionThrows = false,
   } = opts;
   const match = makeMatch();
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -49,7 +51,9 @@ function setup(
       return { id: "dm-1" };
     }),
     sendDirectMessage: vi.fn(async () => ({ id: "dm-msg-1" })),
-    sendMentionMessage: vi.fn(async () => undefined),
+    sendMentionMessage: vi.fn(async () => {
+      if (mentionThrows) throw new Error("discord rejected the post");
+    }),
   };
   const ctx = {
     logger,
@@ -155,7 +159,41 @@ describe("dispatchButton — Phase 6 AI followup", () => {
     }
   });
 
+  it.each(["PLAYING", "CANNOT_PLAY"] as const)(
+    "%s: if the public @mention is rejected, the same reply goes to the player privately instead (never silence)",
+    async (status) => {
+      const t = setup({ status, mentionThrows: true });
+      await t.run();
+      expect(t.discord.sendMentionMessage).toHaveBeenCalledTimes(1);
+      expect(t.interaction.followUp).toHaveBeenCalledWith({ content: "LET'S GOOO", ephemeral: true });
+      expect(t.interaction.reply).not.toHaveBeenCalled();
+      expect(t.logger.warn).toHaveBeenCalledWith(expect.objectContaining({ event: "ai.followup.publicPostFailed" }), expect.any(String));
+    },
+  );
+
   describe("WANTS_TO_BUT_CANNOT (CONSOLE, Phase 7)", () => {
+    it("posts only the fixed public line (no AI text, no reason) and the private DM pointer", async () => {
+      const t = setup({
+        status: "WANTS_TO_BUT_CANNOT",
+        startOutcome: { kind: "started", conversation: { id: 7 }, openerText: "NOOO 😭 What happened?" },
+      });
+      await t.run();
+      expect(t.discord.sendMentionMessage).toHaveBeenCalledTimes(1);
+      expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "can't make it this time 🟡", "user-1");
+    });
+
+    it("a rejected public line does not skip the DM pointer (the DM was already opened)", async () => {
+      const t = setup({
+        status: "WANTS_TO_BUT_CANNOT",
+        mentionThrows: true,
+        startOutcome: { kind: "started", conversation: { id: 7 }, openerText: "NOOO 😭 What happened?" },
+      });
+      await t.run();
+      expect(t.discord.sendDirectMessage).toHaveBeenCalledTimes(1);
+      expect(t.interaction.followUp).toHaveBeenCalledTimes(1);
+      expect(t.interaction.followUp).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true, content: expect.stringContaining("DM") }));
+    });
+
     it("opens a DM conversation and only points the player at it", async () => {
       const t = setup({
         status: "WANTS_TO_BUT_CANNOT",

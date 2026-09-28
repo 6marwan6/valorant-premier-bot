@@ -30,7 +30,6 @@ export function makeMatch(overrides: Partial<MatchRow> = {}): MatchRow {
   return {
     id: 42,
     guildId: "guild-1",
-    opponent: "Team XYZ",
     scheduledAt: new Date("2026-09-18T16:00:00Z"),
     timezone: "Africa/Cairo",
     status: "CONFIRMATION_OPEN",

@@ -45,7 +45,7 @@ const cancelMatchCommand: Command = {
     }
 
     await interaction.reply({
-      content: `🚫 **Match #${result.value.id}** against ${result.value.opponent} has been cancelled.`,
+      content: `🚫 **Match #${result.value.id}** has been cancelled.`,
       ephemeral: true,
     });
   },

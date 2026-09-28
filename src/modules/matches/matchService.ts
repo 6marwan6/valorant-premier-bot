@@ -19,17 +19,7 @@ export class MatchService {
     private readonly serverConfig: ServerConfigRepository,
   ) {}
 
-  async createMatch(params: {
-    guildId: string;
-    opponent: string;
-    dateStr: string;
-    timeStr: string;
-  }): Promise<MatchResult<MatchRow>> {
-    const opponent = params.opponent.trim();
-    if (!opponent) {
-      return { ok: false, error: "Opponent name can't be empty." };
-    }
-
+  async createMatch(params: { guildId: string; dateStr: string; timeStr: string }): Promise<MatchResult<MatchRow>> {
     const config = await this.serverConfig.getByGuildId(params.guildId);
     if (!config) {
       // Plan section 11: "The team's configured timezone should be used
@@ -47,30 +37,20 @@ export class MatchService {
     // here for a specific, friendly message; the DB's partial unique
     // index (schema/matches.ts) is the actual enforcement backstop in
     // case of a race between two concurrent /create-match calls.
-    const duplicate = await this.matches.findActiveDuplicate(params.guildId, opponent, parsed.scheduledAt);
+    const duplicate = await this.matches.findActiveDuplicate(params.guildId, parsed.scheduledAt);
     if (duplicate) {
-      return {
-        ok: false,
-        error: `Match #${duplicate.id} against ${duplicate.opponent} is already scheduled at that exact time.`,
-      };
+      return { ok: false, error: `Match #${duplicate.id} is already scheduled at that exact time.` };
     }
 
     const match = await this.matches.create({
       guildId: params.guildId,
-      opponent,
       scheduledAt: parsed.scheduledAt,
       timezone: config.timezone,
     });
     return { ok: true, value: match };
   }
 
-  async editMatch(params: {
-    guildId: string;
-    matchId: number;
-    opponent?: string;
-    dateStr?: string;
-    timeStr?: string;
-  }): Promise<MatchResult<MatchRow>> {
+  async editMatch(params: { guildId: string; matchId: number; dateStr?: string; timeStr?: string }): Promise<MatchResult<MatchRow>> {
     const existing = await this.matches.getById(params.matchId);
     if (!existing || existing.guildId !== params.guildId) {
       return { ok: false, error: `No match #${params.matchId} found in this server.` };
@@ -78,8 +58,8 @@ export class MatchService {
     if (!canEditMatch(existing.status)) {
       return { ok: false, error: describeWhyLocked(existing.status) };
     }
-    if (params.opponent === undefined && params.dateStr === undefined && params.timeStr === undefined) {
-      return { ok: false, error: "Nothing to change — provide at least one of opponent, date, or time." };
+    if (params.dateStr === undefined && params.timeStr === undefined) {
+      return { ok: false, error: "Nothing to change — provide both date and time." };
     }
     // Date and time must be edited together: existing.timezone is the
     // frozen snapshot from creation, so editing only one half would force
@@ -88,29 +68,18 @@ export class MatchService {
       return { ok: false, error: "Provide both date and time together when changing either." };
     }
 
-    let scheduledAt = existing.scheduledAt;
-    if (params.dateStr && params.timeStr) {
-      const parsed = parseMatchDateTime(params.dateStr, params.timeStr, existing.timezone);
-      if (!parsed.ok) return { ok: false, error: parsed.error };
-      scheduledAt = parsed.scheduledAt;
-    }
+    const parsed = parseMatchDateTime(params.dateStr!, params.timeStr!, existing.timezone);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    const scheduledAt = parsed.scheduledAt;
 
-    const opponent = params.opponent?.trim() ?? existing.opponent;
-    if (params.opponent !== undefined && !opponent) {
-      return { ok: false, error: "Opponent name can't be empty." };
-    }
-
-    if (opponent !== existing.opponent || scheduledAt.getTime() !== existing.scheduledAt.getTime()) {
-      const duplicate = await this.matches.findActiveDuplicate(params.guildId, opponent, scheduledAt);
+    if (scheduledAt.getTime() !== existing.scheduledAt.getTime()) {
+      const duplicate = await this.matches.findActiveDuplicate(params.guildId, scheduledAt);
       if (duplicate && duplicate.id !== existing.id) {
-        return {
-          ok: false,
-          error: `Match #${duplicate.id} against ${duplicate.opponent} is already scheduled at that exact time.`,
-        };
+        return { ok: false, error: `Match #${duplicate.id} is already scheduled at that exact time.` };
       }
     }
 
-    const updated = await this.matches.update(existing.id, { opponent, scheduledAt });
+    const updated = await this.matches.update(existing.id, { scheduledAt });
     if (!updated) return { ok: false, error: "Failed to update the match. Please try again." };
     return { ok: true, value: updated };
   }

@@ -23,10 +23,11 @@ describe("buildMatchHypeContext (plan section 38)", () => {
   it("puts roster/agent facts and match facts in the user message, not the system prompt (plan section 56)", () => {
     const roster = [makePlayer({ id: 1, displayName: "Ahmed", role: "DUELIST", preferredAgent: "Jett" })];
     const ctx = buildMatchHypeContext({ match: makeMatch(), roster });
-    expect(ctx.user).toContain("Opponent: Team XYZ");
+    expect(ctx.user).not.toContain("Opponent"); // matches have no opponent anymore (plan section 11, revised)
     expect(ctx.user).toContain("Ahmed (DUELIST, Jett)");
     expect(ctx.system).not.toContain("Ahmed");
-    expect(ctx.system).not.toContain("Team XYZ");
+    expect(ctx.user).toContain("Kickoff:");
+    expect(ctx.system).not.toContain("Kickoff:");
     expect(ctx.user).toContain("MODE: MATCH_HYPE");
   });
 

@@ -165,7 +165,6 @@ describeIfDb("handleDiscordInteraction — full HTTP flow (integration)", () => 
     // Seed a real, postable match directly through the service layer.
     const created = await ctx.services.matches.createMatch({
       guildId,
-      opponent: "Team HTTP Flow",
       dateStr: "25/12/2026",
       timeStr: "19:00",
     });
@@ -221,7 +220,6 @@ describeIfDb("handleDiscordInteraction — full HTTP flow (integration)", () => 
       data: {
         name: "create-match",
         options: [
-          { name: "opponent", type: ApplicationCommandOptionType.String, value: "Team RawPayload" },
           { name: "date", type: ApplicationCommandOptionType.String, value: "26/12/2026" },
           { name: "time", type: ApplicationCommandOptionType.String, value: "20:00" },
         ],
@@ -238,9 +236,42 @@ describeIfDb("handleDiscordInteraction — full HTTP flow (integration)", () => 
     });
 
     expect(fakeDiscord.originalEdits[0]!.content).toMatch(/Match #\d+ created/);
-    expect(fakeDiscord.originalEdits[0]!.content).toContain("Team RawPayload");
+    const created = /Match #(\d+)/.exec(fakeDiscord.originalEdits[0]!.content ?? "")!;
+    const matchId = Number(created[1]);
+
+    // A second raw payload, this time with an Integer option (match_id) —
+    // covers the type this file's own name promises ("string/integer")
+    // that create-match alone can no longer provide now that opponent
+    // (the second String option) is gone.
+    const editPayload = fakeRequest({
+      type: InteractionType.ApplicationCommand,
+      guild_id: guildId,
+      token: "interaction-token-edit",
+      member: {
+        roles: [],
+        permissions: String(1 << 3),
+        user: { id: "admin-2", username: "admin2", global_name: "Admin2" },
+      },
+      data: {
+        name: "edit-match",
+        options: [
+          { name: "match_id", type: ApplicationCommandOptionType.Integer, value: matchId },
+          { name: "date", type: ApplicationCommandOptionType.String, value: "27/12/2026" },
+          { name: "time", type: ApplicationCommandOptionType.String, value: "20:00" },
+        ],
+      },
+    });
+    await handleDiscordInteraction({
+      rawBody: editPayload.rawBody,
+      signature: editPayload.signature,
+      timestamp: editPayload.timestamp,
+      publicKey: keypair.publicKeyHex,
+      buildCtx: () => buildCtx(fakeDiscord),
+      sendInitialResponse: () => undefined,
+    });
+    expect(fakeDiscord.originalEdits[1]!.content).toMatch(new RegExp(`Match #${matchId} updated`));
 
     const list = await buildCtx(fakeDiscord).services.matches.listMatches(guildId);
-    expect(list.some((m) => m.opponent === "Team RawPayload")).toBe(true);
+    expect(list.some((m) => m.id === matchId)).toBe(true);
   });
 });

@@ -28,12 +28,12 @@ describeIfDb("ReminderRepository (integration)", () => {
     await pool.end();
   });
 
-  async function makeMatch(opponent: string, scheduledAt: Date) {
-    return matchRepo.create({ guildId, opponent, scheduledAt, timezone: "Africa/Cairo" });
+  async function makeMatch(scheduledAt: Date) {
+    return matchRepo.create({ guildId, scheduledAt, timezone: "Africa/Cairo" });
   }
 
   it("reconcileMatch creates one row per configured offset (plan section 13)", async () => {
-    const match = await makeMatch("Team Reconcile", new Date("2026-11-05T19:00:00Z"));
+    const match = await makeMatch(new Date("2026-11-05T19:00:00Z"));
     await reminderRepo.reconcileMatch(match.id, planReminders(match.scheduledAt, [180, 60, 15]));
 
     const rows = await reminderRepo.listByMatch(match.id);
@@ -43,7 +43,7 @@ describeIfDb("ReminderRepository (integration)", () => {
   });
 
   it("reconcileMatch is idempotent — re-running with the same plan does not duplicate rows (plan section 50)", async () => {
-    const match = await makeMatch("Team Idempotent", new Date("2026-11-06T19:00:00Z"));
+    const match = await makeMatch(new Date("2026-11-06T19:00:00Z"));
     const plan = planReminders(match.scheduledAt, [180, 60, 15]);
     await reminderRepo.reconcileMatch(match.id, plan);
     await reminderRepo.reconcileMatch(match.id, plan);
@@ -54,7 +54,7 @@ describeIfDb("ReminderRepository (integration)", () => {
   });
 
   it("reconcileMatch refreshes scheduled_at for a still-PENDING row when the match is edited", async () => {
-    const match = await makeMatch("Team Edited", new Date("2026-11-07T19:00:00Z"));
+    const match = await makeMatch(new Date("2026-11-07T19:00:00Z"));
     await reminderRepo.reconcileMatch(match.id, planReminders(match.scheduledAt, [60]));
     const before = (await reminderRepo.listByMatch(match.id))[0]!;
 
@@ -67,7 +67,7 @@ describeIfDb("ReminderRepository (integration)", () => {
   });
 
   it("reconcileMatch does NOT overwrite a SENT reminder's scheduled_at (it's history, not a live plan)", async () => {
-    const match = await makeMatch("Team AlreadySent", new Date("2026-11-08T19:00:00Z"));
+    const match = await makeMatch(new Date("2026-11-08T19:00:00Z"));
     await reminderRepo.reconcileMatch(match.id, planReminders(match.scheduledAt, [60]));
     const row = (await reminderRepo.listByMatch(match.id))[0]!;
 
@@ -83,7 +83,7 @@ describeIfDb("ReminderRepository (integration)", () => {
   });
 
   it("claim() is a one-way door — a second claim on the same PENDING->CLAIMED row fails (plan section 50 duplicate-send prevention)", async () => {
-    const match = await makeMatch("Team Race", new Date("2026-11-09T19:00:00Z"));
+    const match = await makeMatch(new Date("2026-11-09T19:00:00Z"));
     await reminderRepo.reconcileMatch(match.id, planReminders(match.scheduledAt, [60]));
     const row = (await reminderRepo.listByMatch(match.id))[0]!;
 
@@ -93,7 +93,7 @@ describeIfDb("ReminderRepository (integration)", () => {
   });
 
   it("revertToPending lets a failed send retry on the next tick", async () => {
-    const match = await makeMatch("Team Revert", new Date("2026-11-10T19:00:00Z"));
+    const match = await makeMatch(new Date("2026-11-10T19:00:00Z"));
     await reminderRepo.reconcileMatch(match.id, planReminders(match.scheduledAt, [60]));
     const row = (await reminderRepo.listByMatch(match.id))[0]!;
 
@@ -109,14 +109,14 @@ describeIfDb("ReminderRepository (integration)", () => {
   });
 
   it("findDue only returns PENDING reminders at/after their scheduled_at, for still-eligible matches, earliest first", async () => {
-    const past = await makeMatch("Team Due", new Date(Date.now() + 60_000));
+    const past = await makeMatch(new Date(Date.now() + 60_000));
     await reminderRepo.reconcileMatch(
       past.id,
       // both offsets computed against a kickoff 1 minute from now, so
       // both scheduled_at values land in the past relative to `now` below
       planReminders(new Date(Date.now() + 60_000), [120, 30]),
     );
-    const future = await makeMatch("Team NotDueYet", new Date("2030-01-01T19:00:00Z"));
+    const future = await makeMatch(new Date("2030-01-01T19:00:00Z"));
     await reminderRepo.reconcileMatch(future.id, planReminders(new Date("2030-01-01T19:00:00Z"), [180]));
 
     const due = await reminderRepo.findDue(new Date());
@@ -127,7 +127,7 @@ describeIfDb("ReminderRepository (integration)", () => {
   });
 
   it("skipPendingForTerminalMatches marks PENDING reminders SKIPPED once their match is CANCELLED", async () => {
-    const match = await makeMatch("Team Cancelled", new Date("2026-11-11T19:00:00Z"));
+    const match = await makeMatch(new Date("2026-11-11T19:00:00Z"));
     await reminderRepo.reconcileMatch(match.id, planReminders(match.scheduledAt, [180, 60]));
     await matchRepo.update(match.id, { status: "CANCELLED" });
 
@@ -139,7 +139,7 @@ describeIfDb("ReminderRepository (integration)", () => {
   });
 
   it("skipPendingForTerminalMatches does not touch reminders for still-active matches", async () => {
-    const match = await makeMatch("Team StillActive", new Date("2026-11-12T19:00:00Z"));
+    const match = await makeMatch(new Date("2026-11-12T19:00:00Z"));
     await reminderRepo.reconcileMatch(match.id, planReminders(match.scheduledAt, [60]));
 
     await reminderRepo.skipPendingForTerminalMatches();

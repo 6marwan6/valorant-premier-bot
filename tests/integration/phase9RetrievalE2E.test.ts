@@ -33,7 +33,7 @@ function fakeDiscord() {
     sendDirectMessage: vi.fn(async (channelId: string, payload: ReplyPayload) => {
       const id = String(++nextId);
       const list = channels.get(channelId) ?? [];
-      list.push({ id, content: payload.content, author: { id: "bot", bot: true }, components: payload.components });
+      list.push({ id, content: payload.content ?? "", author: { id: "bot", bot: true }, components: payload.components });
       channels.set(channelId, list);
       return { id };
     }),
@@ -95,8 +95,7 @@ describeIfDb("Phase 9 — retrieval (integration)", () => {
   async function openMatch(ctx: AppContext) {
     const match = await ctx.repositories.matches.create({
       guildId,
-      opponent: `Team P9-${++seq}`,
-      scheduledAt: new Date(Date.now() + 86_400_000),
+      scheduledAt: new Date(Date.now() + 86_400_000 + ++seq * 60_000), // unique per call: the instant is the only dedup key now
       timezone: "Africa/Cairo",
     } as never);
     await ctx.services.attendance.recordAnnouncement(match.id, "chan", "msg");

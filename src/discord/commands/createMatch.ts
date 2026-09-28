@@ -6,9 +6,12 @@ import { formatMatchDateTime } from "../../modules/matches/dateTime.js";
 /**
  * /create-match — plan section 11 "Match Creation" + section 41.
  *
- * Required fields per the plan, verbatim: "Opponent, Date, Time." The
- * team's configured timezone (plan section 53, set via /setup) is applied
- * automatically — there's no timezone option here on purpose.
+ * Required fields per the plan, revised 2026-09-27: "Date, Time" — the
+ * plan originally also required "Opponent," but Valorant Premier doesn't
+ * reveal the opposing team until the match itself starts, so that field
+ * never had a real value to hold (see plan section 11's revision note).
+ * The team's configured timezone (plan section 53, set via /setup) is
+ * applied automatically — there's no timezone option here on purpose.
  *
  * No setDefaultMemberPermissions() here (unlike /setup): this command
  * must be usable by anyone holding the *configured* admin_role_id, which
@@ -20,9 +23,6 @@ const data = new SlashCommandBuilder()
   .setName("create-match")
   .setDescription("Schedule a new Premier match. Admin only.")
   .setDMPermission(false)
-  .addStringOption((opt) =>
-    opt.setName("opponent").setDescription("Opponent team name").setRequired(true),
-  )
   .addStringOption((opt) =>
     opt.setName("date").setDescription("Match date, DD/MM/YYYY (e.g. 18/09/2026)").setRequired(true),
   )
@@ -36,13 +36,11 @@ const createMatchCommand: Command = {
     const guard = await requireAdminWithConfig(interaction, ctx);
     if (!guard) return;
 
-    const opponent = interaction.options.getString("opponent", true);
     const date = interaction.options.getString("date", true);
     const time = interaction.options.getString("time", true);
 
     const result = await ctx.services.matches.createMatch({
       guildId: guard.guildId,
-      opponent,
       dateStr: date,
       timeStr: time,
     });
@@ -61,7 +59,6 @@ const createMatchCommand: Command = {
     await interaction.reply({
       content: [
         `✅ **Match #${match.id} created.**`,
-        `Opponent: ${match.opponent}`,
         `When: ${formatMatchDateTime(match.scheduledAt, match.timezone)} (${match.timezone})`,
         `Status: ${match.status}`,
       ].join("\n"),

@@ -56,8 +56,8 @@ describe("describeWhyLocked", () => {
   });
 });
 
-describe("every status is covered by all three guards (no silent fallthrough)", () => {
-  it.each(ALL_STATUSES)("%s has a defined edit, cancel, and complete answer", (status) => {
+describe("every status is covered by both guards (no silent fallthrough)", () => {
+  it.each(ALL_STATUSES)("%s has a defined edit and cancel answer", (status) => {
     expect(typeof canEditMatch(status)).toBe("boolean");
     expect(typeof canCancelMatch(status)).toBe("boolean");
     expect(typeof canCompleteMatch(status)).toBe("boolean");

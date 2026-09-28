@@ -5,6 +5,7 @@ import { buildAppContext, type AppContext } from "../../src/appContext.js";
 import type { DiscordRestClient, ReplyPayload } from "../../src/discord/discordRest.js";
 import { runReminderCronJob } from "../../src/services/scheduling/reminderCronJob.js";
 import { logger } from "../../src/config/logger.js";
+import { formatMatchDateTime } from "../../src/modules/matches/dateTime.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const describeIfDb = databaseUrl ? describe : describe.skip;
@@ -82,12 +83,12 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
     await pool.end();
   });
 
-  async function createMatch(opponent: string, scheduledAt: Date) {
-    return ctx.repositories.matches.create({ guildId, opponent, scheduledAt, timezone: "Africa/Cairo" });
+  async function createMatch(scheduledAt: Date) {
+    return ctx.repositories.matches.create({ guildId, scheduledAt, timezone: "Africa/Cairo" });
   }
 
   it("reconciles reminder rows for an active match without sending anything before they're due", async () => {
-    const match = await createMatch("Team Far Future", new Date(Date.now() + 10 * 24 * 60 * MINUTE));
+    const match = await createMatch(new Date(Date.now() + 10 * 24 * 60 * MINUTE));
 
     const summary = await runReminderCronJob(ctx, new Date());
 
@@ -102,7 +103,7 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
     // kickoff in 90 minutes; offsets [120, 60] -> the 120 reminder's
     // scheduled_at is 30 minutes ago (due), the 60 reminder's is 30
     // minutes from now (not due yet).
-    const match = await createMatch("Team Soon", new Date(Date.now() + 90 * MINUTE));
+    const match = await createMatch(new Date(Date.now() + 90 * MINUTE));
 
     const summary = await runReminderCronJob(ctx, new Date());
 
@@ -114,7 +115,8 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
 
     const ourCalls = fakeDiscord.callsForChannel(channelId);
     const [, payload] = ourCalls.at(-1)!;
-    expect(payload.content).toContain("Team Soon");
+    expect(payload.content).toContain("🔴 **PREMIER MATCH**");
+    expect(payload.content).toContain(formatMatchDateTime(match.scheduledAt, match.timezone)); // the roster header shows the kickoff (no opponent anymore)
     expect(payload.components).toHaveLength(1); // the roster message's buttons
 
     const rows = await ctx.repositories.reminders.listByMatch(match.id);
@@ -126,7 +128,7 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
   });
 
   it("re-running the same tick does not double-send the already-SENT announcement (plan section 50)", async () => {
-    const match = await createMatch("Team NoDouble", new Date(Date.now() + 90 * MINUTE));
+    const match = await createMatch(new Date(Date.now() + 90 * MINUTE));
     await runReminderCronJob(ctx, new Date());
     const callsAfterFirst = fakeDiscord.callsForChannel(channelId).length;
 
@@ -141,7 +143,7 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
   it("a later reminder for an already-open match sends a nudge, not a second announcement", async () => {
     // kickoff in 65 minutes: the 120-offset reminder is due now (opens the
     // match); the 60-offset reminder becomes due 5 minutes later.
-    const match = await createMatch("Team Nudge", new Date(Date.now() + 65 * MINUTE));
+    const match = await createMatch(new Date(Date.now() + 65 * MINUTE));
     await runReminderCronJob(ctx, new Date());
     const afterOpen = await ctx.repositories.matches.getById(match.id);
     expect(afterOpen?.status).toBe("CONFIRMATION_OPEN");
@@ -153,7 +155,8 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
     const ourCalls = fakeDiscord.callsForChannel(channelId);
     expect(ourCalls).toHaveLength(callsAfterOpen + 1);
     const [, nudgePayload] = ourCalls.at(-1)!;
-    expect(nudgePayload.content).toContain(`Match #${match.id}`);
+    expect(nudgePayload.content).toBeUndefined(); // the enhanced reminder is an embed, not plain text
+    expect(nudgePayload.embeds![0]!.toJSON().description).toContain(`Match #${match.id}`);
     expect(nudgePayload.components).toBeUndefined(); // no buttons on a nudge
 
     const stillOpen = await ctx.repositories.matches.getById(match.id);
@@ -165,13 +168,15 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
 
   it("a very late reminder generation sends the announcement AND a nudge in the same tick, in order", async () => {
     // kickoff in 5 minutes: both offsets [120, 60] are already past.
-    const match = await createMatch("Team VeryLate", new Date(Date.now() + 5 * MINUTE));
+    const match = await createMatch(new Date(Date.now() + 5 * MINUTE));
 
     await runReminderCronJob(ctx, new Date());
 
     const ourCalls = fakeDiscord.callsForChannel(channelId);
     const matchCalls = ourCalls.filter(
-      ([, payload]) => payload.content?.includes(`Match #${match.id}`) || payload.content?.includes("Team VeryLate"),
+      ([, payload]) =>
+        payload.embeds?.some((e) => e.toJSON().description?.includes(`Match #${match.id}`)) ||
+        payload.content?.includes(formatMatchDateTime(match.scheduledAt, match.timezone)),
     );
     expect(matchCalls).toHaveLength(2);
     expect(matchCalls[0]![1].components).toHaveLength(1); // announcement first (largest offset = earliest scheduled_at)
@@ -184,7 +189,7 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
   });
 
   it("cancelling a match skips its still-PENDING reminders instead of ever sending them", async () => {
-    const match = await createMatch("Team CancelledBeforeDue", new Date(Date.now() + 10 * 24 * MINUTE));
+    const match = await createMatch(new Date(Date.now() + 10 * 24 * MINUTE));
     await runReminderCronJob(ctx, new Date()); // reconciles rows, nothing due
     await ctx.repositories.matches.update(match.id, { status: "CANCELLED" });
     const callsBefore = fakeDiscord.callsForChannel(channelId).length;
@@ -198,12 +203,13 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
   });
 
   it("a Discord send failure reverts the claimed reminder to PENDING instead of losing it", async () => {
-    const match = await createMatch("Team DiscordDown", new Date(Date.now() + 90 * MINUTE));
+    const match = await createMatch(new Date(Date.now() + 90 * MINUTE));
     // Only fail the call this test itself triggers — a blanket "fail the
     // very next call" would be at the mercy of whichever guild's
     // reminder happens to be processed first in this tick (see this
     // file's fakeDiscordRestClient doc comment).
-    fakeDiscord.failNextSendMatching((cid, payload) => cid === channelId && Boolean(payload.content?.includes("Team DiscordDown")));
+    // The announcement is the only message with buttons — the one this test's due 120-minute reminder sends.
+    fakeDiscord.failNextSendMatching((cid, payload) => cid === channelId && Boolean(payload.components));
 
     const summary = await runReminderCronJob(ctx, new Date());
     expect(summary.remindersFailed).toBeGreaterThanOrEqual(1);

@@ -7,6 +7,7 @@ import type { DiscordRestClient, ReplyPayload } from "../../src/discord/discordR
 import { dispatchCommand } from "../../src/discord/interactions/dispatchCommand.js";
 import { dispatchButton } from "../../src/discord/interactions/dispatchButton.js";
 import { logger } from "../../src/config/logger.js";
+import { formatMatchDateTime } from "../../src/modules/matches/dateTime.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const describeIfDb = databaseUrl ? describe : describe.skip;
@@ -100,17 +101,17 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
     await pool.end();
   });
 
-  async function createMatch(opponent: string, date: string, time: string) {
-    await dispatchCommand(
-      fakeSlashInteraction("create-match", guildId, { opponent, date, time }).interaction,
-      ctx,
-    );
-    const list = await ctx.services.matches.listMatches(guildId);
-    return list.find((m) => m.opponent === opponent)!;
+  /** No `opponent` to key a freshly-created match on anymore — diff the list before/after instead of hand-computing the exact UTC instant a local date/time + timezone resolves to. */
+  async function createMatch(date: string, time: string) {
+    const before = await ctx.services.matches.listMatches(guildId);
+    const beforeIds = new Set(before.map((m) => m.id));
+    await dispatchCommand(fakeSlashInteraction("create-match", guildId, { date, time }).interaction, ctx);
+    const after = await ctx.services.matches.listMatches(guildId);
+    return after.find((m) => !beforeIds.has(m.id))!;
   }
 
   it("/post-match posts the announcement, opens the match, and stores the message location", async () => {
-    const match = await createMatch("Team Post", "25/09/2026", "19:00");
+    const match = await createMatch("25/09/2026", "19:00");
 
     const { interaction, reply } = fakeSlashInteraction("post-match", guildId, { match_id: match.id });
     await dispatchCommand(interaction, ctx);
@@ -119,7 +120,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
     expect(fakeDiscord.sendChannelMessage).toHaveBeenCalledTimes(1);
     const [sentChannelId, sentPayload] = fakeDiscord.sendChannelMessage.mock.calls[0]!;
     expect(sentChannelId).toBe(channelId);
-    expect(sentPayload.content).toContain("Team Post");
+    expect(sentPayload.content).toContain(formatMatchDateTime(match.scheduledAt, match.timezone)); // header shows the kickoff (no opponent anymore)
     expect(sentPayload.components).toHaveLength(1); // 3 buttons in one row
 
     const refetched = (await ctx.services.matches.listMatches(guildId)).find((m) => m.id === match.id)!;
@@ -129,7 +130,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
   });
 
   it("/post-match refuses to double-post an already-open match", async () => {
-    const match = await createMatch("Team DoublePost", "26/09/2026", "19:00");
+    const match = await createMatch("26/09/2026", "19:00");
     const callsBefore = fakeDiscord.sendChannelMessage.mock.calls.length;
     await dispatchCommand(
       fakeSlashInteraction("post-match", guildId, { match_id: match.id }).interaction,
@@ -144,7 +145,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
   });
 
   it("a button click records attendance and edits the SAME public message via interaction.update()", async () => {
-    const match = await createMatch("Team Button", "27/09/2026", "19:00");
+    const match = await createMatch("27/09/2026", "19:00");
     await dispatchCommand(
       fakeSlashInteraction("post-match", guildId, { match_id: match.id }).interaction,
       ctx,
@@ -168,7 +169,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
   });
 
   it("the same player clicking a different button updates their response, not a duplicate", async () => {
-    const match = await createMatch("Team Switch", "28/09/2026", "19:00");
+    const match = await createMatch("28/09/2026", "19:00");
     await dispatchCommand(
       fakeSlashInteraction("post-match", guildId, { match_id: match.id }).interaction,
       ctx,
@@ -191,7 +192,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
   });
 
   it("/cancel-match on an already-posted match disables buttons and refreshes the public message", async () => {
-    const match = await createMatch("Team CancelPosted", "29/09/2026", "19:00");
+    const match = await createMatch("29/09/2026", "19:00");
     await dispatchCommand(
       fakeSlashInteraction("post-match", guildId, { match_id: match.id }).interaction,
       ctx,
@@ -225,7 +226,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
   });
 
   it("a button click on a cancelled match is rejected privately and the public message is left untouched", async () => {
-    const match = await createMatch("Team ClickCancelled", "30/09/2026", "19:00");
+    const match = await createMatch("30/09/2026", "19:00");
     await dispatchCommand(
       fakeSlashInteraction("post-match", guildId, { match_id: match.id }).interaction,
       ctx,
@@ -252,7 +253,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
   });
 
   it("/edit-match on an already-posted match refreshes the public message header", async () => {
-    const match = await createMatch("Team EditPosted", "01/10/2026", "19:00");
+    const match = await createMatch("01/10/2026", "19:00");
     await dispatchCommand(
       fakeSlashInteraction("post-match", guildId, { match_id: match.id }).interaction,
       ctx,
@@ -260,15 +261,23 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
     const posted = (await ctx.services.matches.listMatches(guildId)).find((m) => m.id === match.id)!;
     const messageId = posted.announcementMessageId!;
 
+    const contentBefore = fakeDiscord.messages.get(messageId)?.content;
+
     await dispatchCommand(
       fakeSlashInteraction("edit-match", guildId, {
         match_id: match.id,
-        opponent: "Team EditPosted FC",
+        date: "01/10/2026",
+        time: "20:00",
       }).interaction,
       ctx,
     );
 
-    expect(fakeDiscord.messages.get(messageId)?.content).toContain("Team EditPosted FC");
+    // The header shows the kickoff time (no opponent to show anymore), so
+    // the refreshed public message must now carry the edited time.
+    const edited = (await ctx.services.matches.listMatches(guildId)).find((m) => m.id === match.id)!;
+    const contentAfter = fakeDiscord.messages.get(messageId)?.content;
+    expect(contentAfter).not.toBe(contentBefore);
+    expect(contentAfter).toContain(formatMatchDateTime(edited.scheduledAt, edited.timezone));
   });
 
   it("a malformed/unrecognized button custom_id is handled gracefully, not thrown", async () => {

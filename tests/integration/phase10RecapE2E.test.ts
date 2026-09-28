@@ -138,7 +138,6 @@ describeIfDb("Phase 10 — /complete-match end to end (integration, plan section
 
     const match = await ctx.repositories.matches.create({
       guildId,
-      opponent: "Team XYZ",
       scheduledAt: new Date("2026-10-01T18:00:00Z"),
       timezone: "Europe/Berlin",
     });
@@ -180,7 +179,8 @@ describeIfDb("Phase 10 — /complete-match end to end (integration, plan section
     expect(fakeD.sent).toHaveLength(1);
     expect(fakeD.sent[0]!.channelId).toBe(channelId);
     expect(fakeD.sent[0]!.payload.content).toContain("MATCH REPORT");
-    expect(fakeD.sent[0]!.payload.content).toContain("Team XYZ");
+    expect(fakeD.sent[0]!.payload.content).toContain(`Match #${match.id}`);
+    expect(fakeD.sent[0]!.payload.content).not.toContain("undefined");
     expect(fakeD.sent[0]!.payload.content).toContain("Somehow, we won.");
 
     // 5. Roster message refreshed (buttons gone now that status is COMPLETED)
@@ -190,7 +190,7 @@ describeIfDb("Phase 10 — /complete-match end to end (integration, plan section
     // 6. Admin gets a clear ephemeral confirmation
     expect(reply).toHaveBeenCalledTimes(1);
     const payload = reply.mock.calls[0]![0] as { content: string; ephemeral?: boolean };
-    expect(payload.content).toContain("win vs Team XYZ");
+    expect(payload.content).toContain("recorded as a win");
     expect(payload.content).toContain("1 match event");
     expect(payload.ephemeral).toBe(true);
   });
@@ -206,7 +206,6 @@ describeIfDb("Phase 10 — /complete-match end to end (integration, plan section
 
     const match = await ctx.repositories.matches.create({
       guildId,
-      opponent: "Team Beta",
       scheduledAt: new Date("2026-10-02T18:00:00Z"),
       timezone: "Europe/Berlin",
     });
@@ -226,7 +225,6 @@ describeIfDb("Phase 10 — /complete-match end to end (integration, plan section
     const { ctx, fakeD } = await makeCtx(null); // AI disabled entirely
     const match = await ctx.repositories.matches.create({
       guildId,
-      opponent: "Team Gamma",
       scheduledAt: new Date("2026-10-03T18:00:00Z"),
       timezone: "Europe/Berlin",
     });
@@ -246,14 +244,13 @@ describeIfDb("Phase 10 — /complete-match end to end (integration, plan section
     expect(fakeD.sent[0]!.payload.content).not.toMatch(/undefined|\[object/);
 
     const payload = reply.mock.calls[0]![0] as { content: string };
-    expect(payload.content).toContain("loss vs Team Gamma");
+    expect(payload.content).toContain("recorded as a loss");
   });
 
   it("blocks completing an already-COMPLETED match, and does not touch the DB or post anything again", async () => {
     const { ctx, fakeD } = await makeCtx(null);
     const match = await ctx.repositories.matches.create({
       guildId,
-      opponent: "Team Delta",
       scheduledAt: new Date("2026-10-04T18:00:00Z"),
       timezone: "Europe/Berlin",
     });
@@ -280,7 +277,6 @@ describeIfDb("Phase 10 — /complete-match end to end (integration, plan section
 
     const match = await ctx.repositories.matches.create({
       guildId: noChannelGuildId,
-      opponent: "Team Epsilon",
       scheduledAt: new Date("2026-10-05T18:00:00Z"),
       timezone: "Europe/Berlin",
     });

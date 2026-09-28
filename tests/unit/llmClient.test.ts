@@ -96,7 +96,7 @@ describe("createLlmClient", () => {
   });
 
   it("disables AI (and logs) instead of throwing on malformed LLM_EXTRA_BODY", () => {
-    const logger = { error: vi.fn(), warn: vi.fn() };
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: "{nope" }, logger)).toBeNull();
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: "[1]" }, logger)).toBeNull();
     expect(logger.error).toHaveBeenCalledTimes(2);

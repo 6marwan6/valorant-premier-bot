@@ -33,7 +33,7 @@ describe("command registry", () => {
     expect(json.dm_permission).toBe(false);
   });
 
-  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 + Phase 8 + Phase 10 commands", () => {
+  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 + Phase 8 commands", () => {
     const names = commands.map((c) => c.data.name).sort();
     expect(names).toEqual(
       [
@@ -63,10 +63,10 @@ describe("command registry", () => {
     }
   });
 
-  it("/create-match requires opponent, date, and time (plan section 11)", () => {
+  it("/create-match requires date and time (plan section 11, revised: no opponent)", () => {
     const json = commandsByName.get("create-match")!.data.toJSON();
     const requiredNames = (json.options ?? []).filter((o) => "required" in o && o.required).map((o) => o.name);
-    expect(requiredNames.sort()).toEqual(["date", "opponent", "time"].sort());
+    expect(requiredNames.sort()).toEqual(["date", "time"].sort());
   });
 
   it("/edit-match and /cancel-match require match_id", () => {

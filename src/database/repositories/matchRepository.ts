@@ -2,7 +2,7 @@ import { and, asc, eq, inArray, ne } from "drizzle-orm";
 import type { Database } from "../client.js";
 import { matches, type MatchRow, type NewMatchRow } from "../schema/matches.js";
 
-export type CreateMatchInput = Pick<NewMatchRow, "guildId" | "opponent" | "scheduledAt" | "timezone">;
+export type CreateMatchInput = Pick<NewMatchRow, "guildId" | "scheduledAt" | "timezone">;
 
 /**
  * Repository for the `matches` table — plan section 11/12. Mirrors
@@ -21,28 +21,19 @@ export class MatchRepository {
 
   /**
    * Plan section 11: "Match is not accidentally duplicated." Finds an
-   * existing, non-cancelled match for the same guild/opponent/instant —
-   * the same rule the DB's partial unique index enforces (see
-   * schema/matches.ts), checked here first so the command handler can
-   * return a clear, specific message instead of a raw constraint-violation
-   * error.
+   * existing, non-cancelled match for the same guild/instant — the same
+   * rule the DB's partial unique index enforces (see schema/matches.ts),
+   * checked here first so the command handler can return a clear, specific
+   * message instead of a raw constraint-violation error. No opponent to
+   * key on anymore (section 11's revision) — a team can't play two
+   * Premier matches at the same instant, so the instant alone is the
+   * duplicate signal.
    */
-  async findActiveDuplicate(
-    guildId: string,
-    opponent: string,
-    scheduledAt: Date,
-  ): Promise<MatchRow | undefined> {
+  async findActiveDuplicate(guildId: string, scheduledAt: Date): Promise<MatchRow | undefined> {
     const rows = await this.db
       .select()
       .from(matches)
-      .where(
-        and(
-          eq(matches.guildId, guildId),
-          eq(matches.opponent, opponent),
-          eq(matches.scheduledAt, scheduledAt),
-          ne(matches.status, "CANCELLED"),
-        ),
-      )
+      .where(and(eq(matches.guildId, guildId), eq(matches.scheduledAt, scheduledAt), ne(matches.status, "CANCELLED")))
       .limit(1);
     return rows[0];
   }
@@ -65,15 +56,7 @@ export class MatchRepository {
     values: Partial<
       Pick<
         MatchRow,
-        | "opponent"
-        | "scheduledAt"
-        | "timezone"
-        | "status"
-        | "announcementChannelId"
-        | "announcementMessageId"
-        | "result"
-        | "notes"
-        | "completedAt"
+        "scheduledAt" | "timezone" | "status" | "announcementChannelId" | "announcementMessageId" | "result" | "notes" | "completedAt"
       >
     >,
   ): Promise<MatchRow | undefined> {

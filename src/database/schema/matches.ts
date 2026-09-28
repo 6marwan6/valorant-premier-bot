@@ -32,6 +32,12 @@ export const matchResultEnum = pgEnum("match_result", ["WIN", "LOSS"]);
  * A single Premier match — plan section 11 "Match Creation" / section 12
  * "Match States".
  *
+ * No `opponent` column (removed 2026-09-27, see plan section 11's revision
+ * note): Valorant Premier doesn't reveal the opposing team until the match
+ * itself starts, so an admin typing one in at `/create-match` time was
+ * always either a guess or a placeholder. A match is identified by its
+ * scheduled time alone from here on.
+ *
  * `id` is a plain auto-incrementing integer specifically so matches can be
  * referenced as "Match #42" the way plan section 61's example scenario
  * does ("System: Match #42 created."), rather than a UUID nobody could
@@ -63,9 +69,7 @@ export const matches = pgTable(
       .notNull()
       .references(() => serverConfig.guildId, { onDelete: "cascade" }),
 
-    opponent: text("opponent").notNull(),
-
-    // Absolute instant, UTC. Plan section 11: "Opponent, Date, Time" plus
+    // Absolute instant, UTC. Plan section 11 (revised): "Date, Time" plus
     // "the team's configured timezone should be used automatically."
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }).notNull(),
 
@@ -101,13 +105,15 @@ export const matches = pgTable(
     // /list-matches always filters/sorts by guild + time.
     index("matches_guild_scheduled_idx").on(table.guildId, table.scheduledAt),
     // Plan section 11: "Match is not accidentally duplicated." Enforced at
-    // the DB level (not just app-level validation) for the same opponent
-    // at the same instant within a guild, but only while the match is
-    // still "live" — CANCELLED matches don't block recreating the same
-    // fixture, and a partial unique index lets us express exactly that
-    // instead of a plain unique constraint.
-    uniqueIndex("matches_guild_opponent_time_active_idx")
-      .on(table.guildId, table.opponent, table.scheduledAt)
+    // the DB level (not just app-level validation) for the same instant
+    // within a guild, but only while the match is still "live" — a team
+    // can't actually play two Premier matches at once, so with no
+    // opponent to key on anymore, the same scheduled instant alone is
+    // exactly the duplicate signal. CANCELLED matches don't block
+    // recreating the same slot — a partial unique index lets us express
+    // exactly that instead of a plain unique constraint.
+    uniqueIndex("matches_guild_time_active_idx")
+      .on(table.guildId, table.scheduledAt)
       .where(sql`status <> 'CANCELLED'`),
   ],
 );

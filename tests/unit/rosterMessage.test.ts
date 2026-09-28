@@ -7,7 +7,6 @@ function fakeMatch(overrides: Partial<MatchRow> = {}): MatchRow {
   return {
     id: 42,
     guildId: "guild-1",
-    opponent: "Team XYZ",
     scheduledAt: new Date("2026-09-18T17:00:00Z"),
     timezone: "Europe/Berlin",
     status: "CONFIRMATION_OPEN",
@@ -41,7 +40,6 @@ describe("buildRosterMessage", () => {
   it("shows the plan section 14 header fields and 'no one yet' with zero responses", () => {
     const { content, components } = buildRosterMessage(fakeMatch(), []);
     expect(content).toContain("PREMIER MATCH");
-    expect(content).toContain("Team XYZ");
     expect(content).toContain("No one has responded yet.");
     expect(content).not.toContain("undefined");
     expect(components).toHaveLength(1);

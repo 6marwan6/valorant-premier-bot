@@ -73,17 +73,21 @@ export class AiService {
    * player with zero memories produces, so callers never need to branch
    * on whether Phase 9 is "on".
    *
-   * The `touchLastUsed` write is fire-and-forget on purpose: it's
-   * bookkeeping about a context that's already been built by the time this
-   * runs, so a failure here must never surface as an AI failure (plan
-   * section 48's spirit — same reasoning as this class's outer try/catch).
+   * The `touchLastUsed` write is awaited but its failure is swallowed: it's
+   * bookkeeping about a context that's already been built, so an error here
+   * must never surface as an AI failure (plan section 48's spirit — same
+   * reasoning as this class's outer try/catch). It must be *awaited*, not
+   * left running in the background: on serverless hosting (plan section 6 —
+   * Vercel Functions) work still pending when the handler returns can be
+   * frozen or killed, which would silently drop the write. It is one small
+   * indexed UPDATE, so awaiting it costs a few milliseconds.
    */
   private async retrieveFor(player: PlayerRow, mode: AiMode, forbiddenTopics: string[]) {
     if (!this.memories) return [];
     const all = await this.memories.listByPlayer(player.id);
     const selected = retrieveMemories({ memories: all, mode, forbiddenTopics });
     if (selected.length > 0) {
-      void this.memories
+      await this.memories
         .touchLastUsed(selected.map((m) => m.id))
         .catch((err) => this.logger.warn({ event: "memory.touch_failed", err: err instanceof Error ? err.message : String(err) }, "Failed to bump memory last_used_at"));
     }
@@ -284,7 +288,7 @@ export class AiService {
     });
   }
 
-  /** Plan section 39 "Post-Match Mode". `matchEvents` are the already-persisted, evidence-linked facts (section 40); the WIN/LOSS/opponent facts themselves stay outside the LLM (section 14's principle, applied here too — see postMatchService.ts). */
+  /** Plan section 39 "Post-Match Mode". `matchEvents` are the already-persisted, evidence-linked facts (section 40); the WIN/LOSS and match id/kickoff facts themselves stay outside the LLM (section 14's principle, applied here too — see postMatchService.ts). */
   async generateMatchRecap(params: {
     match: MatchRow;
     result: "WIN" | "LOSS";

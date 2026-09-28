@@ -2,6 +2,7 @@ import { SlashCommandBuilder } from "discord.js";
 import type { Command } from "./types.js";
 import { requireAdminWithConfig } from "../commandGuards.js";
 import { syncAnnouncementIfPosted } from "../announcementSync.js";
+import { formatMatchDateTime } from "../../modules/matches/dateTime.js";
 import type { MatchResultValue } from "../../modules/matches/postMatchService.js";
 
 /**
@@ -60,11 +61,11 @@ const completeMatchCommand: Command = {
     }
 
     // Plan section 14's principle applies here too: the header/result/
-    // opponent are deterministic facts built by the app, never the LLM —
+    // match id/kickoff are deterministic facts built by the app, never the LLM —
     // only the body underneath is AI-generated (or a safe generic fallback
     // if AI is off or fails, plan section 48).
     const header = result === "WIN" ? "🏆 **MATCH REPORT**" : "💔 **MATCH REPORT**";
-    const scoreLine = `**${match.opponent}** — ${result === "WIN" ? "WIN" : "LOSS"}`;
+    const scoreLine = `**Match #${match.id}** · ${formatMatchDateTime(match.scheduledAt, match.timezone)} — ${result === "WIN" ? "WIN" : "LOSS"}`;
     const body =
       recap.source === "ai"
         ? recap.text
@@ -75,7 +76,7 @@ const completeMatchCommand: Command = {
     await ctx.discord.sendChannelMessage(channelId, { content: [header, "", scoreLine, "", body].join("\n") });
 
     await interaction.reply({
-      content: `✅ **Match #${match.id}** recorded as a ${result === "WIN" ? "win" : "loss"} vs ${match.opponent}${matchEvents.length > 0 ? ` — logged ${matchEvents.length} match event${matchEvents.length === 1 ? "" : "s"}.` : "."}`,
+      content: `✅ **Match #${match.id}** recorded as a ${result === "WIN" ? "win" : "loss"}${matchEvents.length > 0 ? ` — logged ${matchEvents.length} match event${matchEvents.length === 1 ? "" : "s"}.` : "."}`,
       ephemeral: true,
     });
   },

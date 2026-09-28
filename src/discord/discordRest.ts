@@ -1,6 +1,6 @@
-import { REST, Routes, type APIActionRowComponent, type APIButtonComponent } from "discord.js";
+import { REST, Routes, type APIActionRowComponent, type APIButtonComponent, type APIEmbed } from "discord.js";
 import { MessageFlags } from "discord-api-types/v10";
-import type { ActionRowBuilder, ButtonBuilder } from "discord.js";
+import type { ActionRowBuilder, ButtonBuilder, EmbedBuilder } from "discord.js";
 
 export type DiscordRest = REST;
 
@@ -16,7 +16,9 @@ export interface DiscordChannelMessage {
 }
 
 export interface ReplyPayload {
-  content: string;
+  /** Optional now that embeds exist (reminderMessages.ts, Phase 9+): Discord requires at least one of content/embeds, never both empty — callers are responsible for supplying one or the other. */
+  content?: string;
+  embeds?: EmbedBuilder[];
   components?: ActionRowBuilder<ButtonBuilder>[];
   ephemeral?: boolean;
 }
@@ -26,6 +28,11 @@ function serializeComponents(
 ): APIActionRowComponent<APIButtonComponent>[] | undefined {
   if (!components || components.length === 0) return components === undefined ? undefined : [];
   return components.map((row) => row.toJSON() as APIActionRowComponent<APIButtonComponent>);
+}
+
+function serializeEmbeds(embeds: EmbedBuilder[] | undefined): APIEmbed[] | undefined {
+  if (!embeds || embeds.length === 0) return embeds === undefined ? undefined : [];
+  return embeds.map((e) => e.toJSON());
 }
 
 /**
@@ -40,10 +47,10 @@ export class DiscordRestClient {
     private readonly applicationId: string,
   ) {}
 
-  /** Posts a brand-new message to a channel — used once, by /post-match. */
+  /** Posts a brand-new message to a channel — used by /post-match and the reminder cron job (plain-text roster announcement, or an embed nudge — reminderMessages.ts). */
   async sendChannelMessage(channelId: string, payload: ReplyPayload): Promise<{ id: string }> {
     return (await this.rest.post(Routes.channelMessages(channelId), {
-      body: { content: payload.content, components: serializeComponents(payload.components) },
+      body: { content: payload.content, embeds: serializeEmbeds(payload.embeds), components: serializeComponents(payload.components) },
     })) as { id: string };
   }
 

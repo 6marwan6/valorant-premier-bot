@@ -53,7 +53,6 @@ export function buildRosterMessage(
     lines.push("🔴 **PREMIER MATCH**");
   }
   lines.push("");
-  lines.push(`**${match.opponent}**`);
   lines.push(formatMatchDateTime(match.scheduledAt, match.timezone));
   lines.push("");
 

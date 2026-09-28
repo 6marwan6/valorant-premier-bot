@@ -13,11 +13,16 @@ import type { AttendanceRow } from "../../database/schema/attendance.js";
 /**
  * Plan section 15 step 6 / section 17: "Start the corresponding AI flow".
  *
- * - CELEBRATE / ROAST (plan sections 18/19): one private (ephemeral)
- *   message, unchanged since Phase 6.
+ * - CELEBRATE (PLAYING) / ROAST (CANNOT_PLAY) (plan sections 18/19): one
+ *   PUBLIC @mention of the player in the match channel (a product decision
+ *   made after Phase 6 — the team-visible banter is the point). The public
+ *   post is best-effort: if Discord rejects it, the same text goes to the
+ *   player privately (ephemeral) instead, so they still get a reply.
  * - CONSOLE (WANTS_TO_BUT_CANNOT, plan sections 20/61) — Phase 7: a real
- *   private conversation in the player's Discord DMs. The click only gets a
- *   short ephemeral pointer to the DM. If the conversation can't happen (the
+ *   private conversation in the player's Discord DMs. Publicly the channel
+ *   only ever sees one fixed line ("can't make it this time 🟡", no AI text,
+ *   no reason — nothing personal); the click itself gets a short ephemeral
+ *   pointer to the DM. If the conversation can't happen (the
  *   player turned "AI follow-ups" off — plan section 9 — or their DMs are
  *   closed to the bot) it falls back to Phase 6's single ephemeral message,
  *   so the player always gets *something* truthful.
@@ -33,6 +38,26 @@ import type { AttendanceRow } from "../../database/schema/attendance.js";
  * anything (idempotency, section 50), or when the clicker has no active
  * player profile.
  */
+/**
+ * Best-effort public @mention (see sendAiFollowUp's doc). Never throws: a
+ * failed public post must not abort the rest of the reaction — for WANTS it
+ * would otherwise skip the DM pointer *after* the DM was already opened, and
+ * for CELEBRATE/ROAST it would leave the player with no reply at all
+ * (plan sections 48 and 66 #8).
+ */
+async function tryPostMention(ctx: AppContext, params: { channelId: string; text: string; userId: string; matchId: number; kind: string }): Promise<boolean> {
+  try {
+    await ctx.discord.sendMentionMessage(params.channelId, params.text, params.userId);
+    return true;
+  } catch (err) {
+    ctx.logger.warn(
+      { event: "ai.followup.publicPostFailed", kind: params.kind, matchId: params.matchId, err: err instanceof Error ? err.message : String(err) },
+      "Public @mention failed",
+    );
+    return false;
+  }
+}
+
 async function sendAiFollowUp(
   interaction: ButtonInteraction,
   ctx: AppContext,
@@ -51,7 +76,7 @@ async function sendAiFollowUp(
       const started = await startConsoleDm(ctx, { player, match: params.match });
       if (started === "already_open") return;
       if (channelId) {
-        await ctx.discord.sendMentionMessage(channelId, "can't make it this time 🟡", player.discordUserId);
+        await tryPostMention(ctx, { channelId, text: "can't make it this time 🟡", userId: player.discordUserId, matchId: params.match.id, kind: "wants_note" });
       }
       if (started === "started") {
         await interaction.followUp({ content: "📩 I sent you a DM, let's talk there.", ephemeral: true });
@@ -68,8 +93,9 @@ async function sendAiFollowUp(
     });
 
     if (params.status !== "WANTS_TO_BUT_CANNOT" && outcome.source === "ai" && channelId) {
-      await ctx.discord.sendMentionMessage(channelId, outcome.text, player.discordUserId);
-      return;
+      const posted = await tryPostMention(ctx, { channelId, text: outcome.text, userId: player.discordUserId, matchId: params.match.id, kind: "reaction" });
+      if (posted) return;
+      // Public post failed: fall through to the private message below.
     }
 
     const note = dmFailed

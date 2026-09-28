@@ -5,9 +5,10 @@ import { formatMatchDateTime } from "../../modules/matches/dateTime.js";
 import { syncAnnouncementIfPosted } from "../announcementSync.js";
 
 /**
- * /edit-match — plan section 41. All fields besides match_id are
- * optional; at least one must be supplied (enforced in MatchService).
- * Blocked once a match is COMPLETED or CANCELLED (plan section 11).
+ * /edit-match — plan section 41. Date and time are given together
+ * (enforced in MatchService). Blocked once a match is COMPLETED or
+ * CANCELLED (plan section 11). No `opponent` option (removed 2026-09-27
+ * — see plan section 11's revision note).
  */
 const data = new SlashCommandBuilder()
   .setName("edit-match")
@@ -16,7 +17,6 @@ const data = new SlashCommandBuilder()
   .addIntegerOption((opt) =>
     opt.setName("match_id").setDescription("Match number, e.g. 42").setRequired(true),
   )
-  .addStringOption((opt) => opt.setName("opponent").setDescription("New opponent team name").setRequired(false))
   .addStringOption((opt) =>
     opt.setName("date").setDescription("New date, DD/MM/YYYY (must be given with time)").setRequired(false),
   )
@@ -31,14 +31,12 @@ const editMatchCommand: Command = {
     if (!guard) return;
 
     const matchId = interaction.options.getInteger("match_id", true);
-    const opponent = interaction.options.getString("opponent") ?? undefined;
     const date = interaction.options.getString("date") ?? undefined;
     const time = interaction.options.getString("time") ?? undefined;
 
     const result = await ctx.services.matches.editMatch({
       guildId: guard.guildId,
       matchId,
-      opponent,
       dateStr: date,
       timeStr: time,
     });
@@ -51,8 +49,8 @@ const editMatchCommand: Command = {
     const match = result.value;
     ctx.logger.info({ event: "match.edited", guildId: guard.guildId, matchId: match.id }, "Match edited");
 
-    // If this match's opponent/time changed after it was already posted
-    // publicly, the roster message's header is now stale — refresh it.
+    // If this match's time changed after it was already posted publicly,
+    // the roster message's header is now stale — refresh it.
     const withAttendance = await ctx.services.attendance.getMatchWithAttendance(guard.guildId, matchId);
     if (withAttendance) {
       await syncAnnouncementIfPosted(ctx, withAttendance);
@@ -61,7 +59,6 @@ const editMatchCommand: Command = {
     await interaction.reply({
       content: [
         `✅ **Match #${match.id} updated.**`,
-        `Opponent: ${match.opponent}`,
         `When: ${formatMatchDateTime(match.scheduledAt, match.timezone)} (${match.timezone})`,
         `Status: ${match.status}`,
       ].join("\n"),

@@ -69,8 +69,8 @@ Output: respond with ONLY a JSON object, no markdown fences, exactly this shape:
 /**
  * Plan section 38 "Match Hype": "Facts such as the roster and agents
  * should come from the database. AI only generates the personality
- * layer." The deterministic header (offset/opponent) is built by the
- * caller (reminderCronJob.ts), not here — this context only ever produces
+ * layer." The deterministic header (offset, match id, kickoff) is built by
+ * the caller (reminderMessages.ts, via reminderCronJob.ts), not here — this context only ever produces
  * the flavor text underneath it, matching that same facts-outside-the-LLM
  * split.
  */
@@ -81,7 +81,6 @@ export function buildMatchHypeContext(params: { match: MatchRow; roster: PlayerR
   const lines: string[] = [
     "<application_data>",
     "MATCH",
-    `Opponent: ${cleanInline(match.opponent, 60)}`,
     `Kickoff: ${formatMatchDateTime(match.scheduledAt, match.timezone)} (${match.timezone})`,
     "",
     "ROSTER",
@@ -129,14 +128,13 @@ export function buildMatchRecapContext(params: {
   roster: PlayerRow[];
   notes: string | null;
 }): TeamAIContext {
-  const { match, result, matchEvents, roster, notes } = params;
+  const { result, matchEvents, roster, notes } = params;
   const forbiddenTopics = forbiddenTopicsForRoster(roster);
   const rosterById = new Map(roster.map((p) => [p.id, p]));
 
   const lines: string[] = [
     "<application_data>",
     "MATCH",
-    `Opponent: ${cleanInline(match.opponent, 60)}`,
     `Result: ${result}`,
     "",
     "MATCH EVENTS",

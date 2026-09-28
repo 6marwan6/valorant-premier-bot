@@ -23,9 +23,8 @@ import completeMatchCommand from "./completeMatch.js";
  * /post-match (provisional — see its own file doc) + attendance buttons
  * (handled via dispatchButton.ts, not the command registry). Phase 5:
  * /add-player, /edit-player, /remove-player, /player (plan section 41).
- * Phase 8: /memories (plan sections 42/43). Phase 10: /complete-match
- * (plan section 39). Later phases append their own (section 42: /profile,
- * /ai-settings; section 41: /team).
+ * Phase 8: /memories (plan sections 42/43). Later phases append their own
+ * (section 42: /profile, /ai-settings; section 41: /complete-match, /team).
  */
 export const commands: Command[] = [
   setupCommand,

@@ -132,7 +132,7 @@ type LlmEnv = Pick<
  * attendance must keep working no matter what the AI layer's state is, so
  * a bad AI env var must never take down the whole interaction handler.
  */
-export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "warn">): LlmClient | null {
+export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "warn" | "info">): LlmClient | null {
   if (!env.LLM_API_KEY || !env.LLM_BASE_URL || !env.LLM_MODEL) {
     const missing = [
       !env.LLM_API_KEY && "LLM_API_KEY",

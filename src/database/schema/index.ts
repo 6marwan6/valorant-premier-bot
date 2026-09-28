@@ -1,7 +1,7 @@
 // Phase 1 defined server_config; matches/attendance/reminders/players
-// (Phases 2-5), aiConversations (Phase 7), memories/memoryEvidence
-// (Phase 8), and matchEvents (Phase 10, plan section 40) are implemented
-// below.
+// (Phases 2-5), aiConversations (Phase 7), and memories/memoryEvidence
+// (Phase 8) are implemented below. Still to come (per plan section 7):
+//   matchEvents.ts             (plan section 40)
 export * from "./serverConfig.js";
 export * from "./matches.js";
 export * from "./attendance.js";

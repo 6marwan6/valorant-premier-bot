@@ -35,7 +35,7 @@ function fakeDiscord() {
     sendDirectMessage: vi.fn(async (channelId: string, payload: ReplyPayload) => {
       const id = String(++nextId);
       const list = channels.get(channelId) ?? [];
-      list.push({ id, content: payload.content, author: { id: "bot", bot: true }, components: payload.components });
+      list.push({ id, content: payload.content ?? "", author: { id: "bot", bot: true }, components: payload.components });
       channels.set(channelId, list);
       return { id };
     }),
@@ -130,8 +130,7 @@ describeIfDb("Phase 8 — memory auto-save, storage, and /memories (integration)
   async function openMatch(ctx: AppContext) {
     const match = await ctx.repositories.matches.create({
       guildId,
-      opponent: `Team P8-${++seq}`,
-      scheduledAt: new Date(Date.now() + 86_400_000),
+      scheduledAt: new Date(Date.now() + 86_400_000 + ++seq * 60_000), // unique per call: the instant is the only dedup key now
       timezone: "Africa/Cairo",
     } as never);
     await ctx.services.attendance.recordAnnouncement(match.id, "chan", "msg");
@@ -145,8 +144,10 @@ describeIfDb("Phase 8 — memory auto-save, storage, and /memories (integration)
 
   async function latestConversation(userId: string) {
     const player = await ctx0.repositories.players.getByDiscordUserId(guildId, userId);
-    const rows = await db.select().from(aiConversations).where(eq(aiConversations.playerId, player!.id));
-    return rows.at(-1)!;
+    // ORDER BY is essential: without it Postgres returns rows in heap order, which shifts once earlier
+    // tests UPDATE (end) their conversations — so "last" could be an old, already-ended conversation.
+    const rows = await db.select().from(aiConversations).where(eq(aiConversations.playerId, player!.id)).orderBy(desc(aiConversations.id)).limit(1);
+    return rows[0]!;
   }
 
   /** The most recent ASSISTANT turn — the one a memory candidate (if any) rides on. */

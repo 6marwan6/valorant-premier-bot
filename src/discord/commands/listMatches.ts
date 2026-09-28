@@ -32,7 +32,7 @@ const listMatchesCommand: Command = {
 
     const lines = matchList.map((m) => {
       const emoji = STATUS_EMOJI[m.status] ?? "•";
-      return `${emoji} **#${m.id}** ${m.opponent} — ${formatMatchDateTime(m.scheduledAt, m.timezone)} _(${m.status})_`;
+      return `${emoji} **#${m.id}** ${formatMatchDateTime(m.scheduledAt, m.timezone)} _(${m.status})_`;
     });
 
     await interaction.reply({ content: lines.join("\n"), ephemeral: true });

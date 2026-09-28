@@ -25,11 +25,13 @@ const describeIfDb = databaseUrl ? describe : describe.skip;
 // ---------------------------------------------------------------- fakes
 
 /** An in-memory Discord: DM channels that hold messages, so the poller has something real to read. */
-function fakeDiscord(opts: { dmFails?: boolean; sendFailsAfter?: number } = {}) {
+function fakeDiscord(opts: { dmFails?: boolean; sendFailsAfter?: number; mentionFails?: boolean } = {}) {
   let nextId = 100_000_000_000_000_000n;
   const channels = new Map<string, Array<DiscordChannelMessage & { components?: unknown[] }>>();
   const followups: ReplyPayload[] = [];
   const originalEdits: ReplyPayload[] = [];
+  /** Public @mention posts in the match channel (the fixed WANTS line; CELEBRATE/ROAST reactions). */
+  const mentions: Array<{ channelId: string; text: string; userId: string }> = [];
   let sends = 0;
 
   const discord = {
@@ -44,7 +46,7 @@ function fakeDiscord(opts: { dmFails?: boolean; sendFailsAfter?: number } = {}) 
       if (opts.sendFailsAfter !== undefined && sends > opts.sendFailsAfter) throw new Error("Discord is down");
       const id = String(++nextId);
       const list = channels.get(channelId) ?? [];
-      list.push({ id, content: payload.content, author: { id: "bot", bot: true }, components: payload.components });
+      list.push({ id, content: payload.content ?? "", author: { id: "bot", bot: true }, components: payload.components });
       channels.set(channelId, list);
       return { id };
     }),
@@ -58,6 +60,10 @@ function fakeDiscord(opts: { dmFails?: boolean; sendFailsAfter?: number } = {}) 
     sendInteractionFollowup: vi.fn(async (_token: string, payload: ReplyPayload) => {
       followups.push(payload);
     }),
+    sendMentionMessage: vi.fn(async (channelId: string, text: string, userId: string) => {
+      if (opts.mentionFails) throw new Error("Discord rejected the post");
+      mentions.push({ channelId, text, userId });
+    }),
   };
 
   return {
@@ -65,6 +71,7 @@ function fakeDiscord(opts: { dmFails?: boolean; sendFailsAfter?: number } = {}) 
     raw: discord,
     followups,
     originalEdits,
+    mentions,
     dm(userId: string) {
       return channels.get(`dm-${userId}`) ?? [];
     },
@@ -143,8 +150,7 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
   async function openMatch(ctx: AppContext) {
     const match = await ctx.repositories.matches.create({
       guildId,
-      opponent: `Team P7-${++seq}`,
-      scheduledAt: new Date(Date.now() + 86_400_000),
+      scheduledAt: new Date(Date.now() + 86_400_000 + ++seq * 60_000), // unique per call: the instant is the only dedup key now
       timezone: "Africa/Cairo",
     } as never);
     await ctx.services.attendance.recordAnnouncement(match.id, "chan", "msg");
@@ -159,7 +165,7 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
 
   async function openConversation(matchId: number, userId = "player-a") {
     const player = await new (await import("../../src/database/repositories/playerRepository.js")).PlayerRepository(db).getByDiscordUserId(guildId, userId);
-    const rows = await db.select().from(aiConversations).where(eq(aiConversations.playerId, player!.id));
+    const rows = await db.select().from(aiConversations).where(eq(aiConversations.playerId, player!.id)).orderBy(aiConversations.id);
     return rows.filter((r) => r.matchId === matchId);
   }
 
@@ -233,7 +239,8 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
     expect(conv).toMatchObject({ mode: "CONSOLE", endedAt: null, dmChannelId: "dm-player-a", lastSeenMessageId: opener.id, guildId });
     expect(await transcript(conv!.id)).toEqual([{ role: "ASSISTANT", content: "NOOO 😭 We'll miss you. What happened?" }]);
 
-    // The in-server click only gets a private pointer — nothing personal in public, and no AI text there.
+    // Publicly the channel sees ONE fixed line (no AI text, no reason); the click itself only gets a private pointer to the DM.
+    expect(d.mentions).toEqual([{ channelId: "chan", text: "can't make it this time 🟡", userId: "player-a" }]);
     expect(b.followUp).toHaveBeenCalledTimes(1);
     expect((b.followUp.mock.calls[0] as unknown as [{ content: string }])[0].content).toMatch(/DM/);
     expect(b.reply).not.toHaveBeenCalled();
@@ -311,6 +318,7 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
     const sent = (b.followUp.mock.calls[0] as unknown as [{ content: string; ephemeral: boolean }])[0];
     expect(sent.ephemeral).toBe(true);
     expect(sent.content).toMatch(/couldn't/i);
+    expect(d.mentions).toHaveLength(1); // the fixed public line still went out
     expect(b.reply).not.toHaveBeenCalled(); // never a "something went wrong"
     const rows = (await ctx.services.attendance.getMatchWithAttendance(guildId, match.id))!.attendanceRows;
     expect(rows.map((r) => r.status)).toEqual(["WANTS_TO_BUT_CANNOT"]);
@@ -326,6 +334,7 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
 
     expect(d.raw.createDmChannel).not.toHaveBeenCalled();
     expect(b.followUp).toHaveBeenCalledWith({ content: "Sorry you can't make it 💛", ephemeral: true });
+    expect(d.mentions.map((m) => m.text)).toEqual(["can't make it this time 🟡"]); // AI text stays private
     const count = await db.select().from(aiConversations).where(eq(aiConversations.matchId, match.id));
     expect(count).toHaveLength(0);
   });
@@ -337,15 +346,17 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
     const b = await click(ctx, match.id, "WANTS_TO_BUT_CANNOT");
     expect(d.raw.createDmChannel).not.toHaveBeenCalled();
     expect(b.followUp).not.toHaveBeenCalled();
+    expect(d.mentions).toHaveLength(0); // no AI -> nothing extra posted
   });
 
-  it("CELEBRATE and ROAST never open conversations or DMs (plan sections 18/19: single private messages)", async () => {
+  it("CELEBRATE and ROAST never open conversations or DMs — they are single public @mentions (plan sections 18/19)", async () => {
     const d = fakeDiscord();
     const { llm } = fakeLlm(() => json("hype", false));
     const ctx = ctxWith(d, llm);
     const match = await openMatch(ctx);
     await click(ctx, match.id, "PLAYING");
     await click(ctx, match.id, "CANNOT_PLAY");
+    expect(d.mentions.map((m) => m.text)).toEqual(["hype", "hype"]); // one public reaction per click
     expect(d.raw.createDmChannel).not.toHaveBeenCalled();
     expect(await db.select().from(aiConversations).where(eq(aiConversations.matchId, match.id))).toHaveLength(0);
   });
@@ -828,7 +839,7 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
     expect(all).toContain("ai.conversation.turn"); // metadata IS logged
   });
 
-  it("the public roster message and channel never see any of it: the only in-server output for a WANTS click is the private pointer", async () => {
+  it("a WANTS click never leaks the conversation publicly: the channel only ever sees the fixed line, everything else is private", async () => {
     const d = fakeDiscord();
     const { llm } = fakeLlm(() => json("private opener text"));
     const ctx = ctxWith(d, llm);
@@ -839,6 +850,24 @@ describeIfDb("Phase 7 — private CONSOLE conversations (integration)", () => {
       expect(call[0].content).not.toContain("private opener text");
     }
     expect(d.raw.sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(d.mentions).toEqual([{ channelId: "chan", text: "can't make it this time 🟡", userId: "player-a" }]);
+    expect(d.mentions.some((m) => m.text.includes("private opener text"))).toBe(false);
+  });
+
+  it("the public line failing to post does not cost the player their DM or the pointer to it", async () => {
+    const d = fakeDiscord({ mentionFails: true });
+    const { llm } = fakeLlm(() => json("NOOO 😭 What happened?"));
+    const ctx = ctxWith(d, llm);
+    const match = await openMatch(ctx);
+
+    const b = await click(ctx, match.id, "WANTS_TO_BUT_CANNOT");
+
+    expect(d.dm("player-a")).toHaveLength(1); // DM opened
+    expect(b.followUp).toHaveBeenCalledTimes(1); // pointer delivered
+    expect((b.followUp.mock.calls[0] as unknown as [{ content: string }])[0].content).toMatch(/DM/);
+    expect(b.reply).not.toHaveBeenCalled();
+    const rows = (await ctx.services.attendance.getMatchWithAttendance(guildId, match.id))!.attendanceRows;
+    expect(rows.map((r) => r.status)).toEqual(["WANTS_TO_BUT_CANNOT"]);
   });
 
   it("a removed player's conversation ends instead of continuing", async () => {

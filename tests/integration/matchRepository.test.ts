@@ -30,7 +30,6 @@ describeIfDb("MatchRepository (integration)", () => {
   it("creates a match and reads it back", async () => {
     const created = await matchRepo.create({
       guildId,
-      opponent: "Team Alpha",
       scheduledAt: new Date("2026-10-01T18:00:00Z"),
       timezone: "Europe/Berlin",
     });
@@ -38,36 +37,29 @@ describeIfDb("MatchRepository (integration)", () => {
     expect(created.status).toBe("SCHEDULED");
 
     const fetched = await matchRepo.getById(created.id);
-    expect(fetched?.opponent).toBe("Team Alpha");
+    expect(fetched?.scheduledAt.getTime()).toBe(created.scheduledAt.getTime());
   });
 
-  it("finds an active duplicate but not a cancelled one (plan section 11)", async () => {
+  it("finds an active duplicate but not a cancelled one (plan section 11) — keyed on the instant alone, no opponent to key on anymore", async () => {
     const scheduledAt = new Date("2026-10-02T18:00:00Z");
-    const first = await matchRepo.create({
-      guildId,
-      opponent: "Team Beta",
-      scheduledAt,
-      timezone: "Europe/Berlin",
-    });
+    const first = await matchRepo.create({ guildId, scheduledAt, timezone: "Europe/Berlin" });
 
-    const duplicate = await matchRepo.findActiveDuplicate(guildId, "Team Beta", scheduledAt);
+    const duplicate = await matchRepo.findActiveDuplicate(guildId, scheduledAt);
     expect(duplicate?.id).toBe(first.id);
 
     await matchRepo.update(first.id, { status: "CANCELLED" });
-    const noLongerDuplicate = await matchRepo.findActiveDuplicate(guildId, "Team Beta", scheduledAt);
+    const noLongerDuplicate = await matchRepo.findActiveDuplicate(guildId, scheduledAt);
     expect(noLongerDuplicate).toBeUndefined();
   });
 
   it("the database itself rejects a true duplicate insert (partial unique index)", async () => {
     const scheduledAt = new Date("2026-10-03T18:00:00Z");
-    await matchRepo.create({ guildId, opponent: "Team Gamma", scheduledAt, timezone: "Europe/Berlin" });
+    await matchRepo.create({ guildId, scheduledAt, timezone: "Europe/Berlin" });
 
     // drizzle-orm 0.45.x wraps the driver error: the top-level message is a
     // generic "Failed query: ..."; the actual Postgres error (code 23505,
     // "duplicate key value violates unique constraint ...") is on `.cause`.
-    const err: any = await matchRepo
-      .create({ guildId, opponent: "Team Gamma", scheduledAt, timezone: "Europe/Berlin" })
-      .catch((e) => e);
+    const err: any = await matchRepo.create({ guildId, scheduledAt, timezone: "Europe/Berlin" }).catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err.cause?.code).toBe("23505");
     expect(err.cause?.message).toMatch(/duplicate key value violates unique constraint/);
@@ -84,21 +76,20 @@ describeIfDb("MatchRepository (integration)", () => {
   it("updates only the fields passed", async () => {
     const created = await matchRepo.create({
       guildId,
-      opponent: "Team Delta",
       scheduledAt: new Date("2026-10-04T18:00:00Z"),
       timezone: "Europe/Berlin",
     });
-    const updated = await matchRepo.update(created.id, { opponent: "Team Delta FC" });
-    expect(updated?.opponent).toBe("Team Delta FC");
+    const newTime = new Date("2026-10-04T20:00:00Z");
+    const updated = await matchRepo.update(created.id, { scheduledAt: newTime });
+    expect(updated?.scheduledAt.getTime()).toBe(newTime.getTime());
     expect(updated?.status).toBe("SCHEDULED");
-    expect(updated?.scheduledAt.getTime()).toBe(created.scheduledAt.getTime());
+    expect(updated?.timezone).toBe(created.timezone);
   });
 
   it("refuses to insert a match for a guild with no server_config row (FK constraint)", async () => {
     const err: any = await matchRepo
       .create({
         guildId: "guild-that-never-ran-setup",
-        opponent: "Team Epsilon",
         scheduledAt: new Date("2026-10-05T18:00:00Z"),
         timezone: "Europe/Berlin",
       })

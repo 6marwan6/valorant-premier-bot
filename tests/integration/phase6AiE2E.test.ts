@@ -45,21 +45,31 @@ function fakeLlm(impl: (system: string) => Promise<string>): LlmClient & { compl
 
 const json = (response: string) => JSON.stringify({ response, should_follow_up: false, memory_candidate: null });
 
-describeIfDb("Phase 6 — attendance click -> private AI followup (integration)", () => {
+describeIfDb("Phase 6 — attendance click -> AI reaction (integration): PLAYING/CANNOT_PLAY are public @mentions in the match channel", () => {
   let db: Database;
   let pool: Pool;
   const guildId = `phase6-guild-${Date.now()}`;
-  const discord = {} as DiscordRestClient;
+  // The public @mention post (CELEBRATE / ROAST). Recorded so tests can assert
+  // exactly what the team channel saw; `mentionFails` simulates Discord rejecting it.
+  const mentions: Array<{ channelId: string; text: string; userId: string }> = [];
+  let mentionFails = false;
+  const discord = {
+    sendMentionMessage: vi.fn(async (channelId: string, text: string, userId: string) => {
+      if (mentionFails) throw new Error("Discord rejected the post");
+      mentions.push({ channelId, text, userId });
+    }),
+  } as unknown as DiscordRestClient;
+  const mentionsFor = (text: string) => mentions.filter((m) => m.text === text);
 
   function ctxWith(llm: LlmClient | null): AppContext {
     return buildAppContext({ discord, db, env: {} as never, logger, llm });
   }
 
-  async function openMatch(ctx: AppContext, opponent: string) {
+  let seq = 0;
+  async function openMatch(ctx: AppContext) {
     const match = await ctx.repositories.matches.create({
       guildId,
-      opponent,
-      scheduledAt: new Date(Date.now() + 86_400_000),
+      scheduledAt: new Date(Date.now() + 86_400_000 + ++seq * 60_000), // unique per call: the instant is the only dedup key now
       timezone: "Africa/Cairo",
     } as never);
     await ctx.services.attendance.recordAnnouncement(match.id, "chan", "msg");
@@ -90,29 +100,48 @@ describeIfDb("Phase 6 — attendance click -> private AI followup (integration)"
     await pool.end();
   });
 
-  it("first click -> AI followup in the right mode; identical re-click -> no second AI message; changed answer -> new mode", async () => {
+  it("first click -> public @mention in the right mode; identical re-click -> no second AI message; changed answer -> new mode", async () => {
     const llm = fakeLlm(async (system) => json(system.includes("MODE: CELEBRATE.") ? "hype!" : "roast!"));
     const ctx = ctxWith(llm);
-    const match = await openMatch(ctx, "Team AI");
+    const match = await openMatch(ctx);
 
     const first = fakeButton(`attendance:${match.id}:PLAYING`, guildId, "player-a", "Ahmed");
     await dispatchButton(first.interaction, ctx);
     expect(first.update).toHaveBeenCalledTimes(1);
-    expect(first.followUp).toHaveBeenCalledWith({ content: "hype!", ephemeral: true });
+    expect(mentionsFor("hype!")).toEqual([{ channelId: "chan", text: "hype!", userId: "player-a" }]);
+    expect(first.followUp).not.toHaveBeenCalled(); // nothing private for CELEBRATE
 
     const repeat = fakeButton(`attendance:${match.id}:PLAYING`, guildId, "player-a", "Ahmed");
     await dispatchButton(repeat.interaction, ctx);
     expect(repeat.update).toHaveBeenCalledTimes(1); // public roster still refreshed
     expect(repeat.followUp).not.toHaveBeenCalled();
+    expect(mentionsFor("hype!")).toHaveLength(1); // no second public post
     expect(llm.complete).toHaveBeenCalledTimes(1);
 
     const changed = fakeButton(`attendance:${match.id}:CANNOT_PLAY`, guildId, "player-a", "Ahmed");
     await dispatchButton(changed.interaction, ctx);
-    expect(changed.followUp).toHaveBeenCalledWith({ content: "roast!", ephemeral: true });
+    expect(mentionsFor("roast!")).toEqual([{ channelId: "chan", text: "roast!", userId: "player-a" }]); // ROAST is public too
+    expect(changed.followUp).not.toHaveBeenCalled();
 
     const rows = (await ctx.services.attendance.getMatchWithAttendance(guildId, match.id))!.attendanceRows;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.status).toBe("CANNOT_PLAY");
+  });
+
+  it("Discord rejects the public @mention: attendance is kept and the same reply reaches the player privately", async () => {
+    const ctx = ctxWith(fakeLlm(async () => json("hype!")));
+    const match = await openMatch(ctx);
+    mentionFails = true;
+    try {
+      const click = fakeButton(`attendance:${match.id}:PLAYING`, guildId, "player-a", "Ahmed");
+      await dispatchButton(click.interaction, ctx);
+      expect(click.reply).not.toHaveBeenCalled();
+      expect(click.followUp).toHaveBeenCalledWith({ content: "hype!", ephemeral: true });
+    } finally {
+      mentionFails = false;
+    }
+    const rows = (await ctx.services.attendance.getMatchWithAttendance(guildId, match.id))!.attendanceRows;
+    expect(rows.map((r) => r.status)).toEqual(["PLAYING"]);
   });
 
   it("LLM outage: attendance is still recorded and the player gets the safe fallback (plan section 48)", async () => {
@@ -121,7 +150,7 @@ describeIfDb("Phase 6 — attendance click -> private AI followup (integration)"
         throw new LlmError("HTTP 500", "http", 500);
       }),
     );
-    const match = await openMatch(ctx, "Team Outage");
+    const match = await openMatch(ctx);
     const click = fakeButton(`attendance:${match.id}:PLAYING`, guildId, "player-a", "Ahmed");
     await dispatchButton(click.interaction, ctx);
 
@@ -133,18 +162,20 @@ describeIfDb("Phase 6 — attendance click -> private AI followup (integration)"
 
   it("a response that touches a protected topic never reaches the player", async () => {
     const ctx = ctxWith(fakeLlm(async () => json("how is your family?")));
-    const match = await openMatch(ctx, "Team Protected");
+    const match = await openMatch(ctx);
     const click = fakeButton(`attendance:${match.id}:CANNOT_PLAY`, guildId, "player-a", "Ahmed");
     await dispatchButton(click.interaction, ctx);
     expect(click.followUp).toHaveBeenCalledWith({ content: AI_FALLBACK_MESSAGE, ephemeral: true });
+    expect(mentions.some((m) => /family/i.test(m.text))).toBe(false); // never reaches the public channel either
   });
 
   it("AI not configured: click behaves exactly like Phase 5 (no followUp at all)", async () => {
     const ctx = ctxWith(null);
-    const match = await openMatch(ctx, "Team NoAi");
+    const match = await openMatch(ctx);
     const click = fakeButton(`attendance:${match.id}:PLAYING`, guildId, "player-a", "Ahmed");
     await dispatchButton(click.interaction, ctx);
     expect(click.update).toHaveBeenCalledTimes(1);
     expect(click.followUp).not.toHaveBeenCalled();
+    expect(discord.sendMentionMessage).not.toHaveBeenCalledWith("chan", expect.any(String), "player-a"); // ctx was AI-less; nothing new posted
   });
 });
