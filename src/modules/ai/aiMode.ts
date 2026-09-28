@@ -2,8 +2,15 @@ import type { AttendanceRow } from "../../database/schema/attendance.js";
 
 /**
  * Plan section 3 lists four initial AI modes; Phase 6 (section 59) builds
- * the three that react to an attendance click. MATCH_HYPE is Phase 10,
- * POST_MATCH is later still.
+ * the three that react to an attendance click. MATCH_HYPE and POST_MATCH
+ * (Phase 10, plan sections 38/39) are deliberately NOT added to this type:
+ * both address the whole roster, not one player reacting to one attendance
+ * status, so they have no `modeForStatus` case and no ai_conversations row
+ * (that table is player+match scoped — see schema/aiConversations.ts).
+ * They're built and validated as their own thing in
+ * teamAiContextBuilder.ts/aiOutput.ts and triggered directly by
+ * reminderCronJob.ts and postMatchService.ts rather than through this
+ * file.
  */
 export type AiMode = "CELEBRATE" | "ROAST" | "CONSOLE";
 

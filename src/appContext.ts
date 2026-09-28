@@ -8,12 +8,14 @@ import { ReminderRepository } from "./database/repositories/reminderRepository.j
 import { PlayerRepository } from "./database/repositories/playerRepository.js";
 import { AiConversationRepository } from "./database/repositories/aiConversationRepository.js";
 import { MemoryRepository } from "./database/repositories/memoryRepository.js";
+import { MatchEventRepository } from "./database/repositories/matchEventRepository.js";
 import { MatchService } from "./modules/matches/matchService.js";
 import { AttendanceService } from "./modules/attendance/attendanceService.js";
 import { DiscordRestClient } from "./discord/discordRest.js";
 import { AiService } from "./modules/ai/aiService.js";
 import { ConversationService } from "./modules/ai/conversationService.js";
 import { MemoryService } from "./modules/memories/memoryService.js";
+import { PostMatchService } from "./modules/matches/postMatchService.js";
 import { createLlmClient, type LlmClient } from "./services/ai/llmClient.js";
 
 /**
@@ -45,6 +47,7 @@ export interface AppContext {
     players: PlayerRepository;
     aiConversations: AiConversationRepository;
     memories: MemoryRepository;
+    matchEvents: MatchEventRepository;
   };
   services: {
     matches: MatchService;
@@ -52,6 +55,7 @@ export interface AppContext {
     ai: AiService;
     conversations: ConversationService;
     memories: MemoryService;
+    postMatch: PostMatchService;
   };
 }
 
@@ -70,9 +74,11 @@ export function buildAppContext(params: {
   const playerRepo = new PlayerRepository(params.db);
   const aiConversationRepo = new AiConversationRepository(params.db);
   const memoryRepo = new MemoryRepository(params.db);
+  const matchEventRepo = new MatchEventRepository(params.db);
   const { llm: llmOverride, ...contextParams } = params;
   const llm = llmOverride !== undefined ? llmOverride : createLlmClient(params.env, params.logger);
   const aiService = new AiService(llm, params.logger, memoryRepo); // Phase 9: retrieval reads through the same MemoryRepository instance /memories already uses
+  const memoryService = new MemoryService(memoryRepo, aiConversationRepo, playerRepo);
   return {
     ...contextParams,
     repositories: {
@@ -83,13 +89,15 @@ export function buildAppContext(params: {
       players: playerRepo,
       aiConversations: aiConversationRepo,
       memories: memoryRepo,
+      matchEvents: matchEventRepo,
     },
     services: {
       matches: new MatchService(matchRepo, serverConfigRepo),
       attendance: new AttendanceService(matchRepo, attendanceRepo, serverConfigRepo),
       ai: aiService,
       conversations: new ConversationService(aiConversationRepo, playerRepo, matchRepo, aiService),
-      memories: new MemoryService(memoryRepo, aiConversationRepo, playerRepo),
+      memories: memoryService,
+      postMatch: new PostMatchService(matchRepo, matchEventRepo, playerRepo, serverConfigRepo, aiService, memoryService, params.logger),
     },
   };
 }

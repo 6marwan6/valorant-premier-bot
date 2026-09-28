@@ -33,7 +33,7 @@ describe("command registry", () => {
     expect(json.dm_permission).toBe(false);
   });
 
-  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 + Phase 8 commands", () => {
+  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 + Phase 8 + Phase 10 commands", () => {
     const names = commands.map((c) => c.data.name).sort();
     expect(names).toEqual(
       [
@@ -48,6 +48,7 @@ describe("command registry", () => {
         "remove-player",
         "player",
         "memories",
+        "complete-match",
       ].sort(),
     );
   });
@@ -110,5 +111,21 @@ describe("command registry", () => {
     expect(json.dm_permission).toBe(false);
     expect(json.default_member_permissions).toBeUndefined();
     expect(json.options ?? []).toHaveLength(0);
+  });
+
+  it("/complete-match requires match_id and result; notes stays optional; uses custom admin gating (plan section 39)", () => {
+    const json = commandsByName.get("complete-match")!.data.toJSON();
+    expect(json.dm_permission).toBe(false);
+    expect(json.default_member_permissions).toBeUndefined();
+    const byName = new Map((json.options ?? []).map((o) => [o.name, o as { required?: boolean }]));
+    expect(byName.get("match_id")?.required).toBe(true);
+    expect(byName.get("result")?.required).toBe(true);
+    expect(byName.get("notes")?.required ?? false).toBe(false);
+  });
+
+  it("/complete-match's result option only offers WIN/LOSS choices (plan section 39)", () => {
+    const json = commandsByName.get("complete-match")!.data.toJSON();
+    const resultOption = (json.options ?? []).find((o) => o.name === "result") as { choices?: { value: string }[] };
+    expect((resultOption.choices ?? []).map((c) => c.value).sort()).toEqual(["LOSS", "WIN"]);
   });
 });

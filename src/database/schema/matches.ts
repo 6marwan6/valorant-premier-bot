@@ -22,6 +22,13 @@ export const matchStatusEnum = pgEnum("match_status", [
 ]);
 
 /**
+ * Plan section 39 "Post-Match Mode": /complete-match's Result input.
+ * Nullable on the row itself (below) since a match only has a result once
+ * COMPLETED — SCHEDULED/CONFIRMATION_OPEN/IN_PROGRESS/CANCELLED never do.
+ */
+export const matchResultEnum = pgEnum("match_result", ["WIN", "LOSS"]);
+
+/**
  * A single Premier match — plan section 11 "Match Creation" / section 12
  * "Match States".
  *
@@ -77,6 +84,15 @@ export const matches = pgTable(
     // already-posted message.
     announcementChannelId: text("announcement_channel_id"),
     announcementMessageId: text("announcement_message_id"),
+
+    // Phase 10 (plan section 39): set together by /complete-match, never
+    // independently — see matchLifecycle.canCompleteMatch. `notes` is the
+    // admin's raw freeform input ("Ahmed clutched round 19. ..."); the
+    // structured per-player breakdown derived from it lives in
+    // schema/matchEvents.ts, not here.
+    result: matchResultEnum("result"),
+    notes: text("notes"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

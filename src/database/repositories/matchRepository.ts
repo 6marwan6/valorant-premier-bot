@@ -65,7 +65,15 @@ export class MatchRepository {
     values: Partial<
       Pick<
         MatchRow,
-        "opponent" | "scheduledAt" | "timezone" | "status" | "announcementChannelId" | "announcementMessageId"
+        | "opponent"
+        | "scheduledAt"
+        | "timezone"
+        | "status"
+        | "announcementChannelId"
+        | "announcementMessageId"
+        | "result"
+        | "notes"
+        | "completedAt"
       >
     >,
   ): Promise<MatchRow | undefined> {

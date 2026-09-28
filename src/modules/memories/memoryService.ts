@@ -68,6 +68,37 @@ export class MemoryService {
   }
 
   /**
+   * Plan section 40's stated purpose ("this allows the AI to make
+   * match-specific callbacks") realized as a memory, and the "match
+   * memories" piece of Phase 10 the README flagged Phase 9 retrieval as
+   * ready for but had nothing to actually retrieve yet. Called from
+   * postMatchService.ts once per player-tied match_events row (a
+   * TEAM_EVENT, which has no player, never reaches here — see
+   * memories.playerId being NOT NULL).
+   *
+   * Visibility TEAM, not PRIVATE like autoSave's player-approved memories:
+   * this is an admin-recorded team performance fact, not something the
+   * player privately disclosed about themselves, so section 44 rule 1
+   * ("private information should never automatically become public") does
+   * not apply the same way here — but PUBLIC (usable completely outside
+   * team context) still isn't warranted either, so TEAM is "the most
+   * restrictive reasonable visibility" (section 24) for this kind of fact.
+   * Confidence 1, same reasoning as autoSave: the admin explicitly wrote
+   * this down, it isn't an inferred guess (section 26).
+   */
+  async createFromMatchEvent(params: { playerId: number; content: string; matchEventId: number }): Promise<MemoryRow> {
+    return this.memories.create({
+      playerId: params.playerId,
+      type: "MATCH_EVENT",
+      content: params.content,
+      confidence: 1,
+      visibility: "TEAM",
+      aiUsable: true,
+      evidence: [{ sourceType: "MATCH_EVENT", sourceId: String(params.matchEventId) }],
+    });
+  }
+
+  /**
    * Plan section 43: "Players should be able to request deletion of their
    * memories" — now the *only* control a player has over an individual
    * memory (section 21's revised Rule 5), so it has to work from anywhere

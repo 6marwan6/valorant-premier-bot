@@ -5,9 +5,9 @@ Private Discord bot for a 6–7 person Valorant Premier team. See
 the single source of truth for scope and behavior; this README only covers
 how to run what's built so far and the decisions made while building it.
 
-## Status: Phase 9 — Retrieval ✅ (Phases 1–8 also complete)
+## Status: Phase 10 — Match Hype / Recaps ✅ (Phases 1–9 also complete)
 
-Jump to [Phase 9 — retrieval](#phase-9--retrieval-what-was-built-and-the-choices-made)
+Jump to [Phase 10 — hype & recaps](#phase-10--match-hype--recaps-what-was-built-and-the-choices-made)
 for the newest work. The Phase 5 notes below are kept as they were.
 
 ### Phase 5 — Player Profiles (previous status header)
@@ -636,6 +636,111 @@ there — so a real `npm run test:integration` pass is worth doing before
 treating this phase as fully verified, same caveat as Phase 8's original
 notes.
 
+## Phase 10 — Match Hype / Recaps: what was built and the choices made
+
+Plan section 59 scopes this phase as `MATCH_HYPE`, `POST_MATCH`, match
+events, and match memories (sections 38, 39, 40).
+
+**Built**
+
+- `/complete-match match_id result:WIN|LOSS [notes]` (admin only) — marks
+  the match `COMPLETED`, stores `result`/`notes`/`completed_at` on
+  `matches`, turns the admin's freeform notes into structured
+  `match_events` rows, posts a recap to the match channel, and refreshes
+  the public roster message (its buttons disappear, same as
+  `/cancel-match`).
+- `match_events` table (section 40): `CLUTCH / MVP / TOP_FRAG /
+  FUNNY_MOMENT / ACHIEVEMENT / TEAM_EVENT`. `player_id` is nullable
+  (`TEAM_EVENT`, or a name in the notes that isn't on the roster).
+- **Match memories**: each player-tied event becomes one `MATCH_EVENT`
+  memory at `TEAM` visibility, evidenced back to its `match_events` row
+  (`memory_evidence.source_type` gained `MATCH_EVENT`). This is the writer
+  the Phase 9 notes said retrieval was waiting for.
+- `MATCH_HYPE`: the reminder cron's nudge for the offset closest to
+  kickoff (15 minutes in the default 3h/1h/15m schedule) becomes a
+  `🔥 **15 MINUTES**` header + opponent line (deterministic) + AI flavor
+  text built from the roster/agents in the database (section 38's split:
+  facts from the DB, AI only writes the personality layer).
+- Migration `0007_add_match_events_and_recap.sql`.
+
+**Choices the plan left open**
+
+- **Hype trigger.** Section 38 says "optionally" and names no trigger.
+  Its example header ("🔥 15 MINUTES") matches the last default reminder,
+  so hype rides on that nudge instead of adding a command. Consequences:
+  a one-offset schedule never gets hype (its only reminder is the
+  announcement, which must carry the buttons), and non-closest nudges are
+  unchanged. If the LLM is off or fails, the plain nudge goes out exactly
+  as before (principle 8).
+- **Team-wide modes stay out of `AiMode`.** `MATCH_HYPE`/`POST_MATCH`
+  address the whole roster, have no attendance status, and don't fit
+  `ai_conversations` (player+match scoped), so they have their own context
+  builders (`teamAiContextBuilder.ts`) and output validator
+  (`parseTeamMessage`) instead of stretching the per-player ones.
+- **Protected topics = union across the roster.** A team message can name
+  anyone, so its forbidden list is every active player's protected topics
+  combined; the same list also filters the model's output.
+- **Facts stay outside the LLM.** The recap's header, opponent and
+  WIN/LOSS line are built by the app; only the body is AI. With AI off or
+  failing, a short generic line is posted instead. The `💔` header for a
+  loss is my choice; the plan only shows a win example.
+- **One LLM, not two.** Section 57 suggests a cheaper model for
+  extraction. Only one model is configurable today, so extraction and the
+  recap both use it (principle 11). Splitting later is one constructor
+  argument.
+- **Extraction is conservative.** The model must copy roster names
+  exactly; the backend matches them case-insensitively and exactly, no
+  fuzzy matching. An unmatched name stores the event with no player and
+  creates no memory. A single event that trips a protected topic is
+  dropped without failing the rest.
+- **Memory rules.** Player-tied events only create a memory if that
+  player's `memoryUsageEnabled` is on (section 9). `TEAM` visibility
+  (not `PUBLIC`) is the most restrictive level that still lets a team
+  performance fact be reused (section 24). Confidence is 1: the admin
+  wrote it down.
+- **Completion is allowed from any non-terminal status** (nothing in the
+  codebase ever sets `IN_PROGRESS`, so in practice: `CONFIRMATION_OPEN`
+  or `SCHEDULED`). The match channel is checked before anything is
+  written, so a misconfigured guild can't end up `COMPLETED` with no
+  recap possible.
+- **`ALTER TYPE ... ADD VALUE`** is part of migration 0007. Postgres 12+
+  allows it inside the migrator's transaction because the new value isn't
+  used in the same migration; on an older server it would fail.
+
+**Verified** (Postgres 16 installed locally in the build sandbox): the
+migration applies cleanly; `match_events` FKs behave as designed (cascade
+on match delete, set-null on player delete); `/complete-match` end to end
+(events, `TEAM` memory + evidence, recap post, roster refresh, blocked
+already-completed match, missing match channel, `memoryUsageEnabled=false`,
+AI off); hype end to end (closest nudge, non-closest nudge, LLM failure,
+AI off, single-offset schedule).
+
+**Not verified / worth knowing**
+
+- I did not test that a Phase 10 `TEAM` memory actually surfaces in a
+  later CELEBRATE/ROAST through Phase 9 retrieval. The visibility and
+  type are ones retrieval already handles, but that link has no test.
+- `/complete-match` can make two sequential LLM calls (extraction, then
+  recap), each capped by `LLM_TIMEOUT_MS` (10s default), inside a function
+  with `maxDuration: 30`. It fits, with little slack; raise `maxDuration`
+  if the provider is slow.
+- There is no command to view or delete `match_events` rows themselves;
+  memories derived from them are covered by the existing `/memories`
+  flow, but I did not check how those `TEAM` memories appear there.
+- **Pre-existing problems found, not caused by this phase and not
+  fixed:** `npm run typecheck` reports two errors on the code as uploaded
+  (`memoryDecision.ts` calls `MemoryService.decide`, which doesn't exist;
+  `llmClient.ts` calls `logger.info` on a type that only has
+  `warn`/`error`). The first could be a real runtime failure if that
+  button handler is reachable. Also, 6 tests in the phase 6/7/9
+  integration files failed in my run; the same files fail on the untouched
+  upload (a different subset on each run), so I'm treating them as
+  timing-sensitive, but I did not root-cause them.
+- The copy of `Full_Development_Plan.md` in the Claude Project's files is
+  older than the one bundled in the zip (sections 21/44/CELEBRATE-ROAST
+  revisions). Sections 38-40 and 59, which this phase uses, are identical
+  in both.
+
 ## A dependency vulnerability found and fixed (Phase 2)
 
 `npm audit` flagged a **high-severity SQL-injection advisory in
@@ -783,20 +888,20 @@ api/
 
 src/
 ├── discord/
-│   ├── commands/      # setup, createMatch, editMatch, cancelMatch, listMatches, postMatch, addPlayer, editPlayer, removePlayer, player, memories
+│   ├── commands/      # setup, createMatch, editMatch, cancelMatch, listMatches, postMatch, addPlayer, editPlayer, removePlayer, player, memories, completeMatch
 │   ├── interactions/  # dispatchCommand, dispatchButton
 │   ├── discordRest.ts, verifyInteraction.ts, httpInteractionAdapter.ts, handleDiscordInteraction.ts
 │   ├── permissions.ts, commandGuards.ts, displayName.ts, announcementSync.ts, timezone.ts
 │   ├── consoleConversation.ts   # Phase 7: DM opener, Reply modal, reply delivery
 │   ├── memoryDelete.ts                       # Phase 8: 🗑️ delete button handler (list + auto-save Forget note)
 ├── modules/
-│   ├── matches/     # matchService, matchLifecycle, dateTime
+│   ├── matches/     # matchService, matchLifecycle, dateTime; postMatchService, matchEvents (Phase 10)
 │   ├── attendance/  # attendanceService, rosterMessage, customId
 │   ├── reminders/   # reminderScheduling (pure planning), reminderMessages (nudge text)
 │   ├── players/     # playerValidation (agent/topic parsing, role choices) — Phase 5
-│   ├── ai/          # aiService, aiContextBuilder, aiOutput, aiMode (Phase 6); conversationService, conversationContextBuilder, conversationCustomId (Phase 7)
+│   ├── ai/          # aiService, aiContextBuilder, aiOutput, aiMode (Phase 6); conversationService, conversationContextBuilder, conversationCustomId (Phase 7); teamAiContextBuilder (Phase 10)
 │   └── memories/    # memoryService, memoryManageCustomId (Phase 8); memoryRetrieval (Phase 9)
-├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders, players, aiConversations, memories, memoryEvidence
+├── database/{schema,repositories}/   # schema: serverConfig, matches, attendance, reminders, players, aiConversations, memories, memoryEvidence, matchEvents
 ├── services/
 │   ├── scheduling/   # cronAuth, reminderCronJob (Phase 4), dmReplyPollJob (Phase 7)
 │   ├── ai/           # llmClient (Phase 6)
@@ -875,9 +980,10 @@ minutes-apart reminders — so an **external** scheduler drives
 Mirrors plan section 60's split between unit and integration tests:
 
 ```bash
-npm test               # unit tests only — no infrastructure needed (258 tests)
+npm test               # unit tests only — no infrastructure needed (345 tests)
 npm run test:integration  # requires DATABASE_URL pointing at a disposable
-                           # Postgres with migrations applied (118 tests)
+                           # Postgres with migrations applied (137 tests; see the Phase 10
+                           # notes for the 6 that fail on the original upload too)
 ```
 
 Every `tests/integration/*.test.ts` file self-skips (rather than failing)
@@ -1011,7 +1117,8 @@ have hit it, rather than being a theoretical gap in coverage.
       filtering + context builder — semantic/embedding retrieval
       deliberately not built; a 6-7 person team's per-player memory count
       doesn't justify it yet, see the Phase 9 notes above for why)
-- [ ] Phase 10 — Match Hype / Recaps
+- [x] Phase 10 — Match Hype / Recaps (`/complete-match`, `match_events`,
+      `MATCH_EVENT` team memories, hype on the closest-to-kickoff reminder)
 
 Each phase will be checked against `Full_Development_Plan.md` before
 implementation, per the ground rule for this project.

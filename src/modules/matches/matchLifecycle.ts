@@ -24,6 +24,20 @@ export function canCancelMatch(status: MatchStatus): boolean {
   return !TERMINAL_STATUSES.includes(status);
 }
 
+/**
+ * Plan section 39: /complete-match. The plan doesn't spell out which
+ * pre-completion states are eligible, and no phase has ever actually moved
+ * a match to IN_PROGRESS (there's no command that does — see aiMode.ts's
+ * note on the same gap), so in practice this only ever fires from
+ * CONFIRMATION_OPEN. Allowing it from any non-terminal state (same rule as
+ * canCancelMatch/canEditMatch) rather than hard-coding CONFIRMATION_OPEN
+ * covers SCHEDULED too — an admin completing a match they forgot to
+ * `/post-match` first shouldn't be blocked by that oversight.
+ */
+export function canCompleteMatch(status: MatchStatus): boolean {
+  return !TERMINAL_STATUSES.includes(status);
+}
+
 export function describeWhyLocked(status: MatchStatus): string {
   return status === "COMPLETED"
     ? "That match has already been completed."

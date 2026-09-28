@@ -180,3 +180,99 @@ describe("AiService — Phase 9 retrieval wiring", () => {
     expect(llm.complete.mock.calls[0]![0].user).toContain("A private fact, fine in a DM.");
   });
 });
+
+describe("AiService — Phase 10 team broadcasts (plan sections 38-40)", () => {
+  const teamJson = (response: string) => JSON.stringify({ response });
+  const roster = [makePlayer()];
+
+  describe("generateMatchHype", () => {
+    it("is disabled without an LLM", async () => {
+      const service = new AiService(null, fakeLogger() as unknown as Logger);
+      expect(await service.generateMatchHype({ match: makeMatch(), roster })).toEqual({ source: "fallback" });
+    });
+
+    it("returns the model's validated hype text", async () => {
+      const llm = fakeLlm(async () => ({ text: teamJson("Let's cook."), model: "m", inputTokens: 1, outputTokens: 1 }));
+      const service = new AiService(llm, fakeLogger() as unknown as Logger);
+      expect(await service.generateMatchHype({ match: makeMatch(), roster })).toEqual({ source: "ai", text: "Let's cook." });
+    });
+
+    it("falls back on invalid model output without throwing (plan section 48)", async () => {
+      const llm = fakeLlm(async () => ({ text: "not json", model: "m", inputTokens: 1, outputTokens: 1 }));
+      const logger = fakeLogger();
+      const service = new AiService(llm, logger as unknown as Logger);
+      expect(await service.generateMatchHype({ match: makeMatch(), roster })).toEqual({ source: "fallback" });
+      expect(logger.warn).toHaveBeenCalled();
+    });
+
+    it("falls back when the LLM call throws", async () => {
+      const llm = fakeLlm(async () => {
+        throw new LlmError("timed out", "timeout");
+      });
+      const logger = fakeLogger();
+      const service = new AiService(llm, logger as unknown as Logger);
+      expect(await service.generateMatchHype({ match: makeMatch(), roster })).toEqual({ source: "fallback" });
+      expect(logger.error).toHaveBeenCalled();
+    });
+  });
+
+  describe("generateMatchRecap", () => {
+    it("returns the model's validated recap text", async () => {
+      const llm = fakeLlm(async () => ({ text: teamJson("GG, chalk it up."), model: "m", inputTokens: 1, outputTokens: 1 }));
+      const service = new AiService(llm, fakeLogger() as unknown as Logger);
+      const outcome = await service.generateMatchRecap({
+        match: makeMatch(),
+        result: "WIN",
+        matchEvents: [],
+        roster,
+        notes: null,
+      });
+      expect(outcome).toEqual({ source: "ai", text: "GG, chalk it up." });
+    });
+
+    it("is disabled without an LLM", async () => {
+      const service = new AiService(null, fakeLogger() as unknown as Logger);
+      const outcome = await service.generateMatchRecap({
+        match: makeMatch(),
+        result: "LOSS",
+        matchEvents: [],
+        roster,
+        notes: null,
+      });
+      expect(outcome).toEqual({ source: "fallback" });
+    });
+  });
+
+  describe("extractMatchEvents", () => {
+    it("returns [] without an LLM, without calling anything", async () => {
+      const service = new AiService(null, fakeLogger() as unknown as Logger);
+      expect(await service.extractMatchEvents({ notes: "Ahmed clutched round 19.", roster })).toEqual([]);
+    });
+
+    it("returns the model's validated, structured events", async () => {
+      const raw = JSON.stringify({ events: [{ type: "CLUTCH", description: "Won a 1v3.", player_name: "Ahmed" }] });
+      const llm = fakeLlm(async () => ({ text: raw, model: "m", inputTokens: 1, outputTokens: 1 }));
+      const service = new AiService(llm, fakeLogger() as unknown as Logger);
+      const events = await service.extractMatchEvents({ notes: "Ahmed clutched round 19.", roster });
+      expect(events).toEqual([{ type: "CLUTCH", description: "Won a 1v3.", playerName: "Ahmed" }]);
+    });
+
+    it("returns [] (never throws) on invalid model output", async () => {
+      const llm = fakeLlm(async () => ({ text: "garbage", model: "m", inputTokens: 1, outputTokens: 1 }));
+      const logger = fakeLogger();
+      const service = new AiService(llm, logger as unknown as Logger);
+      expect(await service.extractMatchEvents({ notes: "x", roster })).toEqual([]);
+      expect(logger.warn).toHaveBeenCalled();
+    });
+
+    it("returns [] (never throws) when the LLM call itself fails", async () => {
+      const llm = fakeLlm(async () => {
+        throw new LlmError("boom", "http", 500);
+      });
+      const logger = fakeLogger();
+      const service = new AiService(llm, logger as unknown as Logger);
+      expect(await service.extractMatchEvents({ notes: "x", roster })).toEqual([]);
+      expect(logger.error).toHaveBeenCalled();
+    });
+  });
+});

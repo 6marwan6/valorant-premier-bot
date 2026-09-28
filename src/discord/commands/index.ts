@@ -10,6 +10,7 @@ import editPlayerCommand from "./editPlayer.js";
 import removePlayerCommand from "./removePlayer.js";
 import playerCommand from "./player.js";
 import memoriesCommand from "./memories.js";
+import completeMatchCommand from "./completeMatch.js";
 
 /**
  * Central command registry. Every command file exports a default `Command`
@@ -22,8 +23,9 @@ import memoriesCommand from "./memories.js";
  * /post-match (provisional — see its own file doc) + attendance buttons
  * (handled via dispatchButton.ts, not the command registry). Phase 5:
  * /add-player, /edit-player, /remove-player, /player (plan section 41).
- * Phase 8: /memories (plan sections 42/43). Later phases append their own
- * (section 42: /profile, /ai-settings; section 41: /complete-match, /team).
+ * Phase 8: /memories (plan sections 42/43). Phase 10: /complete-match
+ * (plan section 39). Later phases append their own (section 42: /profile,
+ * /ai-settings; section 41: /team).
  */
 export const commands: Command[] = [
   setupCommand,
@@ -37,6 +39,7 @@ export const commands: Command[] = [
   removePlayerCommand,
   playerCommand,
   memoriesCommand,
+  completeMatchCommand,
 ];
 
 export const commandsByName: Map<string, Command> = new Map(

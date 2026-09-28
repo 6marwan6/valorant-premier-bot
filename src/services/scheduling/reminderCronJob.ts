@@ -1,5 +1,5 @@
 import type { AppContext } from "../../appContext.js";
-import { planReminders } from "../../modules/reminders/reminderScheduling.js";
+import { planReminders, formatOffsetLabel } from "../../modules/reminders/reminderScheduling.js";
 import { buildReminderNudgeMessage } from "../../modules/reminders/reminderMessages.js";
 import { buildRosterMessage } from "../../modules/attendance/rosterMessage.js";
 
@@ -39,6 +39,11 @@ export interface ReminderCronSummary {
  */
 export async function runReminderCronJob(ctx: AppContext, now: Date = new Date()): Promise<ReminderCronSummary> {
   const configs = await ctx.repositories.serverConfig.listAll();
+  // Phase 10 (plan section 38): the nudge-send branch below needs each
+  // match's guild's configured offsets to know whether the reminder it's
+  // about to send is the one closest to kickoff — cheaper to look this up
+  // from the same list already fetched above than to re-query per match.
+  const configsByGuildId = new Map(configs.map((c) => [c.guildId, c]));
 
   let matchesReconciled = 0;
   for (const config of configs) {
@@ -96,7 +101,27 @@ export async function runReminderCronJob(ctx: AppContext, now: Date = new Date()
         if (!channelId) throw new Error("Match is open but has no announcement channel on record");
 
         const attendanceRows = await ctx.repositories.attendance.listByMatch(match.id);
-        const content = buildReminderNudgeMessage(match, attendanceRows, reminder.offsetMinutes);
+        let content = buildReminderNudgeMessage(match, attendanceRows, reminder.offsetMinutes);
+
+        // Plan section 38 "Match Hype": the example header ("🔥 15
+        // MINUTES") matches the closest-to-kickoff entry in the default
+        // reminder schedule (3h/1h/15m), so that's the one nudge this
+        // swaps for an AI-flavored hype message instead of the plain
+        // attendance count. A single-offset schedule never reaches this
+        // branch for its only reminder (that one always opens
+        // confirmation instead, in the `if` above), so hype simply
+        // doesn't fire in that setup — there's no non-announcement
+        // reminder left to attach it to.
+        const offsets = configsByGuildId.get(match.guildId)?.reminderScheduleMinutes ?? [];
+        const isClosestToKickoff = offsets.length > 0 && reminder.offsetMinutes === Math.min(...offsets);
+        if (isClosestToKickoff) {
+          const roster = await ctx.repositories.players.listActiveByGuild(match.guildId);
+          const hype = await ctx.services.ai.generateMatchHype({ match, roster });
+          if (hype.source === "ai") {
+            content = [`🔥 **${formatOffsetLabel(reminder.offsetMinutes).toUpperCase()}**`, "", `Match #${match.id} vs **${match.opponent}**`, "", hype.text].join("\n");
+          }
+        }
+
         const sent = await ctx.discord.sendChannelMessage(channelId, { content });
         await ctx.repositories.reminders.markSent(claimed.id, channelId, sent.id);
 

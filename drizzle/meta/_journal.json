@@ -50,6 +50,13 @@
       "when": 1790244966858,
       "tag": "0006_add_memories",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790505319545,
+      "tag": "0007_add_match_events_and_recap",
+      "breakpoints": true
     }
   ]
 }

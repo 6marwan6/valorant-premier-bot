@@ -1,13 +1,15 @@
 import type { Logger } from "../../config/logger.js";
 import type { AttendanceRow } from "../../database/schema/attendance.js";
 import type { MatchRow } from "../../database/schema/matches.js";
+import type { MatchEventRow } from "../../database/schema/matchEvents.js";
 import type { PlayerRow } from "../../database/schema/players.js";
 import type { MemoryRepository } from "../../database/repositories/memoryRepository.js";
 import { LlmError, type LlmClient } from "../../services/ai/llmClient.js";
 import { buildAIContext, forbiddenTopicsFor } from "./aiContextBuilder.js";
 import { modeForStatus, type AiMode } from "./aiMode.js";
-import { parseAiOutput, type MemoryCandidate } from "./aiOutput.js";
+import { parseAiOutput, parseMatchEventExtraction, parseTeamMessage, type ExtractedMatchEvent, type MemoryCandidate } from "./aiOutput.js";
 import { buildConversationContext, type ConversationTranscriptEntry } from "./conversationContextBuilder.js";
+import { buildMatchEventExtractionContext, buildMatchHypeContext, buildMatchRecapContext, type TeamAIContext } from "./teamAiContextBuilder.js";
 import { retrieveMemories } from "../memories/memoryRetrieval.js";
 
 /** Plan section 48's own example fallback wording. */
@@ -33,6 +35,16 @@ export interface AiOutcome {
 export type ConversationAiOutcome =
   | { source: "ai"; text: string; shouldFollowUp: boolean; memoryCandidate: MemoryCandidate | null }
   | { source: "fallback" };
+
+/**
+ * Phase 10 (plan sections 38/39): a team-wide broadcast. Same
+ * "text only meaningful when source === 'ai'" contract as
+ * ConversationAiOutcome, for the same reason — the right fallback wording
+ * differs by call site (reminderCronJob.ts's plain nudge text vs.
+ * postMatchService.ts's generic WIN/LOSS line), so this deliberately
+ * doesn't invent one.
+ */
+export type TeamAiOutcome = { source: "ai"; text: string } | { source: "fallback" };
 
 /**
  * Phase 6 orchestration: attendance response -> mode -> context -> LLM ->
@@ -211,6 +223,130 @@ export class AiService {
         "AI conversation request failed",
       );
       return { source: "fallback" };
+    }
+  }
+
+  /**
+   * Shared by generateMatchHype/generateMatchRecap: both produce the same
+   * {"response": "..."} shape (parseTeamMessage), just from a different
+   * context builder. Unlike respondToAttendance/respondInConversation, the
+   * caller supplies its own fallback text when source is "fallback" —
+   * there's no single generic wording that fits both a pre-match nudge and
+   * a post-match recap (plan section 48's spirit: never leave the user
+   * without a truthful message, but "truthful" looks different in each
+   * spot).
+   */
+  private async completeTeamBroadcast(context: TeamAIContext, logBase: Record<string, unknown>): Promise<TeamAiOutcome> {
+    if (!this.llm) return { source: "fallback" };
+
+    const startedAt = Date.now();
+    const base = { ...logBase, model: this.llm.model };
+
+    try {
+      const result = await this.llm.complete({ system: context.system, user: context.user });
+      const metrics = {
+        latencyMs: Date.now() - startedAt,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+      };
+
+      const parsed = parseTeamMessage(result.text, context.forbiddenTopics);
+      if (!parsed.ok) {
+        this.logger.warn({ ...base, ...metrics, success: false, reason: parsed.reason }, "Team AI output rejected");
+        return { source: "fallback" };
+      }
+
+      this.logger.info({ ...base, ...metrics, success: true }, "Team AI message generated");
+      return { source: "ai", text: parsed.value.response };
+    } catch (err) {
+      this.logger.error(
+        {
+          ...base,
+          latencyMs: Date.now() - startedAt,
+          success: false,
+          reason: err instanceof LlmError ? err.kind : "unknown",
+          status: err instanceof LlmError ? err.status : undefined,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Team AI request failed",
+      );
+      return { source: "fallback" };
+    }
+  }
+
+  /** Plan section 38 "Match Hype". Facts (roster/agents) already live in `params`; this only ever produces the personality-layer flavor text — see teamAiContextBuilder.ts's buildMatchHypeContext. */
+  async generateMatchHype(params: { match: MatchRow; roster: PlayerRow[] }): Promise<TeamAiOutcome> {
+    const context = buildMatchHypeContext(params);
+    return this.completeTeamBroadcast(context, {
+      event: "ai.matchHype",
+      matchId: params.match.id,
+      rosterSize: params.roster.length,
+    });
+  }
+
+  /** Plan section 39 "Post-Match Mode". `matchEvents` are the already-persisted, evidence-linked facts (section 40); the WIN/LOSS/opponent facts themselves stay outside the LLM (section 14's principle, applied here too — see postMatchService.ts). */
+  async generateMatchRecap(params: {
+    match: MatchRow;
+    result: "WIN" | "LOSS";
+    matchEvents: MatchEventRow[];
+    roster: PlayerRow[];
+    notes: string | null;
+  }): Promise<TeamAiOutcome> {
+    const context = buildMatchRecapContext(params);
+    return this.completeTeamBroadcast(context, {
+      event: "ai.matchRecap",
+      matchId: params.match.id,
+      result: params.result,
+      eventCount: params.matchEvents.length,
+    });
+  }
+
+  /**
+   * Plan section 40 / section 46 "Memory Extraction" pattern applied to
+   * match notes: turns /complete-match's freeform admin text into
+   * structured candidates. Never throws, and an empty array (no LLM
+   * configured, invalid output, or genuinely nothing to extract) is
+   * treated by postMatchService.ts exactly like "admin left notes blank"
+   * — the match still completes and still gets a recap either way (plan
+   * section 48's spirit: an AI failure here must not block completing the
+   * match).
+   */
+  async extractMatchEvents(params: { notes: string; roster: PlayerRow[] }): Promise<ExtractedMatchEvent[]> {
+    if (!this.llm) return [];
+
+    const context = buildMatchEventExtractionContext(params);
+    const startedAt = Date.now();
+    const base = { event: "ai.matchEventExtraction", rosterSize: params.roster.length, model: this.llm.model };
+
+    try {
+      const result = await this.llm.complete({ system: context.system, user: context.user });
+      const metrics = {
+        latencyMs: Date.now() - startedAt,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+      };
+
+      const parsed = parseMatchEventExtraction(result.text, context.forbiddenTopics);
+      if (!parsed.ok) {
+        this.logger.warn({ ...base, ...metrics, success: false, reason: parsed.reason }, "Match event extraction rejected");
+        return [];
+      }
+
+      this.logger.info({ ...base, ...metrics, success: true, eventCount: parsed.value.length }, "Match events extracted");
+      return parsed.value;
+    } catch (err) {
+      this.logger.error(
+        {
+          ...base,
+          latencyMs: Date.now() - startedAt,
+          success: false,
+          reason: err instanceof LlmError ? err.kind : "unknown",
+          status: err instanceof LlmError ? err.status : undefined,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Match event extraction failed",
+      );
+      return [];
     }
   }
 }

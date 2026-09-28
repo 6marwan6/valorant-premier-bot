@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canCancelMatch, canEditMatch, describeWhyLocked } from "../../src/modules/matches/matchLifecycle.js";
+import { canCancelMatch, canCompleteMatch, canEditMatch, describeWhyLocked } from "../../src/modules/matches/matchLifecycle.js";
 import type { MatchStatus } from "../../src/modules/matches/matchLifecycle.js";
 
 const ALL_STATUSES: MatchStatus[] = [
@@ -36,6 +36,19 @@ describe("canCancelMatch", () => {
   });
 });
 
+describe("canCompleteMatch", () => {
+  it("allows completing from every non-terminal state (plan section 39, same rule as canCancelMatch)", () => {
+    expect(canCompleteMatch("SCHEDULED")).toBe(true);
+    expect(canCompleteMatch("CONFIRMATION_OPEN")).toBe(true);
+    expect(canCompleteMatch("IN_PROGRESS")).toBe(true);
+  });
+
+  it("blocks completing an already-completed or already-cancelled match", () => {
+    expect(canCompleteMatch("COMPLETED")).toBe(false);
+    expect(canCompleteMatch("CANCELLED")).toBe(false);
+  });
+});
+
 describe("describeWhyLocked", () => {
   it("gives a distinct, accurate reason for each terminal state", () => {
     expect(describeWhyLocked("COMPLETED")).toMatch(/completed/i);
@@ -43,9 +56,10 @@ describe("describeWhyLocked", () => {
   });
 });
 
-describe("every status is covered by both guards (no silent fallthrough)", () => {
-  it.each(ALL_STATUSES)("%s has a defined edit and cancel answer", (status) => {
+describe("every status is covered by all three guards (no silent fallthrough)", () => {
+  it.each(ALL_STATUSES)("%s has a defined edit, cancel, and complete answer", (status) => {
     expect(typeof canEditMatch(status)).toBe("boolean");
     expect(typeof canCancelMatch(status)).toBe("boolean");
+    expect(typeof canCompleteMatch(status)).toBe("boolean");
   });
 });

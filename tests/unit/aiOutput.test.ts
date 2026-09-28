@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { MEMORY_TYPES, mentionsForbiddenTopic, neutralizeMentions, parseAiOutput } from "../../src/modules/ai/aiOutput.js";
+import {
+  MATCH_EVENT_TYPES,
+  MEMORY_TYPES,
+  mentionsForbiddenTopic,
+  neutralizeMentions,
+  parseAiOutput,
+  parseMatchEventExtraction,
+  parseTeamMessage,
+} from "../../src/modules/ai/aiOutput.js";
 
 const ok = (response: string, extra = "") => JSON.stringify({ response, should_follow_up: false, memory_candidate: null }) + extra;
 
@@ -120,5 +128,118 @@ describe("helpers", () => {
   });
   it("mentionsForbiddenTopic ignores empty topics", () => {
     expect(mentionsForbiddenTopic("anything", [""])).toBe(false);
+  });
+});
+
+describe("parseTeamMessage (Phase 10, plan sections 38/39)", () => {
+  const okTeam = (response: string) => JSON.stringify({ response });
+
+  it("parses the {\"response\": ...} shape", () => {
+    expect(parseTeamMessage(okTeam("Let's cook."), [])).toEqual({ ok: true, value: { response: "Let's cook." } });
+  });
+
+  it("tolerates markdown fences", () => {
+    const raw = "```json\n" + okTeam("gg") + "\n```";
+    const result = parseTeamMessage(raw, []);
+    expect(result.ok && result.value.response).toBe("gg");
+  });
+
+  it("rejects non-JSON output", () => {
+    expect(parseTeamMessage("sure! here you go", [])).toEqual({ ok: false, reason: "invalid_json" });
+  });
+
+  it("rejects wrong shapes (missing/empty/over-long response)", () => {
+    expect(parseTeamMessage(JSON.stringify({ text: "x" }), [])).toEqual({ ok: false, reason: "invalid_shape" });
+    expect(parseTeamMessage(JSON.stringify({ response: "  " }), [])).toEqual({ ok: false, reason: "invalid_shape" });
+    expect(parseTeamMessage(JSON.stringify({ response: "a".repeat(701) }), [])).toEqual({
+      ok: false,
+      reason: "invalid_shape",
+    });
+  });
+
+  it("rejects a broadcast that mentions a protected topic (plan section 10, applied to the whole roster's union)", () => {
+    expect(parseTeamMessage(okTeam("hope your FAMILY is doing well"), ["Family"])).toEqual({
+      ok: false,
+      reason: "protected_topic",
+    });
+  });
+
+  it("neutralizes mass/user/role mentions", () => {
+    const result = parseTeamMessage(okTeam("@everyone <@123> let's go"), []);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.value.response).not.toMatch(/@everyone|<@/);
+  });
+});
+
+describe("parseMatchEventExtraction (Phase 10, plan section 40)", () => {
+  const okEvents = (events: unknown[]) => JSON.stringify({ events });
+
+  it("parses a well-formed list of events", () => {
+    const raw = okEvents([
+      { type: "CLUTCH", description: "Ahmed won a 1v3.", player_name: "Ahmed" },
+      { type: "TOP_FRAG", description: "Omar led the scoreboard.", player_name: "Omar" },
+    ]);
+    const result = parseMatchEventExtraction(raw, []);
+    expect(result).toEqual({
+      ok: true,
+      value: [
+        { type: "CLUTCH", description: "Ahmed won a 1v3.", playerName: "Ahmed" },
+        { type: "TOP_FRAG", description: "Omar led the scoreboard.", playerName: "Omar" },
+      ],
+    });
+  });
+
+  it("accepts every plan section 40 type", () => {
+    for (const type of MATCH_EVENT_TYPES) {
+      const raw = okEvents([{ type, description: "something happened", player_name: null }]);
+      const result = parseMatchEventExtraction(raw, []);
+      expect(result.ok && result.value[0]?.type).toBe(type);
+    }
+  });
+
+  it("defaults an omitted player_name to null (team-wide event)", () => {
+    const raw = okEvents([{ type: "TEAM_EVENT", description: "Slow start, strong comeback." }]);
+    const result = parseMatchEventExtraction(raw, []);
+    expect(result.ok && result.value[0]?.playerName).toBeNull();
+  });
+
+  it("returns an empty list for {\"events\": []} — nothing to extract is not an error", () => {
+    expect(parseMatchEventExtraction(okEvents([]), [])).toEqual({ ok: true, value: [] });
+  });
+
+  it("rejects non-JSON and wrong shapes", () => {
+    expect(parseMatchEventExtraction("not json", [])).toEqual({ ok: false, reason: "invalid_json" });
+    expect(parseMatchEventExtraction(JSON.stringify({ events: "not an array" }), [])).toEqual({
+      ok: false,
+      reason: "invalid_shape",
+    });
+    expect(parseMatchEventExtraction(okEvents([{ type: "NOT_A_TYPE", description: "x" }]), [])).toEqual({
+      ok: false,
+      reason: "invalid_shape",
+    });
+    expect(parseMatchEventExtraction(okEvents([{ type: "CLUTCH", description: "" }]), [])).toEqual({
+      ok: false,
+      reason: "invalid_shape",
+    });
+  });
+
+  it("drops (not rejects) just the one event that mentions a forbidden topic — others survive", () => {
+    const raw = okEvents([
+      { type: "CLUTCH", description: "Ahmed clutched round 19.", player_name: "Ahmed" },
+      { type: "FUNNY_MOMENT", description: "Joked about his FAMILY the whole game.", player_name: "Omar" },
+    ]);
+    const result = parseMatchEventExtraction(raw, ["Family"]);
+    expect(result.ok && result.value).toEqual([{ type: "CLUTCH", description: "Ahmed clutched round 19.", playerName: "Ahmed" }]);
+  });
+
+  it("caps at 10 extracted events (shape validation)", () => {
+    const raw = okEvents(Array.from({ length: 11 }, () => ({ type: "TEAM_EVENT", description: "x" })));
+    expect(parseMatchEventExtraction(raw, [])).toEqual({ ok: false, reason: "invalid_shape" });
+  });
+
+  it("neutralizes mentions inside a description", () => {
+    const raw = okEvents([{ type: "TEAM_EVENT", description: "pinged @everyone after the win", player_name: null }]);
+    const result = parseMatchEventExtraction(raw, []);
+    expect(result.ok && result.value[0]?.description).not.toMatch(/@everyone/);
   });
 });

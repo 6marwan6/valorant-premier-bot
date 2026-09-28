@@ -10,10 +10,17 @@ import { memories } from "./memories.js";
  * has no writer until raw channel-message storage exists, which this phase
  * deliberately does not build — see README's "Phase 8" section, "Passive
  * message scanning: deferred by design."
+ *
+ * `MATCH_EVENT` added in Phase 10: memoryService.createFromMatchEvent
+ * evidences a post-match memory back to its schema/matchEvents.ts row
+ * (plan section 40's "This allows the AI to make match-specific callbacks"
+ * — the evidence link is what makes that callback traceable/removable,
+ * same guarantee section 25 asks for on every other memory).
  */
 export const memoryEvidenceSourceTypeEnum = pgEnum("memory_evidence_source_type", [
   "AI_CONVERSATION",
   "DISCORD_MESSAGE",
+  "MATCH_EVENT",
 ]);
 
 /**

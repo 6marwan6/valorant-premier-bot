@@ -85,6 +85,119 @@ export function mentionsForbiddenTopic(text: string, forbiddenTopics: string[]):
   return forbiddenTopics.some((topic) => topic.length > 0 && haystack.includes(topic.toLowerCase()));
 }
 
+// --- Phase 10: team-wide broadcasts (MATCH_HYPE / POST_MATCH) ---------------
+//
+// These are a separate, simpler output contract from aiOutputSchema above:
+// a one-shot message with no follow-up/memory-candidate concept, since
+// nothing about a team-wide broadcast is a private, ongoing conversation
+// (see aiService.ts's TeamAiOutcome). Kept in this same file rather than a
+// new one so every "trust nothing the model says until it's validated"
+// check (section 55) lives in one place.
+
+const MAX_TEAM_RESPONSE_LENGTH = 700; // section 35: concise; well under Discord's 2000-char limit even with the deterministic header prepended
+
+const teamMessageSchema = z.object({
+  response: z.string().trim().min(1).max(MAX_TEAM_RESPONSE_LENGTH),
+});
+
+export interface ParsedTeamMessage {
+  response: string;
+}
+
+export type ParseTeamMessageResult =
+  | { ok: true; value: ParsedTeamMessage }
+  | { ok: false; reason: "invalid_json" | "invalid_shape" | "protected_topic" };
+
+/** Validates a MATCH_HYPE/POST_MATCH broadcast the same way parseAiOutput validates a per-player response. */
+export function parseTeamMessage(raw: string, forbiddenTopics: string[]): ParseTeamMessageResult {
+  const json = extractJsonObject(raw);
+  if (!json) return { ok: false, reason: "invalid_json" };
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(json);
+  } catch {
+    return { ok: false, reason: "invalid_json" };
+  }
+
+  const result = teamMessageSchema.safeParse(parsedJson);
+  if (!result.success) return { ok: false, reason: "invalid_shape" };
+
+  if (mentionsForbiddenTopic(result.data.response, forbiddenTopics)) {
+    return { ok: false, reason: "protected_topic" };
+  }
+
+  return { ok: true, value: { response: neutralizeMentions(result.data.response) } };
+}
+
+// --- Phase 10: match-event extraction (plan section 40) --------------------
+//
+// Turns /complete-match's freeform admin `notes` into structured,
+// evidence-linkable events. Same tuple-not-import pattern as MEMORY_TYPES
+// above (see schema/matchEvents.ts's matchEventTypeEnum, which
+// tests/unit/matchEvents.test.ts pins this list against).
+
+export const MATCH_EVENT_TYPES = ["CLUTCH", "MVP", "TOP_FRAG", "FUNNY_MOMENT", "ACHIEVEMENT", "TEAM_EVENT"] as const;
+
+const MAX_MATCH_EVENT_DESCRIPTION_LENGTH = 200;
+const MAX_EXTRACTED_EVENTS = 10; // a single match's notes for a 6-7 person team; bounds one bad extraction from flooding match_events
+
+const matchEventExtractionItemSchema = z.object({
+  type: z.enum(MATCH_EVENT_TYPES),
+  description: z.string().trim().min(1).max(MAX_MATCH_EVENT_DESCRIPTION_LENGTH),
+  // Copied verbatim from the roster list the prompt was given, or null —
+  // see modules/matches/matchEvents.ts's matchPlayerByName for how this
+  // gets resolved back to a real player id (never trusted as one here).
+  player_name: z.string().trim().min(1).max(60).nullable().optional(),
+});
+
+const matchEventExtractionSchema = z.object({
+  events: z.array(matchEventExtractionItemSchema).max(MAX_EXTRACTED_EVENTS),
+});
+
+export interface ExtractedMatchEvent {
+  type: (typeof MATCH_EVENT_TYPES)[number];
+  description: string;
+  playerName: string | null;
+}
+
+export type ParseMatchEventExtractionResult =
+  | { ok: true; value: ExtractedMatchEvent[] }
+  | { ok: false; reason: "invalid_json" | "invalid_shape" };
+
+/**
+ * Unlike parseAiOutput/parseTeamMessage, a forbidden-topic hit here drops
+ * just that one event rather than failing the whole extraction — plan
+ * section 37's "the model only ever suggests" applies per-item, the same
+ * way a bad memory_candidate doesn't sink an otherwise-good response.
+ */
+export function parseMatchEventExtraction(raw: string, forbiddenTopics: string[]): ParseMatchEventExtractionResult {
+  const json = extractJsonObject(raw);
+  if (!json) return { ok: false, reason: "invalid_json" };
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(json);
+  } catch {
+    return { ok: false, reason: "invalid_json" };
+  }
+
+  const result = matchEventExtractionSchema.safeParse(parsedJson);
+  if (!result.success) return { ok: false, reason: "invalid_shape" };
+
+  const events: ExtractedMatchEvent[] = [];
+  for (const item of result.data.events) {
+    if (mentionsForbiddenTopic(item.description, forbiddenTopics)) continue;
+    events.push({
+      type: item.type,
+      description: neutralizeMentions(item.description),
+      playerName: item.player_name ?? null,
+    });
+  }
+
+  return { ok: true, value: events };
+}
+
 export function parseAiOutput(raw: string, forbiddenTopics: string[]): ParseAiOutputResult {
   const json = extractJsonObject(raw);
   if (!json) return { ok: false, reason: "invalid_json" };
