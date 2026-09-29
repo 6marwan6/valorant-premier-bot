@@ -1,5 +1,5 @@
 import type { MemoryRow, MemoryType } from "../../database/schema/memories.js";
-import type { AiMode } from "../ai/aiMode.js";
+import type { ConversationMode } from "../ai/aiMode.js";
 import { mentionsForbiddenTopic } from "../ai/aiOutput.js";
 
 /**
@@ -46,20 +46,27 @@ const RECENCY_HALF_LIFE_DAYS = 21;
  * officially been warned") — so it reuses ROAST's set plus ACHIEVEMENT,
  * hype fuel a roast has no use for.
  */
-const PREFERRED_TYPES: Record<AiMode, MemoryType[]> = {
+const PREFERRED_TYPES: Record<ConversationMode, MemoryType[]> = {
   ROAST: ["RUNNING_JOKE", "VALORANT_PREFERENCE", "TEAM_JOKE", "MATCH_EVENT"],
   CELEBRATE: ["RUNNING_JOKE", "VALORANT_PREFERENCE", "TEAM_JOKE", "MATCH_EVENT", "ACHIEVEMENT"],
   CONSOLE: ["PLAYER_PREFERENCE", "PERSONALITY_TRAIT", "MATCH_EVENT", "HABIT", "TEAM_HISTORY"],
+  // DIRECT_CHAT (2026-09-28): free-form chat has no single specialty the
+  // way a reaction to a specific attendance answer does, so every type is
+  // an equally plausible fit — an empty preferred-set with modeRelevance's
+  // 0.35 default for everything, same as any type in any OTHER mode that
+  // isn't that mode's specialty (see modeRelevance below).
+  DIRECT_CHAT: [],
 };
 
 /** Section 31: CONSOLE "should avoid aggressive roast material" — actively discouraged, not just deprioritized. */
-const DISCOURAGED_TYPES: Record<AiMode, MemoryType[]> = {
+const DISCOURAGED_TYPES: Record<ConversationMode, MemoryType[]> = {
   ROAST: [],
   CELEBRATE: [],
   CONSOLE: ["RUNNING_JOKE", "TEAM_JOKE"],
+  DIRECT_CHAT: [], // banter is exactly as welcome here as anywhere else the player initiates it
 };
 
-function modeRelevance(type: MemoryType, mode: AiMode): number {
+function modeRelevance(type: MemoryType, mode: ConversationMode): number {
   if (DISCOURAGED_TYPES[mode].includes(type)) return 0;
   if (PREFERRED_TYPES[mode].includes(type)) return 1;
   return 0.35; // present and plausible, just not this mode's specialty — section 33 is a hybrid score, not a hard type filter
@@ -87,7 +94,7 @@ function recencyScore(createdAt: Date, now: Date): number {
  */
 const WEIGHTS = { modeRelevance: 2, importance: 1, confidence: 1, recency: 1 };
 
-export function scoreMemory(memory: MemoryRow, mode: AiMode, now: Date = new Date()): number {
+export function scoreMemory(memory: MemoryRow, mode: ConversationMode, now: Date = new Date()): number {
   return (
     WEIGHTS.modeRelevance * modeRelevance(memory.type, mode) +
     WEIGHTS.importance * (memory.importance / 100) +
@@ -106,8 +113,9 @@ export function scoreMemory(memory: MemoryRow, mode: AiMode, now: Date = new Dat
  */
 export type MemoryAudience = "PUBLIC_CHANNEL" | "PRIVATE_DM";
 
-export function audienceForMode(mode: AiMode): MemoryAudience {
-  return mode === "CONSOLE" ? "PRIVATE_DM" : "PUBLIC_CHANNEL";
+export function audienceForMode(mode: ConversationMode): MemoryAudience {
+  // CONSOLE and DIRECT_CHAT (2026-09-28) are both real 1:1 DMs; every other mode posts publicly.
+  return mode === "CONSOLE" || mode === "DIRECT_CHAT" ? "PRIVATE_DM" : "PUBLIC_CHANNEL";
 }
 
 /**
@@ -142,7 +150,7 @@ export function isEligible(memory: MemoryRow, audience: MemoryAudience, forbidde
  */
 export function retrieveMemories(params: {
   memories: MemoryRow[];
-  mode: AiMode;
+  mode: ConversationMode;
   forbiddenTopics: string[];
   limit?: number;
   now?: Date;

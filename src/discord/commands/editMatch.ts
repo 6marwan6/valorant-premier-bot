@@ -18,10 +18,10 @@ const data = new SlashCommandBuilder()
     opt.setName("match_id").setDescription("Match number, e.g. 42").setRequired(true),
   )
   .addStringOption((opt) =>
-    opt.setName("date").setDescription("New date, DD/MM/YYYY (must be given with time)").setRequired(false),
+    opt.setName("date").setDescription('New date: DD/MM/YYYY or looser (today, tomorrow, a weekday...); must be given with time').setRequired(false),
   )
   .addStringOption((opt) =>
-    opt.setName("time").setDescription("New time, 24h HH:mm (must be given with date)").setRequired(false),
+    opt.setName("time").setDescription('New time: 24h HH:mm or looser (7pm, morning, "2 hours"...); must be given with date').setRequired(false),
   );
 
 const editMatchCommand: Command = {

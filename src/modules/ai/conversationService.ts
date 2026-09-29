@@ -143,6 +143,30 @@ export class ConversationService {
   }
 
   /**
+   * `/mari` (plan section 63's `/ai`, pulled forward — 2026-09-28): opens
+   * this player's one standing DIRECT_CHAT conversation, or returns the
+   * one already open. Unlike `startConsole`, there is no AI-authored
+   * opener to generate here — the player's own first message IS the first
+   * turn, so the caller feeds it straight into `handlePlayerReply` right
+   * after this (see discord/consoleConversation.ts's `startDirectChatDm`).
+   * Gated on `this.ai.enabled` only, deliberately NOT on
+   * `aiFollowUpsEnabled` (plan section 9) — that setting means "let Mari
+   * keep prompting me automatically" (CELEBRATE/ROAST/CONSOLE, all
+   * app-triggered); a player *initiating* a chat themselves is a different
+   * thing it was never meant to gate.
+   */
+  async openDirectChat(params: { guildId: string; player: PlayerRow }): Promise<
+    { kind: "unavailable" } | { kind: "ready"; conversation: AiConversationRow; created: boolean }
+  > {
+    if (!this.ai.enabled) return { kind: "unavailable" };
+    const { conversation, created } = await this.conversations.openOrGetDirectChat({
+      guildId: params.guildId,
+      playerId: params.player.id,
+    });
+    return { kind: "ready", conversation, created };
+  }
+
+  /**
    * The opening message reached the player's DM. Persists it and records
    * where the DM lives; the poll cursor starts at the opener itself, so the
    * poller only ever considers what the player wrote after it.
@@ -212,8 +236,12 @@ export class ConversationService {
   ): Promise<AiConversationEndReason | null> {
     if (now.getTime() - conversation.lastActivityAt.getTime() > this.idleTimeoutMs) return "IDLE_TIMEOUT";
 
-    const match = loaded?.match ?? (await this.matches.getById(conversation.matchId));
-    if (!match || !OPEN_MATCH_STATUSES.includes(match.status)) return "MATCH_CLOSED";
+    // DIRECT_CHAT (2026-09-28) has no match at all, so it has nothing to be
+    // MATCH_CLOSED about — this check only ever applies to CONSOLE.
+    if (conversation.matchId !== null) {
+      const match = loaded?.match ?? (await this.matches.getById(conversation.matchId));
+      if (!match || !OPEN_MATCH_STATUSES.includes(match.status)) return "MATCH_CLOSED";
+    }
 
     const player = loaded?.player ?? (await this.players.getById(conversation.playerId));
     // Removed from the team, or turned "AI follow-ups" off (plan section 9) mid-conversation: respect it.
@@ -246,13 +274,14 @@ export class ConversationService {
 
     if (conversation.endedAt) return { kind: "ended", reason: conversation.endReason };
 
-    const match = await this.matches.getById(conversation.matchId);
-    const invalid = await this.endReasonIfInvalid(conversation, now, { player, match });
+    // DIRECT_CHAT (2026-09-28) has matchId === null; every other mode always has one.
+    const match = conversation.matchId !== null ? await this.matches.getById(conversation.matchId) : null;
+    const invalid = await this.endReasonIfInvalid(conversation, now, { player, match: match ?? undefined });
     if (invalid) {
       await this.conversations.end(conversation.id, invalid);
       return { kind: "ended", reason: invalid };
     }
-    if (!match) return { kind: "ended", reason: "MATCH_CLOSED" }; // unreachable after the check above; satisfies the type checker
+    if (conversation.matchId !== null && !match) return { kind: "ended", reason: "MATCH_CLOSED" }; // unreachable after the check above; satisfies the type checker
 
     const content = params.text.trim().slice(0, MAX_PLAYER_MESSAGE_CHARS);
     if (content.length === 0) return { kind: "ignored" };
@@ -273,7 +302,7 @@ export class ConversationService {
 
     const generated = await this.ai.respondInConversation({
       player,
-      match,
+      match: match ?? null,
       conversationId: conversation.id,
       transcript,
       maxPlayerTurns: this.maxPlayerTurns,

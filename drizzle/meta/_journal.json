@@ -64,6 +64,13 @@
       "when": 1790565210122,
       "tag": "0008_add_match_events_and_recap",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790565270122,
+      "tag": "0009_add_direct_chat_and_admin_memories",
+      "breakpoints": true
     }
   ]
 }

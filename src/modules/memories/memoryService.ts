@@ -99,6 +99,43 @@ export class MemoryService {
   }
 
   /**
+   * Manual starter facts (2026-09-28) — an admin command extending plan
+   * section 21's memory-creation flow to a case the plan doesn't cover:
+   * seeding known team lore (an existing running joke, a preference the
+   * team already knows) up front, rather than waiting for it to resurface
+   * in conversation. Same category set (section 22), same confidence
+   * reasoning as every other explicit-statement writer here (section 26:
+   * confirmed fact, not an inferred guess) — the difference is only who's
+   * stating it and what evidence that leaves (section 25): `sourceId` is
+   * the entering admin's own Discord user id, not a conversation/match id.
+   *
+   * Visibility is the admin's own explicit choice, not a hidden default —
+   * PROTECTED is honored the same as it would be from any other writer
+   * (section 24: never reaches the LLM). Retrieval's forbidden-topic
+   * filter (memoryRetrieval.ts's `isEligible`) and everything else in the
+   * privacy pipeline (section 10) apply to this exactly like any other
+   * memory — nothing about *how* a memory was created ever bypasses *how*
+   * it's later allowed to be used.
+   */
+  async createFromAdminEntry(params: {
+    playerId: number;
+    type: MemoryRow["type"];
+    content: string;
+    visibility: MemoryRow["visibility"];
+    adminDiscordUserId: string;
+  }): Promise<MemoryRow> {
+    return this.memories.create({
+      playerId: params.playerId,
+      type: params.type,
+      content: params.content,
+      confidence: 1,
+      visibility: params.visibility,
+      aiUsable: true,
+      evidence: [{ sourceType: "ADMIN_ENTRY", sourceId: params.adminDiscordUserId }],
+    });
+  }
+
+  /**
    * Plan section 43: "Players should be able to request deletion of their
    * memories" — now the *only* control a player has over an individual
    * memory (section 21's revised Rule 5), so it has to work from anywhere

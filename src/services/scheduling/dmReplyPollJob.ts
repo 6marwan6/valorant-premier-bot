@@ -47,7 +47,8 @@ export async function runDmReplyPollJob(ctx: AppContext, now: Date = new Date())
       if (!dmChannelId) continue;
 
       const player = await ctx.repositories.players.getById(conversation.playerId);
-      const match = await ctx.repositories.matches.getById(conversation.matchId);
+      // DIRECT_CHAT conversations (2026-09-28) have no match at all.
+      const match = conversation.matchId !== null ? await ctx.repositories.matches.getById(conversation.matchId) : undefined;
 
       const invalid = await ctx.services.conversations.endReasonIfInvalid(conversation, now, {
         player: player ?? undefined,

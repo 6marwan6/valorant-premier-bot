@@ -11,7 +11,14 @@ import { players } from "./players.js";
  * writes CONSOLE — the one mode the plan defines as a real back-and-forth
  * (section 20); CELEBRATE/ROAST stay single private messages (sections 18/19).
  */
-export const aiModeEnum = pgEnum("ai_mode", ["CELEBRATE", "ROAST", "CONSOLE", "MATCH_HYPE", "POST_MATCH"]);
+export const aiModeEnum = pgEnum("ai_mode", ["CELEBRATE", "ROAST", "CONSOLE", "MATCH_HYPE", "POST_MATCH", "DIRECT_CHAT"]);
+
+/**
+ * `DIRECT_CHAT` added 2026-09-28 (plan section 63's `/ai` extension,
+ * pulled forward — see modules/ai/aiMode.ts's `ConversationMode` doc
+ * comment): a player-initiated chat via `/mari`, not triggered by an
+ * attendance click and not about any particular match.
+ */
 
 /**
  * Why a conversation ended. Section 29 only lists `ended_at`; a reason is
@@ -65,9 +72,9 @@ export const aiConversations = pgTable(
       .notNull()
       .references(() => players.id, { onDelete: "cascade" }),
 
-    matchId: integer("match_id")
-      .notNull()
-      .references(() => matches.id, { onDelete: "cascade" }),
+    // No longer .notNull(): a DIRECT_CHAT conversation (2026-09-28) isn't
+    // about any particular match. Every other mode still always sets this.
+    matchId: integer("match_id").references(() => matches.id, { onDelete: "cascade" }),
 
     mode: aiModeEnum("mode").notNull(),
 
@@ -83,6 +90,15 @@ export const aiConversations = pgTable(
     uniqueIndex("ai_conversations_one_open_per_player_match_idx")
       .on(table.playerId, table.matchId)
       .where(sql`ended_at IS NULL`),
+    // DIRECT_CHAT's own idempotency guard (plan section 50): the index
+    // above can't cover it — matchId is NULL on every such row, and a plain
+    // unique index treats every NULL as distinct from every other NULL, so
+    // it would happily let the same player open two "open" direct chats at
+    // once. This is the DIRECT_CHAT equivalent: at most one open,
+    // match-less conversation per player at a time.
+    uniqueIndex("ai_conversations_one_open_direct_chat_idx")
+      .on(table.guildId, table.playerId)
+      .where(sql`match_id IS NULL AND ended_at IS NULL`),
     // The DM poller's every-tick "which conversations are still open" scan.
     index("ai_conversations_open_idx")
       .on(table.guildId)

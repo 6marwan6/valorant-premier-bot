@@ -8,6 +8,18 @@ import type { AttendanceRow } from "../../database/schema/attendance.js";
 export type AiMode = "CELEBRATE" | "ROAST" | "CONSOLE";
 
 /**
+ * `AiMode` plus DIRECT_CHAT (plan section 63's `/ai`, pulled forward —
+ * 2026-09-28): the wider set retrieval and multi-turn conversation code
+ * (memoryRetrieval.ts, conversationContextBuilder.ts, aiService.ts's
+ * `respondInConversation`) needs to reason about. `aiContextBuilder.ts`'s
+ * single-shot builder deliberately keeps the narrower `AiMode` — it
+ * requires a `match: MatchRow`, which DIRECT_CHAT never has, so it was
+ * never going to be called with this mode anyway; widening its type too
+ * would just force dead Record entries into it.
+ */
+export type ConversationMode = AiMode | "DIRECT_CHAT";
+
+/**
  * Plan sections 18-20: PLAYING -> CELEBRATE, CANNOT_PLAY -> ROAST,
  * WANTS_TO_BUT_CANNOT -> CONSOLE. NO_RESPONSE is never stored as a row
  * (see schema/attendance.ts), so it can never reach this function.

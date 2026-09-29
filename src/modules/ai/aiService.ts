@@ -6,9 +6,9 @@ import type { PlayerRow } from "../../database/schema/players.js";
 import type { MemoryRepository } from "../../database/repositories/memoryRepository.js";
 import { LlmError, type LlmClient } from "../../services/ai/llmClient.js";
 import { buildAIContext, forbiddenTopicsFor } from "./aiContextBuilder.js";
-import { modeForStatus, type AiMode } from "./aiMode.js";
+import { modeForStatus, type AiMode, type ConversationMode } from "./aiMode.js";
 import { parseAiOutput, parseMatchEventExtraction, parseTeamMessage, type ExtractedMatchEvent, type MemoryCandidate } from "./aiOutput.js";
-import { buildConversationContext, type ConversationTranscriptEntry } from "./conversationContextBuilder.js";
+import { buildConversationContext, buildDirectChatContext, type ConversationTranscriptEntry } from "./conversationContextBuilder.js";
 import { buildMatchEventExtractionContext, buildMatchHypeContext, buildMatchRecapContext, type TeamAIContext } from "./teamAiContextBuilder.js";
 import { retrieveMemories } from "../memories/memoryRetrieval.js";
 
@@ -82,7 +82,7 @@ export class AiService {
    * frozen or killed, which would silently drop the write. It is one small
    * indexed UPDATE, so awaiting it costs a few milliseconds.
    */
-  private async retrieveFor(player: PlayerRow, mode: AiMode, forbiddenTopics: string[]) {
+  private async retrieveFor(player: PlayerRow, mode: ConversationMode, forbiddenTopics: string[]) {
     if (!this.memories) return [];
     const all = await this.memories.listByPlayer(player.id);
     const selected = retrieveMemories({ memories: all, mode, forbiddenTopics });
@@ -155,39 +155,53 @@ export class AiService {
   }
 
   /**
-   * Phase 7 (plan section 59): one turn of a private CONSOLE conversation.
-   * Same contract as respondToAttendance — never throws, never touches
-   * application state (sections 37/48), logs metadata only (sections
-   * 51/58) — but the prompt carries the conversation transcript and the
-   * result also says whether the model thinks the conversation should
-   * continue (`should_follow_up`, section 36). The *backend* still makes
-   * the final call on continuing; see ConversationService.
+   * Phase 7 (plan section 59): one turn of a private multi-turn
+   * conversation — CONSOLE (`params.match` given) or, since 2026-09-28,
+   * DIRECT_CHAT (`params.match === null`, plan section 63's `/ai` pulled
+   * forward). Same contract as respondToAttendance — never throws, never
+   * touches application state (sections 37/48), logs metadata only
+   * (sections 51/58) — but the prompt carries the conversation transcript
+   * and the result also says whether the model thinks the conversation
+   * should continue (`should_follow_up`, section 36). The *backend* still
+   * makes the final call on continuing; see ConversationService. Which
+   * mode this is, and therefore which context builder and retrieval
+   * preferences apply, is decided purely by whether a match was given —
+   * the one real invariant (CONSOLE always has one, DIRECT_CHAT never
+   * does), not a separate flag that could drift from it.
    */
   async respondInConversation(params: {
     player: PlayerRow;
-    match: MatchRow;
+    match: MatchRow | null;
     conversationId: number;
     transcript: ConversationTranscriptEntry[];
     maxPlayerTurns?: number;
   }): Promise<ConversationAiOutcome> {
     if (!this.llm) return { source: "fallback" };
 
+    const mode: ConversationMode = params.match ? "CONSOLE" : "DIRECT_CHAT";
     const forbiddenTopics = forbiddenTopicsFor(params.player);
-    const memories = await this.retrieveFor(params.player, "CONSOLE", forbiddenTopics);
-    const context = buildConversationContext({
-      player: params.player,
-      match: params.match,
-      transcript: params.transcript,
-      maxPlayerTurns: params.maxPlayerTurns,
-      memories,
-    });
+    const memories = await this.retrieveFor(params.player, mode, forbiddenTopics);
+    const context = params.match
+      ? buildConversationContext({
+          player: params.player,
+          match: params.match,
+          transcript: params.transcript,
+          maxPlayerTurns: params.maxPlayerTurns,
+          memories,
+        })
+      : buildDirectChatContext({
+          player: params.player,
+          transcript: params.transcript,
+          maxPlayerTurns: params.maxPlayerTurns,
+          memories,
+        });
     const startedAt = Date.now();
     const base = {
-      event: "ai.conversation.turn",
+      event: mode === "CONSOLE" ? "ai.conversation.turn" : "ai.directChat.turn",
       mode: context.mode,
       turn: context.turn,
       playerId: params.player.id,
-      matchId: params.match.id,
+      matchId: params.match?.id ?? null,
       conversationId: params.conversationId,
       model: this.llm.model,
       memoryCount: memories.length,

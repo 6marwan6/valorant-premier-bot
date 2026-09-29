@@ -12,7 +12,10 @@ import { z } from "zod";
  * silently drift.
  */
 const MAX_RESPONSE_LENGTH = 1000; // section 35: concise; also far below Discord's 2000-char limit
-const MAX_MEMORY_CONTENT_LENGTH = 300; // shown back to the player verbatim in /memories (section 43)
+// Shown back to the player verbatim in /memories (section 43). Exported so
+// the /add-memory admin command (2026-09-28) enforces the exact same bound
+// on a manually-entered memory as every AI-proposed one goes through here.
+export const MAX_MEMORY_CONTENT_LENGTH = 300;
 
 export const MEMORY_TYPES = [
   "PLAYER_PREFERENCE",

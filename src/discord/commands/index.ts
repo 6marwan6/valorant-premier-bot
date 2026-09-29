@@ -11,6 +11,8 @@ import removePlayerCommand from "./removePlayer.js";
 import playerCommand from "./player.js";
 import memoriesCommand from "./memories.js";
 import completeMatchCommand from "./completeMatch.js";
+import mariCommand from "./mari.js";
+import addMemoryCommand from "./addMemory.js";
 
 /**
  * Central command registry. Every command file exports a default `Command`
@@ -25,6 +27,8 @@ import completeMatchCommand from "./completeMatch.js";
  * /add-player, /edit-player, /remove-player, /player (plan section 41).
  * Phase 8: /memories (plan sections 42/43). Later phases append their own
  * (section 42: /profile, /ai-settings; section 41: /complete-match, /team).
+ * 2026-09-28: /mari (section 63's `/ai`, pulled forward) and /add-memory
+ * (manual starter facts, an admin extension of section 21).
  */
 export const commands: Command[] = [
   setupCommand,
@@ -39,6 +43,8 @@ export const commands: Command[] = [
   playerCommand,
   memoriesCommand,
   completeMatchCommand,
+  mariCommand,
+  addMemoryCommand,
 ];
 
 export const commandsByName: Map<string, Command> = new Map(

@@ -3,6 +3,7 @@ import {
   CONSOLE_STATIC_OPENER,
   MAX_PLAYER_TURNS,
   buildConversationContext,
+  buildDirectChatContext,
   type ConversationTranscriptEntry,
 } from "../../src/modules/ai/conversationContextBuilder.js";
 import { makeMatch, makeMemory, makePlayer } from "./helpers/aiFixtures.js";
@@ -186,5 +187,75 @@ describe("buildConversationContext (plan sections 20, 34, 56)", () => {
     expect(memIdx).toBeGreaterThan(eventIdx);
     expect(forbiddenIdx).toBeGreaterThan(memIdx);
     expect(convoIdx).toBeGreaterThan(forbiddenIdx);
+  });
+});
+
+describe("buildDirectChatContext (/mari, plan section 63's `/ai` pulled forward, 2026-09-28)", () => {
+  function buildDirect(
+    transcript: ConversationTranscriptEntry[],
+    overrides: Parameters<typeof makePlayer>[0] = {},
+    memories: MemoryRow[] = [],
+  ) {
+    return buildDirectChatContext({ player: makePlayer(overrides), transcript, memories });
+  }
+
+  it("sets MODE: DIRECT_CHAT and never mentions a match, kickoff or attendance response", () => {
+    const ctx = buildDirect([{ role: "USER", content: "yo mari" }]);
+    expect(ctx.mode).toBe("DIRECT_CHAT");
+    expect(ctx.user).toContain("MODE: DIRECT_CHAT");
+    expect(ctx.user).not.toContain("CURRENT EVENT");
+    expect(ctx.user).not.toContain("Kickoff");
+    expect(ctx.user).not.toContain("Player response:");
+  });
+
+  it("unlike CONSOLE, roast intensity DOES shape the prompt", () => {
+    const low = buildDirect([{ role: "USER", content: "hey" }], { roastIntensity: 0 });
+    const max = buildDirect([{ role: "USER", content: "hey" }], { roastIntensity: 100 });
+    expect(low.user).toContain("Roast intensity: 0/100");
+    expect(max.user).toContain("Roast intensity: 100/100");
+    expect(low.user).not.toBe(max.user);
+    expect(max.system).toMatch(/teasing level/i);
+  });
+
+  it("a non-empty transcript (the player's own first message) classifies as REPLY, not OPENING — there is no separate AI-authored opener for direct chat", () => {
+    const ctx = buildDirect([{ role: "USER", content: "hi mari" }]);
+    expect(ctx.turn).toBe("REPLY");
+    expect(ctx.system).toContain("TURN: REPLY");
+  });
+
+  it("still respects memory usage / personal references / forbidden topics the same way CONSOLE does", () => {
+    const ctx = buildDirect([{ role: "USER", content: "hi" }], {
+      memoryUsageEnabled: false,
+      personalReferencesEnabled: false,
+      protectedTopics: ["Family"],
+    });
+    expect(ctx.user).toContain("Memory usage: disabled");
+    expect(ctx.user).toContain("Personal references: disabled");
+    expect(ctx.user).toContain("- Family");
+    expect(ctx.forbiddenTopics).toEqual(["Family"]);
+  });
+
+  it("still allows one relevant memory to be woven in, rendered the same way as every other builder", () => {
+    const memory = makeMemory({ content: "Ahmed mains Jett" });
+    const ctx = buildDirect([{ role: "USER", content: "what should I play" }], {}, [memory]);
+    expect(ctx.user).toContain("RELEVANT MEMORIES");
+    expect(ctx.user).toContain("Ahmed mains Jett");
+  });
+
+  it("the JSON output contract (response/should_follow_up/memory_candidate) matches every other conversation builder", () => {
+    const ctx = buildDirect([{ role: "USER", content: "hi" }]);
+    expect(ctx.system).toContain('"response"');
+    expect(ctx.system).toContain('"should_follow_up"');
+    expect(ctx.system).toContain('"memory_candidate"');
+  });
+
+  it("the turn limit still produces a FINAL turn the same way CONSOLE's does", () => {
+    const transcript: ConversationTranscriptEntry[] = Array.from({ length: MAX_PLAYER_TURNS }, (_, i) => ({
+      role: "USER" as const,
+      content: `message ${i}`,
+    }));
+    const ctx = buildDirect(transcript);
+    expect(ctx.turn).toBe("FINAL");
+    expect(ctx.system).toContain("TURN: FINAL");
   });
 });

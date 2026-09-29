@@ -16,6 +16,11 @@ export interface OpenConversationInput {
   mode: AiConversationRow["mode"];
 }
 
+export interface OpenDirectChatInput {
+  guildId: string;
+  playerId: number;
+}
+
 /**
  * Repository for `ai_conversations` / `ai_messages` — plan section 29
  * (Phase 7). Thin like its siblings: it enforces the database-level
@@ -50,6 +55,46 @@ export class AiConversationRepository {
       throw new Error(`Could not open or find a conversation for player ${input.playerId} / match ${input.matchId}`);
     }
     return { conversation: existing, created: false };
+  }
+
+  /**
+   * DIRECT_CHAT's own open-or-get (plan section 63's `/ai`, 2026-09-28):
+   * same idempotent shape as `openOrGet`, against the OTHER partial unique
+   * index (schema doc comment) since matchId is always NULL here — a
+   * regular `onConflictDoNothing` target can only ever match one index.
+   */
+  async openOrGetDirectChat(input: OpenDirectChatInput): Promise<{ conversation: AiConversationRow; created: boolean }> {
+    const [inserted] = await this.db
+      .insert(aiConversations)
+      .values({ guildId: input.guildId, playerId: input.playerId, matchId: null, mode: "DIRECT_CHAT" })
+      .onConflictDoNothing({
+        target: [aiConversations.guildId, aiConversations.playerId],
+        where: sql`match_id IS NULL AND ended_at IS NULL`,
+      })
+      .returning();
+    if (inserted) return { conversation: inserted, created: true };
+
+    const existing = await this.getOpenDirectChat(input.guildId, input.playerId);
+    if (!existing) {
+      throw new Error(`Could not open or find a direct chat for player ${input.playerId}`);
+    }
+    return { conversation: existing, created: false };
+  }
+
+  async getOpenDirectChat(guildId: string, playerId: number): Promise<AiConversationRow | undefined> {
+    const rows = await this.db
+      .select()
+      .from(aiConversations)
+      .where(
+        and(
+          eq(aiConversations.guildId, guildId),
+          eq(aiConversations.playerId, playerId),
+          isNull(aiConversations.matchId),
+          isNull(aiConversations.endedAt),
+        ),
+      )
+      .limit(1);
+    return rows[0];
   }
 
   async getById(id: number): Promise<AiConversationRow | undefined> {

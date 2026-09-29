@@ -6,6 +6,12 @@ import { formatMatchDateTime } from "../../modules/matches/dateTime.js";
 /**
  * /create-match — plan section 11 "Match Creation" + section 41.
  *
+ * **Revision, 2026-09-28:** both fields also accept looser forms (see
+ * dateTime.ts's own doc comment) — "today"/"tomorrow"/a weekday/"in 3
+ * days" for the date, "7pm"/"morning"/"2 hours" for the time — alongside
+ * the plan's own exact DD/MM/YYYY + HH:mm example, which still works
+ * unchanged.
+ *
  * Required fields per the plan, revised 2026-09-27: "Date, Time" — the
  * plan originally also required "Opponent," but Valorant Premier doesn't
  * reveal the opposing team until the match itself starts, so that field
@@ -24,10 +30,10 @@ const data = new SlashCommandBuilder()
   .setDescription("Schedule a new Premier match. Admin only.")
   .setDMPermission(false)
   .addStringOption((opt) =>
-    opt.setName("date").setDescription("Match date, DD/MM/YYYY (e.g. 18/09/2026)").setRequired(true),
+    opt.setName("date").setDescription('Match date: DD/MM/YYYY, or looser — today, tomorrow, a weekday, "in 3 days"').setRequired(true),
   )
   .addStringOption((opt) =>
-    opt.setName("time").setDescription("Match time, 24h HH:mm (e.g. 19:00)").setRequired(true),
+    opt.setName("time").setDescription('Match time: 24h HH:mm, or looser — 7pm, morning, evening, "2 hours"').setRequired(true),
   );
 
 const createMatchCommand: Command = {

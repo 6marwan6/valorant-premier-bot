@@ -15,6 +15,36 @@ describe("audienceForMode (plan section 44 rule 1)", () => {
     expect(audienceForMode("CELEBRATE")).toBe("PUBLIC_CHANNEL");
     expect(audienceForMode("ROAST")).toBe("PUBLIC_CHANNEL");
   });
+
+  it("DIRECT_CHAT (/mari, 2026-09-28) is a private DM too, same as CONSOLE", () => {
+    expect(audienceForMode("DIRECT_CHAT")).toBe("PRIVATE_DM");
+  });
+});
+
+describe("DIRECT_CHAT retrieval (2026-09-28: no single specialty, unlike ROAST/CELEBRATE/CONSOLE)", () => {
+  it("every memory type scores the same modeRelevance component for DIRECT_CHAT", () => {
+    const now = new Date();
+    const runningJoke = makeMemory({ type: "RUNNING_JOKE", createdAt: now });
+    const teamHistory = makeMemory({ type: "TEAM_HISTORY", createdAt: now });
+    expect(scoreMemory(runningJoke, "DIRECT_CHAT", now)).toBeCloseTo(scoreMemory(teamHistory, "DIRECT_CHAT", now));
+  });
+
+  it("a PRIVATE memory is retrievable in DIRECT_CHAT — it's a real 1:1 DM, same as CONSOLE", () => {
+    const memory = makeMemory({ visibility: "PRIVATE" });
+    const selected = retrieveMemories({ memories: [memory], mode: "DIRECT_CHAT", forbiddenTopics: [] });
+    expect(selected).toEqual([memory]);
+  });
+
+  it("PROTECTED and forbidden-topic memories are still excluded from DIRECT_CHAT (privacy rules don't relax for a new mode)", () => {
+    const protectedMemory = makeMemory({ visibility: "PROTECTED" });
+    const forbidden = makeMemory({ content: "Talks about family a lot" });
+    const selected = retrieveMemories({
+      memories: [protectedMemory, forbidden],
+      mode: "DIRECT_CHAT",
+      forbiddenTopics: ["family"],
+    });
+    expect(selected).toEqual([]);
+  });
 });
 
 describe("isEligible (plan sections 10/24/44 rule 1)", () => {

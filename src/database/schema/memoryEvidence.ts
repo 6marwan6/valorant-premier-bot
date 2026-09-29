@@ -16,11 +16,18 @@ import { memories } from "./memories.js";
  * (plan section 40's "This allows the AI to make match-specific callbacks"
  * — the evidence link is what makes that callback traceable/removable,
  * same guarantee section 25 asks for on every other memory).
+ *
+ * `ADMIN_ENTRY` added 2026-09-28: a manually-entered "starter fact" (plan
+ * section 21's spirit extended to admin-authored memories — see
+ * memoryService.ts's `createFromAdminEntry`). `sourceId` for this type is
+ * the entering admin's own Discord user id, so an admin-authored memory is
+ * just as traceable/removable (section 25) as an AI-approved one.
  */
 export const memoryEvidenceSourceTypeEnum = pgEnum("memory_evidence_source_type", [
   "AI_CONVERSATION",
   "DISCORD_MESSAGE",
   "MATCH_EVENT",
+  "ADMIN_ENTRY",
 ]);
 
 /**

@@ -19,7 +19,7 @@ export class MatchService {
     private readonly serverConfig: ServerConfigRepository,
   ) {}
 
-  async createMatch(params: { guildId: string; dateStr: string; timeStr: string }): Promise<MatchResult<MatchRow>> {
+  async createMatch(params: { guildId: string; dateStr: string; timeStr: string; now?: Date }): Promise<MatchResult<MatchRow>> {
     const config = await this.serverConfig.getByGuildId(params.guildId);
     if (!config) {
       // Plan section 11: "The team's configured timezone should be used
@@ -28,7 +28,7 @@ export class MatchService {
       return { ok: false, error: "Run `/setup` first so I know this server's timezone and match channel." };
     }
 
-    const parsed = parseMatchDateTime(params.dateStr, params.timeStr, config.timezone);
+    const parsed = parseMatchDateTime(params.dateStr, params.timeStr, config.timezone, params.now);
     if (!parsed.ok) {
       return { ok: false, error: parsed.error };
     }
@@ -50,7 +50,7 @@ export class MatchService {
     return { ok: true, value: match };
   }
 
-  async editMatch(params: { guildId: string; matchId: number; dateStr?: string; timeStr?: string }): Promise<MatchResult<MatchRow>> {
+  async editMatch(params: { guildId: string; matchId: number; dateStr?: string; timeStr?: string; now?: Date }): Promise<MatchResult<MatchRow>> {
     const existing = await this.matches.getById(params.matchId);
     if (!existing || existing.guildId !== params.guildId) {
       return { ok: false, error: `No match #${params.matchId} found in this server.` };
@@ -68,7 +68,7 @@ export class MatchService {
       return { ok: false, error: "Provide both date and time together when changing either." };
     }
 
-    const parsed = parseMatchDateTime(params.dateStr!, params.timeStr!, existing.timezone);
+    const parsed = parseMatchDateTime(params.dateStr!, params.timeStr!, existing.timezone, params.now);
     if (!parsed.ok) return { ok: false, error: parsed.error };
     const scheduledAt = parsed.scheduledAt;
 

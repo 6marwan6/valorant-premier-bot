@@ -179,6 +179,42 @@ describe("AiService — Phase 9 retrieval wiring", () => {
     });
     expect(llm.complete.mock.calls[0]![0].user).toContain("A private fact, fine in a DM.");
   });
+
+  it("respondInConversation with match: null builds a DIRECT_CHAT prompt (/mari, 2026-09-28), not CONSOLE", async () => {
+    const memories = [makeMemory({ type: "RUNNING_JOKE", visibility: "PRIVATE", content: "Blames ping a lot." })];
+    const { repo } = fakeMemoryRepo(memories);
+    const llm = fakeLlm(async () => ({ text: json("sup"), model: "m", inputTokens: 1, outputTokens: 1 }));
+    const service = new AiService(llm, fakeLogger() as unknown as Logger, repo);
+
+    const outcome = await service.respondInConversation({
+      player: params.player,
+      match: null,
+      conversationId: 1,
+      transcript: [{ role: "USER", content: "yo mari" }],
+    });
+
+    expect(outcome).toEqual({ source: "ai", text: "sup", shouldFollowUp: false, memoryCandidate: null });
+    const sentUser = llm.complete.mock.calls[0]![0].user;
+    expect(sentUser).toContain("MODE: DIRECT_CHAT");
+    expect(sentUser).not.toContain("CURRENT EVENT");
+    // DIRECT_CHAT has no ROAST/CELEBRATE/CONSOLE specialty (memoryRetrieval.ts), so a
+    // PRIVATE memory is still retrievable here — it's a real 1:1 DM, same as CONSOLE.
+    expect(sentUser).toContain("Blames ping a lot.");
+  });
+
+  it("respondInConversation falls back the same way for DIRECT_CHAT as for CONSOLE when the LLM fails", async () => {
+    const llm = fakeLlm(async () => {
+      throw new LlmError("Request timed out", "timeout");
+    });
+    const service = new AiService(llm, fakeLogger() as unknown as Logger);
+    const outcome = await service.respondInConversation({
+      player: params.player,
+      match: null,
+      conversationId: 1,
+      transcript: [{ role: "USER", content: "hi" }],
+    });
+    expect(outcome).toEqual({ source: "fallback" });
+  });
 });
 
 describe("AiService — Phase 10 team broadcasts (plan sections 38-40)", () => {

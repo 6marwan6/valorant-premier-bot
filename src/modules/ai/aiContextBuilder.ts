@@ -36,7 +36,8 @@ export function roastBandFor(intensity: number): RoastBand {
   return "MAXIMUM";
 }
 
-const ROAST_BAND_GUIDANCE: Record<RoastBand, string> = {
+/** Exported so conversationContextBuilder.ts's DIRECT_CHAT prompt (2026-09-28) can use the exact same wording rather than a drifting copy. */
+export const ROAST_BAND_GUIDANCE: Record<RoastBand, string> = {
   NONE: "No roasting at all. Be warm and friendly.",
   EXTREMELY_LIGHT: "Extremely light: at most one gentle, affectionate tease.",
   NORMAL: "Normal banter: playful teasing between teammates.",

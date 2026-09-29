@@ -33,7 +33,7 @@ describe("command registry", () => {
     expect(json.dm_permission).toBe(false);
   });
 
-  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 + Phase 8 commands", () => {
+  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 + Phase 8 + Phase 10 + 2026-09-28 commands", () => {
     const names = commands.map((c) => c.data.name).sort();
     expect(names).toEqual(
       [
@@ -49,8 +49,48 @@ describe("command registry", () => {
         "player",
         "memories",
         "complete-match",
+        "mari",
+        "add-memory",
       ].sort(),
     );
+  });
+
+  it("/mari requires a 'message' option, is guild-only, and has no admin permission gate (a personal chat, not an admin tool)", () => {
+    const json = commandsByName.get("mari")!.data.toJSON();
+    expect(json.dm_permission).toBe(false);
+    expect(json.default_member_permissions).toBeUndefined();
+    const messageOption = (json.options ?? []).find((o) => o.name === "message");
+    expect(messageOption, "mari should have a message option").toBeDefined();
+    expect((messageOption as { required?: boolean }).required).toBe(true);
+  });
+
+  it("/add-memory requires player/type/content, offers all nine memory types and all four visibilities, and uses custom admin gating", () => {
+    const json = commandsByName.get("add-memory")!.data.toJSON();
+    expect(json.dm_permission).toBe(false);
+    expect(json.default_member_permissions).toBeUndefined();
+    const byName = new Map((json.options ?? []).map((o) => [o.name, o]));
+    expect((byName.get("player") as { required?: boolean } | undefined)?.required).toBe(true);
+    expect((byName.get("type") as { required?: boolean } | undefined)?.required).toBe(true);
+    expect((byName.get("content") as { required?: boolean } | undefined)?.required).toBe(true);
+    expect((byName.get("visibility") as { required?: boolean } | undefined)?.required ?? false).toBe(false);
+
+    const typeChoices = (byName.get("type") as { choices?: { value: string }[] }).choices ?? [];
+    expect(typeChoices.map((c) => c.value).sort()).toEqual(
+      [
+        "RUNNING_JOKE",
+        "TEAM_JOKE",
+        "VALORANT_PREFERENCE",
+        "PLAYER_PREFERENCE",
+        "PERSONALITY_TRAIT",
+        "HABIT",
+        "MATCH_EVENT",
+        "ACHIEVEMENT",
+        "TEAM_HISTORY",
+      ].sort(),
+    );
+
+    const visibilityChoices = (byName.get("visibility") as { choices?: { value: string }[] }).choices ?? [];
+    expect(visibilityChoices.map((c) => c.value).sort()).toEqual(["PUBLIC", "TEAM", "PRIVATE", "PROTECTED"].sort());
   });
 
   it("match commands do NOT set default_member_permissions (custom admin_role_id gating happens at runtime, not via Discord's native permission system)", () => {

@@ -299,6 +299,82 @@ export async function deliverConversationReply(
   return true;
 }
 
+export type StartDirectChatResult =
+  | { kind: "sent"; conversation: AiConversationRow; created: boolean }
+  | { kind: "unavailable" }
+  | { kind: "dm_failed" };
+
+/**
+ * `/mari` (plan section 63's `/ai`, pulled forward — 2026-09-28): a
+ * player's own first message goes straight through `handlePlayerReply` —
+ * there is no separate AI-authored "opener" step the way `startConsoleDm`
+ * has, because the player already supplied real content to respond to
+ * (see conversationService.ts `openDirectChat`'s doc comment). That also
+ * makes this function double as "send the next /mari message" when a
+ * direct chat is already open: `openDirectChat` returns the existing
+ * conversation instead of a new one, and `handlePlayerReply` treats the
+ * player's new text as just another turn in it.
+ */
+export async function startDirectChatDm(
+  ctx: AppContext,
+  params: { player: PlayerRow; guildId: string; text: string; sourceRef: string },
+): Promise<StartDirectChatResult> {
+  const opened = await ctx.services.conversations.openDirectChat({ guildId: params.guildId, player: params.player });
+  if (opened.kind === "unavailable") return { kind: "unavailable" };
+  const { conversation, created } = opened;
+
+  const outcome = await ctx.services.conversations.handlePlayerReply({
+    conversationId: conversation.id,
+    discordUserId: params.player.discordUserId,
+    text: params.text,
+    sourceRef: params.sourceRef,
+  });
+
+  if (outcome.kind !== "reply") {
+    // Unreachable right after opening this exact conversation for this
+    // exact player (not_found/forbidden/duplicate/ended/ignored all
+    // require pre-existing state this call just created) — handled rather
+    // than asserted, same defensive posture as handleConsoleReplyModal's
+    // own switch (plan section 48's spirit: never throw on a shape that
+    // "shouldn't" happen).
+    ctx.logger.warn(
+      { event: "ai.directChat.unexpectedOutcome", conversationId: conversation.id, outcome: outcome.kind },
+      "Unexpected outcome starting a /mari chat",
+    );
+    return { kind: "dm_failed" };
+  }
+
+  let dmChannelId = conversation.dmChannelId;
+  if (!dmChannelId) {
+    try {
+      const channel = await ctx.discord.createDmChannel(params.player.discordUserId);
+      dmChannelId = channel.id;
+    } catch (err) {
+      ctx.logger.warn(
+        {
+          event: "ai.directChat.dmFailed",
+          conversationId: conversation.id,
+          playerId: params.player.id,
+          discordErrorCode: discordErrorCode(err),
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Could not DM the player for /mari",
+      );
+      if (created) await ctx.services.conversations.abandon(conversation.id, "DM_UNAVAILABLE");
+      return { kind: "dm_failed" };
+    }
+  }
+
+  const delivered = await deliverConversationReply(ctx, { conversation, dmChannelId, outcome, echo: params.text });
+  if (!delivered) return { kind: "dm_failed" };
+
+  ctx.logger.info(
+    { event: "ai.directChat.sent", conversationId: conversation.id, playerId: params.player.id, created },
+    "/mari message sent",
+  );
+  return { kind: "sent", conversation, created };
+}
+
 const CONVERSATION_ENDED_MESSAGE = "This chat has wrapped up 👍";
 
 /**
