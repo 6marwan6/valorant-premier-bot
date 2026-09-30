@@ -4,6 +4,7 @@ import { requireAdminWithConfig } from "../commandGuards.js";
 import { PLAYER_ROLE_CHOICES, parseCommaSeparatedList, validatePreferredAgent } from "../../modules/players/playerValidation.js";
 import type { PlayerProfileFields } from "../../database/repositories/playerRepository.js";
 import type { PlayerRow } from "../../database/schema/players.js";
+import { BANTER_STYLE_CHOICES, type BanterStyle } from "../../modules/ai/mariPersona.js";
 
 /**
  * /edit-player — plan section 41 / section 9 "Player AI Configuration" /
@@ -44,6 +45,13 @@ const data = new SlashCommandBuilder()
   .addIntegerOption((opt) =>
     opt.setName("roast_intensity").setDescription("0-100").setMinValue(0).setMaxValue(100).setRequired(false),
   )
+  .addStringOption((opt) =>
+    opt
+      .setName("banter_style")
+      .setDescription("How Mari talks to them: neutral, flirty, or annoying")
+      .setRequired(false)
+      .addChoices(...BANTER_STYLE_CHOICES.map((c) => ({ name: c.name, value: c.value }))),
+  )
   .addBooleanOption((opt) => opt.setName("personal_references").setDescription("Allow personal-reference jokes?").setRequired(false))
   .addBooleanOption((opt) => opt.setName("running_jokes").setDescription("Allow running jokes?").setRequired(false))
   .addBooleanOption((opt) => opt.setName("valorant_references").setDescription("Allow Valorant references?").setRequired(false))
@@ -79,6 +87,7 @@ const editPlayerCommand: Command = {
     const agentsRaw = interaction.options.getString("agents");
     const preferredAgentRaw = interaction.options.getString("preferred_agent");
     const roastIntensity = interaction.options.getInteger("roast_intensity");
+    const banterStyle = interaction.options.getString("banter_style") as BanterStyle | null;
     const protectedTopicsRaw = interaction.options.getString("protected_topics");
     const personalReferences = interaction.options.getBoolean("personal_references");
     const runningJokes = interaction.options.getBoolean("running_jokes");
@@ -124,6 +133,7 @@ const editPlayerCommand: Command = {
 
     if (role !== null) updates.role = role;
     if (roastIntensity !== null) updates.roastIntensity = roastIntensity;
+    if (banterStyle !== null) updates.banterStyle = banterStyle;
     if (personalReferences !== null) updates.personalReferencesEnabled = personalReferences;
     if (runningJokes !== null) updates.runningJokesEnabled = runningJokes;
     if (valorantReferences !== null) updates.valorantReferencesEnabled = valorantReferences;

@@ -193,7 +193,8 @@ describe("AiService — Phase 9 retrieval wiring", () => {
       transcript: [{ role: "USER", content: "yo mari" }],
     });
 
-    expect(outcome).toEqual({ source: "ai", text: "sup", shouldFollowUp: false, memoryCandidate: null });
+    // Free-form chats (2026-09-29): the model never decides the chat is over, and candidates/forget ids are lists.
+    expect(outcome).toEqual({ source: "ai", text: "sup", shouldFollowUp: true, memoryCandidate: null, memoryCandidates: [], forgetMemoryIds: [] });
     const sentUser = llm.complete.mock.calls[0]![0].user;
     expect(sentUser).toContain("MODE: DIRECT_CHAT");
     expect(sentUser).not.toContain("CURRENT EVENT");

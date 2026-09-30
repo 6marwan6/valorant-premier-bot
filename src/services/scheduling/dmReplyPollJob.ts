@@ -64,7 +64,17 @@ export async function runDmReplyPollJob(ctx: AppContext, now: Date = new Date())
       if (messages.length === 0) continue;
 
       const newestSeen = messages[messages.length - 1]!.id;
-      const mine = messages.filter((m) => m.author.id === player.discordUserId && !m.author.bot && m.content.trim().length > 0);
+      const authored = messages.filter((m) => m.author.id === player.discordUserId && !m.author.bot && m.content.trim().length > 0);
+      // 2026-09-29: with the gateway worker running, typed messages are usually
+      // answered the instant they arrive — long before this tick. Skip any the
+      // conversation already stored (its `message:<id>` source_ref), so the
+      // poller never answers the same message a second time as part of a
+      // joined burst. Without a worker nothing is stored yet and this is a no-op.
+      const alreadyHandled = await ctx.services.conversations.storedMessageRefs(
+        conversation.id,
+        authored.map((m) => `message:${m.id}`),
+      );
+      const mine = authored.filter((m) => !alreadyHandled.has(`message:${m.id}`));
 
       if (mine.length > 0) {
         const outcome = await ctx.services.conversations.handlePlayerReply({

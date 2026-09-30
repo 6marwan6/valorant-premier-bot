@@ -90,11 +90,18 @@ export async function handleDiscordInteraction(params: {
     // Every command in this app replies ephemerally (see README's Phase
     // 1-3 command inventory) — deferring as ephemeral up front means the
     // eventual followup inherits that automatically.
+    //
+    // `/mari` is the exception (2026-09-29, plan section 42's note): a server
+    // chat answers publicly in the channel it was used in. The caller can
+    // still choose a private reply via its `private` option — that is
+    // decided here from the raw payload, because the deferral's visibility
+    // can't be changed afterwards.
+    const publicDefer = shouldDeferPublicly(interaction);
     params.sendInitialResponse(200, {
       type: InteractionResponseType.DeferredChannelMessageWithSource,
-      data: { flags: MessageFlags.Ephemeral },
+      data: publicDefer ? {} : { flags: MessageFlags.Ephemeral },
     });
-    const adapter = buildCommandInteractionAdapter(interaction as never, ctx.discord);
+    const adapter = buildCommandInteractionAdapter(interaction as never, ctx.discord, publicDefer);
     await dispatchCommand(adapter, ctx);
     return;
   }
@@ -134,4 +141,22 @@ export async function handleDiscordInteraction(params: {
 
   // Autocomplete, other modals, etc. — none exist in this app.
   params.sendInitialResponse(400, { error: "unsupported interaction type" });
+}
+
+
+/** Commands whose answer is posted publicly in the channel by default. */
+const PUBLIC_DEFER_COMMANDS = new Set(["mari"]);
+
+/**
+ * Decided from the raw payload before any handler runs (the deferral has to
+ * be the first response). `/mari private:true` opts back into a private
+ * reply — its DM answer is confirmed by an ephemeral message, so that call
+ * defers ephemerally like every other command.
+ */
+export function shouldDeferPublicly(interaction: APIInteraction): boolean {
+  if (interaction.type !== InteractionType.ApplicationCommand) return false;
+  const data = interaction.data as { name?: string; options?: Array<{ name: string; value?: unknown }> };
+  if (!data.name || !PUBLIC_DEFER_COMMANDS.has(data.name)) return false;
+  const privateOpt = data.options?.find((o) => o.name === "private");
+  return privateOpt?.value !== true;
 }

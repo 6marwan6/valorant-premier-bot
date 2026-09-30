@@ -139,7 +139,7 @@ describe("deliverConversationReply", () => {
     expect(t.recordAssistantMessage).toHaveBeenCalledWith(9, "That's valid 😭", null);
   });
 
-  it("a wrap-up reply carrying a memory candidate (plan section 21, revised) is saved automatically and gets a follow-up edit adding a single Forget button", async () => {
+  it("a wrap-up reply carrying a memory candidate is saved automatically and SILENTLY — no notice, no Forget button, no edit (plan section 21, revised 2026-09-29)", async () => {
     const candidate = { type: "MATCH_EVENT" as const, content: "Ahmed had an exam." };
     const t = fakeCtx(undefined, { id: 501, memoryCandidate: candidate }, { id: 900 });
     const outcome = { ...base, continues: false, memoryCandidate: candidate };
@@ -147,18 +147,9 @@ describe("deliverConversationReply", () => {
     expect(ok).toBe(true);
     expect(t.recordAssistantMessage).toHaveBeenCalledWith(9, "That's valid 😭", candidate);
     expect(t.autoSave).toHaveBeenCalledWith(501);
-    expect(t.editChannelMessage).toHaveBeenCalledTimes(1);
-    const [channel, messageId, payload] = t.editChannelMessage.mock.calls[0] as unknown as [
-      string,
-      string,
-      { content: string; components: Array<{ toJSON: () => { components: Array<{ custom_id: string }> } }> },
-    ];
-    expect(channel).toBe("dm-1");
-    expect(messageId).toBe("m-1");
-    expect(payload.content).toContain("That's valid 😭");
-    expect(payload.content).toMatch(/noted/i);
-    const buttonIds = payload.components[0]!.toJSON().components.map((c) => c.custom_id);
-    expect(buttonIds).toEqual(["memory:del:900"]);
+    expect(t.editChannelMessage).not.toHaveBeenCalled();
+    const sent = (t.sendDirectMessage.mock.calls[0] as unknown as [string, { content: string }])[1];
+    expect(sent.content).not.toMatch(/remember|noted|forget/i);
   });
 
   it("no candidate on the saved row: no auto-save, no edit call at all, even on a wrap-up turn", async () => {

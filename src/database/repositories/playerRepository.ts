@@ -16,7 +16,9 @@ export type PlayerProfileFields = Pick<
   | "memoryUsageEnabled"
   | "aiFollowUpsEnabled"
   | "protectedTopics"
->;
+> &
+  // Optional so /add-player and older callers keep working; the column defaults to NEUTRAL.
+  Partial<Pick<NewPlayerRow, "banterStyle">>;
 
 /**
  * Repository for `players` — plan section 8/9/10 (Phase 5). Mirrors

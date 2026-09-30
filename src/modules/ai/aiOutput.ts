@@ -240,3 +240,88 @@ export function parseAiOutput(raw: string, forbiddenTopics: string[]): ParseAiOu
     },
   };
 }
+
+// --- 2026-09-29: free-form chat output (DIRECT_CHAT / SERVER_CHAT) ----------
+//
+// A real chat isn't one reply plus one optional wrap-up memory, so it has
+// its own contract next to parseAiOutput's (which CONSOLE and the
+// single-shot modes keep using unchanged):
+//
+//   { "response": "...",
+//     "memory_candidates": [{ "type": "...", "content": "..." }],   // 0-3
+//     "forget_memory_ids": [12, 15] }                               // 0-10
+//
+// Same rule as everywhere (plan section 37): these are *suggestions*.
+// Nothing here writes anything — the backend validates ownership and
+// visibility of every forget id and de-duplicates every candidate before
+// it touches the database (memoryService.ts). A bad candidate or id is
+// dropped, never a reason to throw away a good response. There is no
+// `requires_confirmation` any more: consent is the player's "Memory usage"
+// setting, expressed once (plan section 21, revised).
+
+export const MAX_CHAT_MEMORY_CANDIDATES = 3;
+export const MAX_CHAT_FORGET_IDS = 10;
+
+const chatCandidateSchema = z.object({
+  type: z.enum(MEMORY_TYPES),
+  content: z.string().trim().min(1).max(MAX_MEMORY_CONTENT_LENGTH),
+});
+
+const chatOutputSchema = z.object({
+  response: z.string().trim().min(1).max(MAX_RESPONSE_LENGTH),
+  // Tolerant on purpose: a model that emits one malformed candidate must
+  // not sink the response, so each element is validated on its own below.
+  memory_candidates: z.array(z.unknown()).optional().nullable(),
+  forget_memory_ids: z.array(z.unknown()).optional().nullable(),
+});
+
+export interface ParsedChatOutput {
+  response: string;
+  memoryCandidates: MemoryCandidate[];
+  forgetMemoryIds: number[];
+}
+
+export type ParseChatOutputResult =
+  | { ok: true; value: ParsedChatOutput }
+  | { ok: false; reason: "invalid_json" | "invalid_shape" | "protected_topic" };
+
+export function parseChatOutput(raw: string, forbiddenTopics: string[]): ParseChatOutputResult {
+  const json = extractJsonObject(raw);
+  if (!json) return { ok: false, reason: "invalid_json" };
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(json);
+  } catch {
+    return { ok: false, reason: "invalid_json" };
+  }
+
+  const result = chatOutputSchema.safeParse(parsedJson);
+  if (!result.success) return { ok: false, reason: "invalid_shape" };
+
+  if (mentionsForbiddenTopic(result.data.response, forbiddenTopics)) {
+    return { ok: false, reason: "protected_topic" };
+  }
+
+  const memoryCandidates: MemoryCandidate[] = [];
+  for (const item of result.data.memory_candidates ?? []) {
+    if (memoryCandidates.length >= MAX_CHAT_MEMORY_CANDIDATES) break;
+    const candidate = chatCandidateSchema.safeParse(item);
+    if (!candidate.success) continue;
+    if (mentionsForbiddenTopic(candidate.data.content, forbiddenTopics)) continue;
+    memoryCandidates.push({ type: candidate.data.type, content: neutralizeMentions(candidate.data.content) });
+  }
+
+  const forgetMemoryIds: number[] = [];
+  for (const item of result.data.forget_memory_ids ?? []) {
+    if (forgetMemoryIds.length >= MAX_CHAT_FORGET_IDS) break;
+    if (typeof item === "number" && Number.isInteger(item) && item > 0 && !forgetMemoryIds.includes(item)) {
+      forgetMemoryIds.push(item);
+    }
+  }
+
+  return {
+    ok: true,
+    value: { response: neutralizeMentions(result.data.response), memoryCandidates, forgetMemoryIds },
+  };
+}

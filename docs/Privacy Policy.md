@@ -40,11 +40,15 @@ The specific data stored depends on the features enabled and the user's interact
 
 ### How Memory Works
 
-When you're chatting privately with M.A.R.I. (for example, after telling it why you can't make a match), it may save a short fact about what you said so it can be more personal next time — the same "remembers things about you by default" approach used by assistants like Claude and ChatGPT, rather than asking permission before every single fact.
+When you chat with M.A.R.I., it may save a short fact you clearly told it about yourself so it can be more personal next time — the same "remembers things about you by default" approach used by assistants like Claude and ChatGPT, rather than asking permission before every single fact. It saves these quietly; it does not announce each one.
 
+There are two kinds of chat, and what M.A.R.I. learns in each is kept separate:
+
+* **Private chats (a direct message to M.A.R.I.).** Facts from these are saved as **private**: they are only ever used in your own private chats with M.A.R.I., never in the server. A private chat can also use everything M.A.R.I. knows about you from the server.
+* **Server chats (`/mari` or `@M.A.R.I.` in a server channel).** These are public — everyone in the channel can read them — so facts from them are saved as **team-visible** and may be used in later server chats and team messages. Facts an admin enters about you (with `/add-memory`) are public by default so M.A.R.I. can use them in the server; the admin can choose a narrower setting.
+* A private chat closes after about five hours of silence. The next message starts a new chat that only knows the saved facts, not the earlier conversation.
 * Memory is on by default; it can be turned off entirely per user via the AI settings, and once off, nothing new is remembered from that user's conversations.
-* Every time something is saved, you're told about it in the moment, with a one-tap button to have it forgotten immediately.
-* You can review or delete anything remembered about you at any time with `/memories`.
+* You can tell M.A.R.I. to forget something ("forget that I have an exam"), or review and delete anything remembered about you at any time with `/memories`. In a server chat M.A.R.I. can only forget what a server chat can see; anything from a private chat is forgotten in the private chat or with `/memories`. Forgetting removes the saved fact; the raw chat messages themselves are kept in the database but are never fed back to the AI after a chat closes.
 * The application will never save anything from a topic you've marked as protected/off-limits.
 
 ## 2. How We Use Information

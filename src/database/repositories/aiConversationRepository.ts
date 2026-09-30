@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Database } from "../client.js";
 import {
   aiConversations,
@@ -8,6 +8,7 @@ import {
   type AiMessageRow,
   type MemoryCandidateStatus,
 } from "../schema/aiConversations.js";
+import type { ChatMode } from "../../modules/ai/aiMode.js";
 
 export interface OpenConversationInput {
   guildId: string;
@@ -19,6 +20,10 @@ export interface OpenConversationInput {
 export interface OpenDirectChatInput {
   guildId: string;
   playerId: number;
+}
+
+export interface OpenChatInput extends OpenDirectChatInput {
+  mode: ChatMode;
 }
 
 /**
@@ -58,30 +63,38 @@ export class AiConversationRepository {
   }
 
   /**
-   * DIRECT_CHAT's own open-or-get (plan section 63's `/ai`, 2026-09-28):
-   * same idempotent shape as `openOrGet`, against the OTHER partial unique
+   * The free-form chats' open-or-get (plan section 63's `/ai`, 2026-09-28;
+   * generalized 2026-09-29 to DIRECT_CHAT *and* SERVER_CHAT): same
+   * idempotent shape as `openOrGet`, against the OTHER partial unique
    * index (schema doc comment) since matchId is always NULL here — a
    * regular `onConflictDoNothing` target can only ever match one index.
+   * The index includes `mode`, so one player may have a DM chat and a
+   * server chat open at once, but never two of the same kind.
    */
-  async openOrGetDirectChat(input: OpenDirectChatInput): Promise<{ conversation: AiConversationRow; created: boolean }> {
+  async openOrGetChat(input: OpenChatInput): Promise<{ conversation: AiConversationRow; created: boolean }> {
     const [inserted] = await this.db
       .insert(aiConversations)
-      .values({ guildId: input.guildId, playerId: input.playerId, matchId: null, mode: "DIRECT_CHAT" })
+      .values({ guildId: input.guildId, playerId: input.playerId, matchId: null, mode: input.mode })
       .onConflictDoNothing({
-        target: [aiConversations.guildId, aiConversations.playerId],
+        target: [aiConversations.guildId, aiConversations.playerId, aiConversations.mode],
         where: sql`match_id IS NULL AND ended_at IS NULL`,
       })
       .returning();
     if (inserted) return { conversation: inserted, created: true };
 
-    const existing = await this.getOpenDirectChat(input.guildId, input.playerId);
+    const existing = await this.getOpenChat(input.guildId, input.playerId, input.mode);
     if (!existing) {
-      throw new Error(`Could not open or find a direct chat for player ${input.playerId}`);
+      throw new Error(`Could not open or find a ${input.mode} for player ${input.playerId}`);
     }
     return { conversation: existing, created: false };
   }
 
-  async getOpenDirectChat(guildId: string, playerId: number): Promise<AiConversationRow | undefined> {
+  /** Kept for the 2026-09-28 callers/tests: the DM chat is just `openOrGetChat` with the DM mode. */
+  async openOrGetDirectChat(input: OpenDirectChatInput): Promise<{ conversation: AiConversationRow; created: boolean }> {
+    return this.openOrGetChat({ ...input, mode: "DIRECT_CHAT" });
+  }
+
+  async getOpenChat(guildId: string, playerId: number, mode: ChatMode): Promise<AiConversationRow | undefined> {
     const rows = await this.db
       .select()
       .from(aiConversations)
@@ -89,12 +102,49 @@ export class AiConversationRepository {
         and(
           eq(aiConversations.guildId, guildId),
           eq(aiConversations.playerId, playerId),
+          eq(aiConversations.mode, mode),
           isNull(aiConversations.matchId),
           isNull(aiConversations.endedAt),
         ),
       )
       .limit(1);
     return rows[0];
+  }
+
+  async getOpenDirectChat(guildId: string, playerId: number): Promise<AiConversationRow | undefined> {
+    return this.getOpenChat(guildId, playerId, "DIRECT_CHAT");
+  }
+
+  /**
+   * The still-open DM conversation (CONSOLE or DIRECT_CHAT — never a server
+   * chat) that lives in this DM channel, if any: what a message typed into
+   * the bot's DM belongs to (2026-09-29 gateway worker).
+   */
+  async findOpenInDm(playerId: number, dmChannelId: string): Promise<AiConversationRow | undefined> {
+    const rows = await this.db
+      .select()
+      .from(aiConversations)
+      .where(
+        and(
+          eq(aiConversations.playerId, playerId),
+          eq(aiConversations.dmChannelId, dmChannelId),
+          inArray(aiConversations.mode, ["CONSOLE", "DIRECT_CHAT"]),
+          isNull(aiConversations.endedAt),
+        ),
+      )
+      .orderBy(asc(aiConversations.id))
+      .limit(1);
+    return rows[0];
+  }
+
+  /** Which of these `source_ref`s were already stored as player messages in this conversation (the poller skips them — 2026-09-29). */
+  async listStoredSourceRefs(conversationId: number, sourceRefs: string[]): Promise<Set<string>> {
+    if (sourceRefs.length === 0) return new Set();
+    const rows = await this.db
+      .select({ sourceRef: aiMessages.sourceRef })
+      .from(aiMessages)
+      .where(and(eq(aiMessages.conversationId, conversationId), inArray(aiMessages.sourceRef, sourceRefs)));
+    return new Set(rows.map((r) => r.sourceRef).filter((r): r is string => r !== null));
   }
 
   async getById(id: number): Promise<AiConversationRow | undefined> {

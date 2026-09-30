@@ -218,7 +218,7 @@ describeIfDb("Phase 8 — memory auto-save, storage, and /memories (integration)
     await db.update(aiConversations).set({ endedAt: new Date(), endReason: "COMPLETED" }).where(isNull(aiConversations.endedAt));
   });
 
-  it("a wrap-up candidate is saved automatically, and the DM gets a follow-up edit adding a single Forget button (plan section 21, revised)", async () => {
+  it("a wrap-up candidate is saved automatically and SILENTLY — no notice, no Forget button — and can still be deleted via /memories (plan section 21, revised 2026-09-29)", async () => {
     const d = fakeDiscord();
     let turn = 0;
     const { llm } = fakeLlm(({ system }) => {
@@ -236,15 +236,14 @@ describeIfDb("Phase 8 — memory auto-save, storage, and /memories (integration)
 
     await reply(ctx, conv.id, "player-a", "I have an exam tomorrow.", "r-1");
 
-    // The DM went out once, then got a follow-up edit adding the note +
-    // Forget button — never a race where the memory's own id had to exist
-    // before the reply reached the player.
+    // The DM went out once and was never edited: no "I'll remember that"
+    // note, no Forget button (2026-09-29).
     expect(d.dm("player-a")).toHaveLength(2);
-    expect(d.edits).toHaveLength(1);
+    expect(d.edits).toHaveLength(0);
     const wrapUp = d.dm("player-a")[1]!;
     expect(wrapUp.content).toContain("Go destroy that exam.");
-    expect(wrapUp.content).toMatch(/noted/i);
-    expect(wrapUp.components).toHaveLength(1);
+    expect(wrapUp.content).not.toMatch(/noted|remember|forget/i);
+    expect(wrapUp.components ?? []).toHaveLength(0);
 
     // Saved the same turn — no player decision to wait for anymore.
     const assistantRow = await lastAssistantMessage(conv.id);
@@ -263,17 +262,14 @@ describeIfDb("Phase 8 — memory auto-save, storage, and /memories (integration)
     const evidence = await db.select().from(memoryEvidence).where(eq(memoryEvidence.memoryId, created[0]!.id));
     expect(evidence).toEqual([expect.objectContaining({ sourceType: "AI_CONVERSATION", sourceId: String(conv.id) })]);
 
-    // The Forget button's custom_id points at the real memory row, and
-    // works from the DM it's actually sent in (no guildId — plan section
-    // 44's ownership check has to resolve without one).
-    const forgetRow = wrapUp.components![0] as { toJSON: () => { components: Array<{ custom_id: string }> } };
-    expect(forgetRow.toJSON().components.map((c) => c.custom_id)).toEqual([`memory:del:${created[0]!.id}`]);
-
+    // The memory is still fully deletable by its owner — `/memories` renders
+    // exactly this `memory:del:<id>` button per entry, and the handler works
+    // from a DM too (no guildId — plan section 44's ownership check has to
+    // resolve without one).
     const b = fakeButton(`memory:del:${created[0]!.id}`, "player-a", null, wrapUp.content);
     await dispatchButton(b.interaction, ctx);
     expect(b.update).toHaveBeenCalledTimes(1);
     const [updatePayload] = b.update.mock.calls[0] as unknown as [{ content: string; components: unknown[] }];
-    expect(updatePayload.content).toContain("Go destroy that exam."); // original text preserved, not replaced
     expect(updatePayload.content).toMatch(/forgotten/i);
     expect(updatePayload.components).toEqual([]);
     expect(await db.select().from(memories).where(eq(memories.id, created[0]!.id))).toHaveLength(0);

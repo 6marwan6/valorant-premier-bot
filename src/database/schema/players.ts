@@ -16,6 +16,13 @@ import { serverConfig } from "./serverConfig.js";
 export const playerRoleEnum = pgEnum("player_role", ["DUELIST", "INITIATOR", "CONTROLLER", "SENTINEL"]);
 
 /**
+ * How Mari relates to this person (2026-09-30): plain, flirty, or winding them
+ * up. Tone only — the LLM never acts on it (plan section 66 principle 3). Set
+ * per player via /edit-player, the same way the plan's section 9 AI settings are.
+ */
+export const banterStyleEnum = pgEnum("banter_style", ["NEUTRAL", "FLIRTY", "ANNOYING"]);
+
+/**
  * A team member's profile — plan section 8 "Player System" and section 9
  * "Player AI Configuration". Two deliberate schema notes:
  *
@@ -73,6 +80,7 @@ export const players = pgTable(
     preferredAgent: text("preferred_agent"),
 
     roastIntensity: integer("roast_intensity").notNull().default(50),
+    banterStyle: banterStyleEnum("banter_style").notNull().default("NEUTRAL"),
     personalReferencesEnabled: boolean("personal_references_enabled").notNull().default(true),
     runningJokesEnabled: boolean("running_jokes_enabled").notNull().default(true),
     valorantReferencesEnabled: boolean("valorant_references_enabled").notNull().default(true),

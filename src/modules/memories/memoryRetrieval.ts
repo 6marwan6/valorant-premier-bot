@@ -29,6 +29,18 @@ import { mentionsForbiddenTopic } from "../ai/aiOutput.js";
 /** Plan sections 32/57: "Only the highest-value memories should reach the LLM" — keep prompts compact. */
 export const MAX_RETRIEVED_MEMORIES = 4;
 
+/**
+ * A real chat (2026-09-29) has to feel like it knows the person, and a
+ * 6-7 person team's per-player memory count is small — so the free-form
+ * chats get a wider window than a one-shot reaction does. Still bounded
+ * (plan section 57: compact prompts).
+ */
+export const MAX_RETRIEVED_CHAT_MEMORIES = 10;
+
+export function retrievalLimitFor(mode: ConversationMode): number {
+  return mode === "DIRECT_CHAT" || mode === "SERVER_CHAT" ? MAX_RETRIEVED_CHAT_MEMORIES : MAX_RETRIEVED_MEMORIES;
+}
+
 /** Plan section 33's ranking formula has a recency term but no prescribed decay; a 3-week half-life keeps last week's stuff clearly ahead of last month's without last season's dropping to zero. */
 const RECENCY_HALF_LIFE_DAYS = 21;
 
@@ -56,6 +68,7 @@ const PREFERRED_TYPES: Record<ConversationMode, MemoryType[]> = {
   // 0.35 default for everything, same as any type in any OTHER mode that
   // isn't that mode's specialty (see modeRelevance below).
   DIRECT_CHAT: [],
+  SERVER_CHAT: [], // same reasoning as DIRECT_CHAT — a free chat has no single specialty
 };
 
 /** Section 31: CONSOLE "should avoid aggressive roast material" — actively discouraged, not just deprioritized. */
@@ -64,12 +77,46 @@ const DISCOURAGED_TYPES: Record<ConversationMode, MemoryType[]> = {
   CELEBRATE: [],
   CONSOLE: ["RUNNING_JOKE", "TEAM_JOKE"],
   DIRECT_CHAT: [], // banter is exactly as welcome here as anywhere else the player initiates it
+  SERVER_CHAT: [],
 };
 
 function modeRelevance(type: MemoryType, mode: ConversationMode): number {
   if (DISCOURAGED_TYPES[mode].includes(type)) return 0;
   if (PREFERRED_TYPES[mode].includes(type)) return 1;
   return 0.35; // present and plausible, just not this mode's specialty — section 33 is a hybrid score, not a hard type filter
+}
+
+/**
+ * Section 33's `semantic_similarity` term, without embeddings (design
+ * principle #11): the share of the player's latest message's meaningful
+ * words that also appear in the memory. Crude on purpose — enough to float
+ * "the memory about my exam" above "the memory about Jett" when the player
+ * says "I have my exam tomorrow", nothing more. Only ever used in the
+ * free-form chats, where there IS a message to compare against.
+ */
+const STOP_WORDS = new Set([
+  "the", "and", "for", "that", "this", "with", "you", "your", "are", "was", "were", "have", "has", "had", "but", "not",
+  "what", "when", "where", "who", "why", "how", "can", "just", "like", "about", "from", "they", "them", "then", "than",
+  "there", "their", "will", "would", "could", "should", "its", "too", "very", "really", "got", "get", "out", "into",
+  "did", "does", "tell", "say", "said", "know", "think", "much", "some", "any", "all", "one", "now", "also", "yes", "yeah",
+  "okay", "please", "mari", "hey", "hello", "lol", "gonna", "going",
+]);
+
+export function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9\u00c0-\uffff]+/)
+    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w));
+}
+
+export function keywordOverlap(memoryContent: string, queryText: string | undefined): number {
+  if (!queryText) return 0;
+  const query = new Set(tokenize(queryText));
+  if (query.size === 0) return 0;
+  const memoryTokens = new Set(tokenize(memoryContent));
+  let hits = 0;
+  for (const word of query) if (memoryTokens.has(word)) hits++;
+  return Math.min(1, hits / Math.min(query.size, 4)); // 4+ shared words is already a strong match
 }
 
 function recencyScore(createdAt: Date, now: Date): number {
@@ -92,10 +139,11 @@ function recencyScore(createdAt: Date, now: Date): number {
  * works") has one function to change, and so tests can pin its shape
  * directly instead of only through end-to-end retrieval output.
  */
-const WEIGHTS = { modeRelevance: 2, importance: 1, confidence: 1, recency: 1 };
+const WEIGHTS = { modeRelevance: 2, importance: 1, confidence: 1, recency: 1, keyword: 2 };
 
-export function scoreMemory(memory: MemoryRow, mode: ConversationMode, now: Date = new Date()): number {
+export function scoreMemory(memory: MemoryRow, mode: ConversationMode, now: Date = new Date(), queryText?: string): number {
   return (
+    WEIGHTS.keyword * keywordOverlap(memory.content, queryText) +
     WEIGHTS.modeRelevance * modeRelevance(memory.type, mode) +
     WEIGHTS.importance * (memory.importance / 100) +
     WEIGHTS.confidence * memory.confidence +
@@ -105,8 +153,10 @@ export function scoreMemory(memory: MemoryRow, mode: ConversationMode, now: Date
 
 /**
  * Where a memory is about to be used, not who it's about — both audiences
- * only ever draw from ONE player's own memories (retrieveMemories takes
- * memories for a single player; nothing here ever mixes players).
+ * draw from ONE player's own memories at a time (retrieveMemories takes
+ * memories for a single player; a server chat's separate "teammates'
+ * shared memories" block goes through `isEligible` per owner instead —
+ * see modules/ai/teamFactsService.ts).
  * CELEBRATE/ROAST post publicly in the match channel (an `@mention`
  * anyone on the server can read); CONSOLE is a real 1:1 DM with that same
  * player.
@@ -114,7 +164,8 @@ export function scoreMemory(memory: MemoryRow, mode: ConversationMode, now: Date
 export type MemoryAudience = "PUBLIC_CHANNEL" | "PRIVATE_DM";
 
 export function audienceForMode(mode: ConversationMode): MemoryAudience {
-  // CONSOLE and DIRECT_CHAT (2026-09-28) are both real 1:1 DMs; every other mode posts publicly.
+  // CONSOLE and DIRECT_CHAT (2026-09-28) are both real 1:1 DMs; every other mode
+  // (CELEBRATE/ROAST, and SERVER_CHAT since 2026-09-29) is readable by the whole server.
   return mode === "CONSOLE" || mode === "DIRECT_CHAT" ? "PRIVATE_DM" : "PUBLIC_CHANNEL";
 }
 
@@ -154,15 +205,29 @@ export function retrieveMemories(params: {
   forbiddenTopics: string[];
   limit?: number;
   now?: Date;
+  /** The player's latest message, for the free-form chats (see `keywordOverlap`). Omitted -> ranking is exactly what it was before. */
+  queryText?: string;
 }): MemoryRow[] {
   const audience = audienceForMode(params.mode);
   const now = params.now ?? new Date();
-  const limit = params.limit ?? MAX_RETRIEVED_MEMORIES;
+  const limit = params.limit ?? retrievalLimitFor(params.mode);
 
   return params.memories
     .filter((m) => isEligible(m, audience, params.forbiddenTopics))
-    .map((m) => ({ memory: m, score: scoreMemory(m, params.mode, now) }))
+    .map((m) => ({ memory: m, score: scoreMemory(m, params.mode, now, params.queryText) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((x) => x.memory);
+}
+
+
+/**
+ * Every memory the audience may see at all (no ranking, no limit) — what a
+ * "forget that" request is allowed to point at. Same three privacy gates as
+ * retrieval; kept as its own export so "what can be shown" and "what can be
+ * forgotten from here" can never drift apart.
+ */
+export function listEligible(params: { memories: MemoryRow[]; mode: ConversationMode; forbiddenTopics: string[] }): MemoryRow[] {
+  const audience = audienceForMode(params.mode);
+  return params.memories.filter((m) => isEligible(m, audience, params.forbiddenTopics));
 }

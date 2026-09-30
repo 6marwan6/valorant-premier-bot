@@ -18,7 +18,6 @@ import {
   buildConsoleReplyCustomId,
   parseConsoleModalCustomId,
 } from "../modules/ai/conversationCustomId.js";
-import { buildMemoryDeleteCustomId } from "../modules/memories/memoryManageCustomId.js";
 import type { ReplyOutcome } from "../modules/ai/conversationService.js";
 
 /**
@@ -46,6 +45,18 @@ import type { ReplyOutcome } from "../modules/ai/conversationService.js";
  *
  * Both are idempotent against each other and against retries (see
  * ai_messages.source_ref).
+ *
+ * **2026-09-29 — a third path, and a change of role for the first two.** The
+ * optional gateway worker (worker/gateway.ts, plan section 4's note) receives
+ * typed DMs the moment they are sent, so the DM chat feels like a normal
+ * chat. With `GATEWAY_WORKER=true` a DM *chat* reply no longer carries the
+ * Reply button (it would be clutter); CONSOLE DMs always do, and the button
+ * and the poller stay as the fallback for when no worker is running. All
+ * three paths still land in the same `handlePlayerReply`.
+ *
+ * Memory is saved silently now (plan section 21, revised 2026-09-29): there
+ * is no "Noted — I'll remember that" line and no Forget button. Forgetting is
+ * done by asking Mari, or in `/memories`.
  */
 
 const REPLY_FOOTER = "\n\n-# 💬 Tap **Reply** to answer";
@@ -60,22 +71,6 @@ export function buildReplyRow(conversationId: number): ActionRowBuilder<ButtonBu
       .setLabel("Reply")
       .setEmoji("💬")
       .setStyle(ButtonStyle.Primary),
-  );
-}
-
-/**
- * Plan section 21 (revised) / section 43: the single undo control on an
- * auto-saved memory. Same `memory:del:<memoryId>` id `/memories` already
- * uses — see memoryDelete.ts's doc comment for why one handler covers
- * both places.
- */
-export function buildForgetRow(memoryId: number): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(buildMemoryDeleteCustomId(memoryId))
-      .setLabel("Forget this")
-      .setEmoji("🗑️")
-      .setStyle(ButtonStyle.Secondary),
   );
 }
 
@@ -232,8 +227,13 @@ export async function deliverConversationReply(
 ): Promise<boolean> {
   const { conversation, outcome } = params;
 
+  // A DM chat (not CONSOLE) with the gateway worker running is a normal typed
+  // conversation — no Reply button. Everything else keeps it.
+  const showReplyButton = outcome.continues && (conversation.mode === "CONSOLE" || !ctx.env?.GATEWAY_WORKER);
+
   let body = outcome.text;
-  if (outcome.continues) body = withReplyFooter(body);
+  if (outcome.chatLimitReached) body = `${body}\n\n-# That was a long one — your next message starts a fresh chat.`;
+  if (showReplyButton) body = withReplyFooter(body);
   if (params.echo) {
     // Keep the quote from ever pushing the message over Discord's limit.
     const room = Math.max(0, DISCORD_MESSAGE_LIMIT - body.length - 2);
@@ -245,7 +245,7 @@ export async function deliverConversationReply(
   try {
     const sent = await ctx.discord.sendDirectMessage(params.dmChannelId, {
       content: body,
-      components: outcome.continues ? [buildReplyRow(conversation.id)] : [],
+      components: showReplyButton ? [buildReplyRow(conversation.id)] : [],
     });
     sentMessageId = sent.id;
   } catch (err) {
@@ -263,28 +263,15 @@ export async function deliverConversationReply(
 
   try {
     const saved = await ctx.services.conversations.recordAssistantMessage(conversation.id, outcome.text, outcome.memoryCandidate);
-    // Auto-save (Phase 8, plan section 21 revised): a candidate is only
-    // ever non-null on a wrap-up turn (`!outcome.continues` — see
-    // conversationContextBuilder.ts's prompt and ReplyOutcome's doc
-    // comment), and the backend enforces that itself here rather than
-    // trusting the model's cooperation alone (plan section 37). Saving
-    // needs the ASSISTANT row's own id as the memory's evidence, which
-    // only exists once persisted — so the save (and the Forget button it
-    // earns) happens as a follow-up edit rather than delaying the DM
-    // itself on a database write (plan section 48's spirit: never let
-    // bookkeeping stand between the player and their answer). `saved`
-    // being null (an extremely unlikely insert race), or the save itself
-    // producing nothing (already saved on a retry — see
-    // MemoryService.autoSave), just means no edit — the reply itself
-    // already reached the player either way.
+    // CONSOLE's wrap-up candidate (Phase 8, plan section 21 revised): only ever
+    // non-null on a wrap-up turn (`!outcome.continues`), enforced here by the
+    // backend rather than by the model's cooperation (plan section 37). Saved
+    // SILENTLY since 2026-09-29 — no notice, no Forget button. (The free-form
+    // chats never reach this branch: they save inside ConversationService,
+    // and their `memoryCandidate` is always null.) A failure here is only
+    // ever bookkeeping; the reply already reached the player.
     if (saved?.memoryCandidate && !outcome.continues) {
-      const memory = await ctx.services.memories.autoSave(saved.id);
-      if (memory) {
-        await ctx.discord.editChannelMessage(params.dmChannelId, sentMessageId, {
-          content: `${body}\n\n-# 🧠 Noted — I'll remember that. Tap below if you'd rather I didn't.`,
-          components: [buildForgetRow(memory.id)],
-        });
-      }
+      await ctx.services.memories.autoSave(saved.id);
     }
   } catch (err) {
     ctx.logger.error(

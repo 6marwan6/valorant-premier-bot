@@ -129,6 +129,17 @@ Store:
 
 # 4. Explicitly Out of Scope for V1
 
+> **Revision, 2026-09-29 (Marwan, product owner):** one narrow exception
+> to "no VPS / always-on process": a **gateway worker** — a tiny Node
+> process (`worker/gateway.ts`) on a free always-on host — whose ONLY job
+> is to receive ordinary Discord messages (a DM to the bot, an `@Mari`
+> mention in the server), which Discord delivers exclusively over the
+> Gateway and never to an HTTP endpoint. It holds no state of its own, uses
+> the same database and the same services as the serverless app, and is
+> optional: if it is down, slash commands, buttons, reminders and the
+> Reply-button/cron-poll paths keep working (design principle #8). Every
+> other "out of scope" item above is unchanged.
+
 Do not build:
 
 - Web dashboard.
@@ -201,6 +212,10 @@ The application should remain small and inexpensive to operate.
 ---
 
 # 6. Hosting Philosophy
+
+> **Revision, 2026-09-29:** see the section 4 note — the serverless
+> backend remains the primary architecture; the gateway worker is a small
+> optional add-on for instant typed messages, not a replacement for it.
 
 The application should avoid requiring a permanently running VPS.
 
@@ -421,6 +436,21 @@ The LLM should not receive protected information simply because it is told not t
 ---
 
 # 11. Match Creation
+
+> **Revision, 2026-09-28:** Date and Time also accept looser forms —
+> "today"/"tomorrow"/a weekday/"in 3 days" for Date, "7pm"/"morning"/
+> "evening"/"2 hours" for Time — alongside the exact DD/MM/YYYY + HH:mm
+> shape below, which still works unchanged. See
+> src/modules/matches/dateTime.ts for the full accepted set.
+
+> **Revision, 2026-09-27:** the `Opponent` field was removed from match
+> creation and from every place that displayed it (announcement, reminders,
+> recap, AI prompts). Valorant Premier does not reveal the opposing team
+> until the match starts, so anything typed at `/create-match` time was a
+> guess. A match is identified by its scheduled time alone; duplicate
+> detection keys on guild + scheduled instant. The `Opponent` lines in the
+> examples of sections 11, 14, 16, 38-39 and 61 below are kept for history
+> only.
 
 Only authorized administrators can create matches.
 
@@ -775,6 +805,24 @@ However, it should not pressure the player to disclose personal information.
 
 # 21. Memory Creation (revised — see changelog note)
 
+> **Revision, 2026-09-29:** two further changes to the (already revised)
+> model above.
+>
+> 1. **Chats remember by default, silently.** In a free-form chat with
+>    Mari (DM or server, see section 63), a fact the player *explicitly
+>    stated* may be saved on **any** turn — not only when wrapping up — and
+>    Mari no longer announces it ("I'll remember that") or attaches a
+>    Forget button. Consent is still the player's "Memory usage" setting
+>    (section 9). Duplicates of an already-known fact are not re-saved.
+> 2. **Forgetting is done by asking.** The player tells Mari to forget
+>    something ("forget that I have an exam"). The model only *suggests*
+>    which memory ids to drop (section 37); the backend validates that each
+>    id belongs to that player and is visible in that chat before deleting
+>    it. `/memories` (section 43) remains the audit-and-delete path.
+>
+> The CONSOLE flow (section 20) keeps its wrap-up-only single candidate,
+> also saved silently now.
+
 > **Revision, 2026-09-26:** this section originally specified an opt-in
 > Remember/Don't Remember button per candidate. Marwan (product owner)
 > changed this to opt-out: memories are treated as consented-to by
@@ -887,6 +935,23 @@ true
 ---
 
 # 24. Memory Visibility
+
+> **Revision, 2026-09-29 — where memories come from decides their
+> visibility:**
+>
+> - Said to Mari in a **DM** → `PRIVATE`. Usable only in private
+>   interactions with that same player (DM chat, CONSOLE).
+> - Said to Mari **in the server** (`/mari`, `@Mari`) → `TEAM`, because it
+>   was said publicly. Usable in server chat and team messages.
+> - **Admin-entered** (`/add-memory`) → default is now `PUBLIC` (was
+>   `PRIVATE`); the admin can still pick any level. This is a deliberate
+>   departure from "default to the most restrictive reasonable
+>   visibility": admin-entered lore exists precisely so Mari can use it in
+>   the server.
+>
+> A DM chat sees everything not `PROTECTED` (including server-derived and
+> admin facts). A server chat sees only `TEAM`/`PUBLIC` — a DM-derived fact
+> can never surface publicly.
 
 Supported visibility:
 
@@ -1030,6 +1095,14 @@ The exact retention policy should be chosen during implementation based on stora
 ---
 
 # 29. AI Conversations
+
+> **Revision, 2026-09-29:** free-form chats (`DIRECT_CHAT` in DMs,
+> `SERVER_CHAT` in the server) close after **5 hours** without a message
+> (CONSOLE keeps its own 12 h limit). The next message opens a **new** chat
+> that starts from the memory table only — the old transcript is never fed
+> into it (this section's rule, unchanged). A chat also closes at a backend
+> cap on player messages. Within a chat, only the most recent messages are
+> sent to the model.
 
 Private AI conversations should have their own records.
 
@@ -1464,9 +1537,26 @@ Initial commands:
 
 Commands should be permission-controlled.
 
+> **Revision, 2026-09-28:** `/add-memory` added — manual starter facts
+> about a player (section 22's nine categories, an explicit visibility per
+> section 24), for seeding lore the team already has at onboarding rather
+> than waiting for it to surface in conversation. It extends section 21's
+> memory-creation flow rather than replacing it: an admin's entry skips the
+> player-approval step (the admin already knows the fact), but every other
+> guarantee — evidence (section 25, a new `ADMIN_ENTRY` source type),
+> confidence, retrieval, forbidden-topic filtering (section 10), and the
+> player's own right to delete it (section 43) — applies exactly as it
+> would to any other memory.
+
 ---
 
 # 42. Player Commands
+
+> **Revision, 2026-09-29:** `/mari` now replies **publicly in the channel
+> it was used in** (a server chat) instead of opening a DM. Players chat
+> privately by simply **DMing the bot** (needs the gateway worker, section
+> 4), and may also `@Mari` in the server. Only players on the active roster
+> are answered.
 
 Potential player commands:
 
@@ -1477,6 +1567,9 @@ Potential player commands:
 ```
 
 Players should be able to inspect relevant information about themselves.
+
+> **Revision, 2026-09-28:** `/mari` added — see section 63's `/ai`, pulled
+> forward into V1 under the bot's own in-character name.
 
 Potentially:
 
@@ -1489,6 +1582,11 @@ or an interactive memory-management flow.
 ---
 
 # 43. Memory Management
+
+> **Revision, 2026-09-29:** besides `/memories`, a player can ask Mari in
+> chat to forget something (section 21). In the server she can only forget
+> what a server chat can see (`TEAM`/`PUBLIC`); a fact learned in a DM is
+> forgotten from the DM chat or `/memories`.
 
 A player should eventually be able to ask:
 
@@ -1521,6 +1619,13 @@ Deleting a memory should also invalidate its retrieval representation/embedding.
 ---
 
 # 44. Privacy Rules
+
+> **Revision, 2026-09-29:** Rule 5 (already revised 2026-09-26) is now
+> "control after the fact, by asking": memories are saved silently and the
+> player reviews them in `/memories` or tells Mari to forget them. The
+> team's privacy notice must say that Mari remembers by default. Rule 3 is
+> extended: a DM chat is private to that player; a server chat is public by
+> nature, so only publicly-visible memories may appear in it.
 
 Hard rules:
 
@@ -2404,11 +2509,29 @@ The AI therefore behaves differently toward each person.
 
 # 63. Future Extensions
 
+> **Revision, 2026-09-29:** the chat with Mari described in the 2026-09-28
+> note below is split by place — *DM* (private, `PRIVATE` memories,
+> everything the player has told her) and *server* (public, `TEAM`
+> memories, admin lore, and match/roster facts read from the database).
+> Server chat's context also includes the upcoming match, its attendance,
+> the last result and its events, and the roster — facts come from the
+> database, never from the model (design principle #9).
+
 These should not affect the V1 architecture but can be considered later.
 
 ### `/ai`
 
 Allow players to directly talk to the team AI.
+
+> **Revision, 2026-09-28:** implemented in V1 as `/mari` (section 42) —
+> earlier than this section originally planned for, once it became clear
+> it needed no new architecture: it reuses Phase 7/9's conversation,
+> retrieval and privacy pipeline as-is (a `DIRECT_CHAT` mode alongside
+> CONSOLE, matchId simply null), exactly the kind of extension design
+> principle #12 anticipates. The one real change was giving conversations
+> a matchless shape at all; everything else — memory candidates, turn
+> limits, the DM/Reply-button transport — was already built for CONSOLE
+> and needed no rewrite.
 
 ### Match statistics
 

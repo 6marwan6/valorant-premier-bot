@@ -117,7 +117,7 @@ describeIfDb("/add-memory — manual starter facts about players (2026-09-28)", 
     expect(evidence[0]!.sourceId).toBe("admin-42");
   });
 
-  it("defaults visibility to PRIVATE when omitted (plan section 24: most restrictive reasonable default)", async () => {
+  it("defaults visibility to PUBLIC when omitted (plan section 24, revised 2026-09-29: admin lore exists so Mari can use it in the server)", async () => {
     const { interaction } = fakeInteraction({
       guildId,
       isAdmin: true,
@@ -130,7 +130,7 @@ describeIfDb("/add-memory — manual starter facts about players (2026-09-28)", 
     const player = await ctx.repositories.players.getByDiscordUserId(guildId, "player-a");
     const saved = await ctx.repositories.memories.listByPlayer(player!.id);
     const memory = saved.find((m) => m.content === "Always picks Jett first in agent select.");
-    expect(memory?.visibility).toBe("PRIVATE");
+    expect(memory?.visibility).toBe("PUBLIC");
   });
 
   it("rejects a non-admin the same way every other admin command does", async () => {

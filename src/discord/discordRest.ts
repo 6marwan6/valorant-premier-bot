@@ -21,6 +21,8 @@ export interface ReplyPayload {
   embeds?: EmbedBuilder[];
   components?: ActionRowBuilder<ButtonBuilder>[];
   ephemeral?: boolean;
+  /** Public replies that carry model-written text: `allowed_mentions: { parse: [] }` so nothing in it can ping anyone (2026-09-29 server chat). */
+  suppressMentions?: boolean;
 }
 
 function serializeComponents(
@@ -126,8 +128,38 @@ export class DiscordRestClient {
    */
   async editOriginalInteractionResponse(interactionToken: string, payload: ReplyPayload): Promise<void> {
     await this.rest.patch(Routes.webhookMessage(this.applicationId, interactionToken, "@original"), {
-      body: { content: payload.content, components: serializeComponents(payload.components) },
+      body: {
+        content: payload.content,
+        components: serializeComponents(payload.components),
+        allowed_mentions: payload.suppressMentions ? { parse: [] } : undefined,
+      },
     });
+  }
+
+  /**
+   * Removes the deferred placeholder. A command that deferred PUBLICLY (`/mari`
+   * — its answer belongs in the channel) but then has an error only the
+   * caller should see deletes the placeholder and sends an ephemeral
+   * followup instead: a deferral's visibility can't be changed afterwards.
+   */
+  async deleteOriginalInteractionResponse(interactionToken: string): Promise<void> {
+    await this.rest.delete(Routes.webhookMessage(this.applicationId, interactionToken, "@original"));
+  }
+
+  /**
+   * A public channel message that replies to a specific message (`@Mari` in
+   * the server, 2026-09-29). Never pings anyone: `allowed_mentions` is
+   * empty, so the reply reference doesn't ping the author either — the
+   * threading is visible, no notification storm.
+   */
+  async sendChannelReply(channelId: string, payload: ReplyPayload, replyToMessageId: string): Promise<{ id: string }> {
+    return (await this.rest.post(Routes.channelMessages(channelId), {
+      body: {
+        content: payload.content,
+        message_reference: { message_id: replyToMessageId, fail_if_not_exists: false },
+        allowed_mentions: { parse: [], replied_user: false },
+      },
+    })) as { id: string };
   }
 
   /**

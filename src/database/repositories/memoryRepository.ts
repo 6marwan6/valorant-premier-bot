@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
 import type { Database } from "../client.js";
 import { memories, type MemoryRow, type MemoryType, type MemoryVisibility } from "../schema/memories.js";
 import { memoryEvidence, type MemoryEvidenceRow } from "../schema/memoryEvidence.js";
@@ -67,6 +67,21 @@ export class MemoryRepository {
   }
 
   /**
+   * Deletes several of one player's memories at once — the chat "forget
+   * that" path. Same ownership guarantee as `deleteForPlayer`: the
+   * `player_id` in the WHERE clause means an id that isn't theirs is
+   * simply not matched. Returns the ids actually removed.
+   */
+  async deleteManyForPlayer(ids: number[], playerId: number): Promise<number[]> {
+    if (ids.length === 0) return [];
+    const rows = await this.db
+      .delete(memories)
+      .where(and(inArray(memories.id, ids), eq(memories.playerId, playerId)))
+      .returning({ id: memories.id });
+    return rows.map((r) => r.id);
+  }
+
+  /**
    * Plan section 43: "Players should be able to request deletion of their
    * memories." Scoped to `playerId` in the WHERE clause (not just `id`) so
    * a player can never delete — or even confirm the existence of — another
@@ -79,6 +94,32 @@ export class MemoryRepository {
    * command can tell "deleted" from "not yours / doesn't exist" without
    * leaking which.
    */
+  /**
+   * Memories other players' server chats may see (2026-09-29): TEAM/PUBLIC
+   * and AI-usable, across the given players. Never PRIVATE, never
+   * PROTECTED — the same two rules retrieval enforces, applied again in
+   * the query so a private row is never even loaded for a public audience.
+   */
+  async listSharedForPlayers(playerIds: number[]): Promise<MemoryRow[]> {
+    if (playerIds.length === 0) return [];
+    return this.db
+      .select()
+      .from(memories)
+      .where(
+        and(
+          inArray(memories.playerId, playerIds),
+          eq(memories.aiUsable, true),
+          or(eq(memories.visibility, "TEAM"), eq(memories.visibility, "PUBLIC")),
+        ),
+      )
+      .orderBy(desc(memories.id));
+  }
+
+  /** Records one more piece of evidence for an existing memory (plan section 25/26: repeated evidence). */
+  async addEvidence(memoryId: number, evidence: { sourceType: MemoryEvidenceRow["sourceType"]; sourceId: string }): Promise<void> {
+    await this.db.insert(memoryEvidence).values({ memoryId, ...evidence });
+  }
+
   async deleteForPlayer(id: number, playerId: number): Promise<boolean> {
     const rows = await this.db
       .delete(memories)

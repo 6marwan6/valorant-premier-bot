@@ -2,6 +2,45 @@ import type { AiConversationRepository } from "../../database/repositories/aiCon
 import type { MemoryRepository } from "../../database/repositories/memoryRepository.js";
 import type { PlayerRepository } from "../../database/repositories/playerRepository.js";
 import type { MemoryRow } from "../../database/schema/memories.js";
+import type { ChatMode } from "../ai/aiMode.js";
+import type { MemoryCandidate } from "../ai/aiOutput.js";
+import { tokenize } from "./memoryRetrieval.js";
+
+/** A player's memory table is small by design (a 6-7 person team); this only stops a runaway chat from growing it without bound. */
+export const MAX_MEMORIES_PER_PLAYER = 200;
+
+/**
+ * Where a chat-derived memory may be used later (plan section 24, revised
+ * 2026-09-29): a fact said in a DM stays PRIVATE to that player; a fact said
+ * in the server was said publicly, so it is TEAM.
+ */
+export function visibilityForChat(mode: ChatMode): MemoryRow["visibility"] {
+  return mode === "SERVER_CHAT" ? "TEAM" : "PRIVATE";
+}
+
+function normalize(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9\u00c0-\uffff ]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** Same fact, differently worded: identical after normalizing, or (for longer facts) nearly all of the words shared. */
+export function isSameFact(a: string, b: string): boolean {
+  const na = normalize(a);
+  const nb = normalize(b);
+  if (na === nb) return true;
+  const ta = new Set(tokenize(na));
+  const tb = new Set(tokenize(nb));
+  if (ta.size < 4 || tb.size < 4) return false;
+  let shared = 0;
+  for (const w of ta) if (tb.has(w)) shared++;
+  return shared / Math.min(ta.size, tb.size) >= 0.85;
+}
+
+export interface SaveFromChatResult {
+  saved: MemoryRow[];
+  /** Candidates skipped because the fact was already known (or the table is full). */
+  skipped: number;
+}
+
 
 /**
  * Plan section 21 "Memory Creation" (revised — see the section's own
@@ -65,6 +104,88 @@ export class MemoryService {
       aiUsable: true,
       evidence: [{ sourceType: "AI_CONVERSATION", sourceId: String(conversation.id) }],
     });
+  }
+
+  /**
+   * The free-form chats' silent memory writer (plan section 21, revised
+   * 2026-09-29). Unlike `autoSave` there is no staged candidate row and no
+   * notice to the player: the turn's candidates arrive already validated by
+   * aiOutput.ts (shape, forbidden topics) and gated by the player's own
+   * "Memory usage" setting (aiService.ts) — this method adds the two things
+   * only the database can decide:
+   *
+   * - **De-duplication.** A chatty player restates things. A candidate that
+   *   is the same fact as one already stored in a scope at least as
+   *   visible as the new one is skipped (and the existing memory gains one
+   *   more piece of evidence — plan section 26, repeated statements). The
+   *   scope rule matters: a fact first told privately and later said in the
+   *   server is NOT a duplicate for the server's purposes, because the
+   *   private copy can never appear there — the public statement gets its own
+   *   TEAM copy. A PROTECTED duplicate blocks re-creation everywhere: an
+   *   admin deliberately fenced that fact off.
+   * - **A size ceiling** (`MAX_MEMORIES_PER_PLAYER`).
+   *
+   * Confidence is 1: the prompt only allows facts the player *explicitly
+   * stated* this turn (section 26: explicit statements carry the most
+   * confidence; nothing inferred is ever proposed).
+   */
+  async saveFromChat(params: {
+    playerId: number;
+    conversationId: number;
+    mode: ChatMode;
+    candidates: MemoryCandidate[];
+  }): Promise<SaveFromChatResult> {
+    const result: SaveFromChatResult = { saved: [], skipped: 0 };
+    if (params.candidates.length === 0) return result;
+
+    const visibility = visibilityForChat(params.mode);
+    const existing = await this.memories.listByPlayer(params.playerId);
+    let count = existing.length;
+    const evidence = { sourceType: "AI_CONVERSATION" as const, sourceId: String(params.conversationId) };
+
+    for (const candidate of params.candidates) {
+      const duplicate = existing.find((m) => {
+        if (!isSameFact(m.content, candidate.content)) return false;
+        if (m.visibility === "PROTECTED") return true;
+        if (visibility === "PRIVATE") return true; // a private chat already "knows" anything stored anywhere
+        return m.visibility === "TEAM" || m.visibility === "PUBLIC"; // a public chat only knows public copies
+      });
+      if (duplicate) {
+        result.skipped++;
+        // Repeated statement -> one more piece of evidence, best effort.
+        await this.memories.addEvidence(duplicate.id, evidence).catch(() => undefined);
+        continue;
+      }
+      if (count >= MAX_MEMORIES_PER_PLAYER) {
+        result.skipped++;
+        continue;
+      }
+      const memory = await this.memories.create({
+        playerId: params.playerId,
+        type: candidate.type as MemoryRow["type"],
+        content: candidate.content,
+        confidence: 1,
+        visibility,
+        aiUsable: true,
+        evidence: [evidence],
+      });
+      existing.push(memory);
+      result.saved.push(memory);
+      count++;
+    }
+    return result;
+  }
+
+  /**
+   * Chat "forget that" (plan sections 21/43, revised 2026-09-29): deletes
+   * exactly the given ids that belong to this player. The model's ids have
+   * already been narrowed to ones it was shown for this audience
+   * (aiService.ts); this is the ownership layer under that — an id that is
+   * not the player's is simply not matched (section 44 rule 4). Returns the
+   * ids actually removed (evidence goes with them, by cascade).
+   */
+  async forgetForPlayer(params: { playerId: number; memoryIds: number[] }): Promise<number[]> {
+    return this.memories.deleteManyForPlayer(params.memoryIds, params.playerId);
   }
 
   /**

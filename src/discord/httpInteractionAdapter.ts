@@ -53,6 +53,8 @@ export interface ResolvedUserOption {
 export function buildCommandInteractionAdapter(
   raw: APIChatInputApplicationCommandInteraction,
   discord: DiscordRestClient,
+  /** True when handleDiscordInteraction deferred this command PUBLICLY (`/mari`) — see PUBLIC_DEFER_COMMANDS. */
+  publicDefer = false,
 ): ChatInputCommandInteraction {
   const options = raw.data.options as APIApplicationCommandInteractionDataOption[] | undefined;
   const member = raw.member;
@@ -126,6 +128,17 @@ export function buildCommandInteractionAdapter(
       // immediately on receipt (api/interactions.ts) — "reply" here fills
       // that placeholder in, matching what interaction.reply() looked
       // like to command code before this migration.
+      //
+      // The exception is a command deferred PUBLICLY (`/mari`): its real
+      // answer belongs in the channel, but a private message to just the
+      // caller ("you're not on the roster") must stay private. A deferral's
+      // visibility can't be changed after the fact, so that case removes the
+      // public placeholder and sends the message as an ephemeral followup.
+      if (publicDefer && payload.ephemeral) {
+        await discord.deleteOriginalInteractionResponse(raw.token).catch(() => undefined);
+        await discord.sendInteractionFollowup(raw.token, payload);
+        return;
+      }
       await discord.editOriginalInteractionResponse(raw.token, payload);
     },
     async editReply(payload: ReplyPayload): Promise<void> {

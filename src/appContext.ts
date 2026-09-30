@@ -15,6 +15,7 @@ import { DiscordRestClient } from "./discord/discordRest.js";
 import { AiService } from "./modules/ai/aiService.js";
 import { ConversationService } from "./modules/ai/conversationService.js";
 import { MemoryService } from "./modules/memories/memoryService.js";
+import { TeamFactsService } from "./modules/ai/teamFactsService.js";
 import { PostMatchService } from "./modules/matches/postMatchService.js";
 import { createLlmClient, type LlmClient } from "./services/ai/llmClient.js";
 
@@ -77,7 +78,9 @@ export function buildAppContext(params: {
   const matchEventRepo = new MatchEventRepository(params.db);
   const { llm: llmOverride, ...contextParams } = params;
   const llm = llmOverride !== undefined ? llmOverride : createLlmClient(params.env, params.logger);
-  const aiService = new AiService(llm, params.logger, memoryRepo); // Phase 9: retrieval reads through the same MemoryRepository instance /memories already uses
+  // 2026-09-29: roster / next match / last result / teammates' public memories, read from the DB for the free-form chats.
+  const teamFacts = new TeamFactsService(playerRepo, matchRepo, attendanceRepo, matchEventRepo, memoryRepo);
+  const aiService = new AiService(llm, params.logger, memoryRepo, teamFacts); // Phase 9: retrieval reads through the same MemoryRepository instance /memories already uses
   const memoryService = new MemoryService(memoryRepo, aiConversationRepo, playerRepo);
   return {
     ...contextParams,
@@ -95,7 +98,7 @@ export function buildAppContext(params: {
       matches: new MatchService(matchRepo, serverConfigRepo),
       attendance: new AttendanceService(matchRepo, attendanceRepo, serverConfigRepo),
       ai: aiService,
-      conversations: new ConversationService(aiConversationRepo, playerRepo, matchRepo, aiService),
+      conversations: new ConversationService(aiConversationRepo, playerRepo, matchRepo, aiService, {}, memoryService),
       memories: memoryService,
       postMatch: new PostMatchService(matchRepo, matchEventRepo, playerRepo, serverConfigRepo, aiService, memoryService, params.logger),
     },

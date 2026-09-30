@@ -59,6 +59,16 @@ export const envSchema = z.object({
   // the team being Cairo-based. Override via /setup or this env var if
   // that's wrong for your deployment.
   DEFAULT_TIMEZONE: z.string().default("Africa/Cairo"),
+
+  // 2026-09-29 (plan section 4's note): set to "true" on the deployment that
+  // runs the gateway worker (worker/gateway.ts). Typed DMs to the bot then
+  // arrive instantly, so DM chat replies drop their "Tap Reply" button and
+  // footer — the button remains only as the fallback for when no worker is
+  // running. Leave unset/"false" on a serverless-only deployment.
+  GATEWAY_WORKER: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
   MATCH_CHANNEL_ID: z.string().optional(),
   ADMIN_ROLE_ID: z.string().optional(),
 

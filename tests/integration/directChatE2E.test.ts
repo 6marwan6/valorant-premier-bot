@@ -10,7 +10,7 @@ import { dispatchButton } from "../../src/discord/interactions/dispatchButton.js
 import { handleConsoleReplyModal } from "../../src/discord/consoleConversation.js";
 import { logger } from "../../src/config/logger.js";
 import type { LlmClient } from "../../src/services/ai/llmClient.js";
-import { MAX_PLAYER_TURNS } from "../../src/modules/ai/conversationContextBuilder.js";
+import { MAX_CHAT_PLAYER_TURNS } from "../../src/modules/ai/conversationService.js";
 import { aiConversations, aiMessages } from "../../src/database/schema/aiConversations.js";
 import { memories } from "../../src/database/schema/memories.js";
 import type { ButtonInteraction } from "discord.js";
@@ -83,6 +83,8 @@ function fakeLlm(impl: (input: { system: string; user: string }) => Promise<stri
   return { llm };
 }
 
+// Old-shape output (should_follow_up / memory_candidate) — still what CONSOLE uses, and still
+// tolerated (extras ignored) by the free-form chat parser, so this helper serves both.
 const json = (
   response: string,
   follow = false,
@@ -90,6 +92,12 @@ const json = (
 ) =>
   JSON.stringify({ response, should_follow_up: follow, memory_candidate: candidate });
 
+const chatJson = (response: string, candidates: Array<{ type: string; content: string }> = [], forget: number[] = []) =>
+  JSON.stringify({ response, memory_candidates: candidates, forget_memory_ids: forget });
+
+// 2026-09-29: `/mari` answers publicly in the channel by default; this suite covers the
+// PRIVATE DM chat, reached with `private: true` (the fallback that needs no gateway worker).
+// The public server chat and the DM-by-typing paths are covered by chatE2E.test.ts.
 function fakeMariInteraction(guildId: string | null, userId: string, message: string, interactionId = `mari-${Date.now()}-${Math.random()}`) {
   const reply = vi.fn(async (_payload: { content: string; ephemeral?: boolean }) => undefined);
   const interaction = {
@@ -105,6 +113,7 @@ function fakeMariInteraction(guildId: string | null, userId: string, message: st
         }
         return message;
       },
+      getBoolean: (name: string) => (name === "private" ? true : null),
     },
     reply,
     deferred: false,
@@ -234,7 +243,7 @@ describeIfDb("/mari — direct chat with Mari (plan section 63's `/ai`, pulled f
     const { interaction, reply } = fakeMariInteraction(guildId, "player-a", "yo mari, how's it going");
     await dispatchCommand(interaction, ctx);
 
-    expect(reply).toHaveBeenCalledWith({ content: "Started a chat with Mari 👋 Check your DMs!", ephemeral: true });
+    expect(reply).toHaveBeenCalledWith({ content: "Started a private chat with Mari 👋 Check your DMs!", ephemeral: true });
     const dm = d.dm("player-a");
     expect(dm).toHaveLength(1);
     expect(dm[0]!.content).toContain("> yo mari, how's it going");
@@ -310,17 +319,19 @@ describeIfDb("/mari — direct chat with Mari (plan section 63's `/ai`, pulled f
     const ctxWorking = ctxWith(dWorking, llm2);
     const retry = fakeMariInteraction(guildId, "player-a", "trying again");
     await dispatchCommand(retry.interaction, ctxWorking);
-    expect(retry.reply).toHaveBeenCalledWith({ content: "Started a chat with Mari 👋 Check your DMs!", ephemeral: true });
+    expect(retry.reply).toHaveBeenCalledWith({ content: "Started a private chat with Mari 👋 Check your DMs!", ephemeral: true });
   });
 
-  it("the turn limit ends the conversation and drops the Reply button, same as CONSOLE", async () => {
+  it("the model can't end a DM chat (should_follow_up is ignored); only the backend's length cap does, and it drops the Reply button", async () => {
     const d = fakeDiscord();
-    const { llm } = fakeLlm(() => json("keep going", true)); // model always wants to continue; the backend caps it anyway
+    const { llm } = fakeLlm(() => chatJson("keep going"));
     const ctx = ctxWith(d, llm);
 
     await dispatchCommand(fakeMariInteraction(guildId, "player-a", "turn 1").interaction, ctx);
     const [conv] = await openDirectChat();
-    for (let i = 2; i <= MAX_PLAYER_TURNS; i++) {
+    for (let i = 2; i <= MAX_CHAT_PLAYER_TURNS; i++) {
+      // Still open the whole way — a "wrap-up" is never the model's call in a free-form chat.
+      expect((await db.select().from(aiConversations).where(eq(aiConversations.id, conv!.id)))[0]!.endedAt).toBeNull();
       await handleConsoleReplyModal(modalSubmit({ conversationId: conv!.id, userId: "player-a", text: `turn ${i}`, interactionId: `turn-${i}` }), ctx);
     }
 
@@ -329,24 +340,25 @@ describeIfDb("/mari — direct chat with Mari (plan section 63's `/ai`, pulled f
     expect(ended.endReason).toBe("TURN_LIMIT");
     const last = d.dm("player-a").at(-1)!;
     expect(last.components).toEqual([]);
-  });
+    expect(last.content).toMatch(/fresh chat/i);
+  }, 60_000);
 
-  it("a memory candidate on the wrap-up turn auto-saves with a Forget button — the same Phase 8 pipeline, unmodified", async () => {
+  it("a memory candidate on an ORDINARY turn is saved silently as PRIVATE — no notice, no Forget button (plan section 21, revised 2026-09-29)", async () => {
     const d = fakeDiscord();
-    const { llm } = fakeLlm(() =>
-      json("Noted, good luck!", false, { type: "PLAYER_PREFERENCE", content: "Ahmed prefers playing in the evening.", requires_confirmation: true }),
-    );
+    const { llm } = fakeLlm(() => chatJson("Evenings, got it — good to know.", [{ type: "PLAYER_PREFERENCE", content: "Ahmed prefers playing in the evening." }]));
     const ctx = ctxWith(d, llm);
 
     await dispatchCommand(fakeMariInteraction(guildId, "player-a", "I usually only play in the evening").interaction, ctx);
 
     const player = await new (await import("../../src/database/repositories/playerRepository.js")).PlayerRepository(db).getByDiscordUserId(guildId, "player-a");
-    const saved = await db.select().from(memories).where(eq(memories.playerId, player!.id));
-    expect(saved.some((m) => m.content === "Ahmed prefers playing in the evening.")).toBe(true);
+    const saved = (await db.select().from(memories).where(eq(memories.playerId, player!.id))).filter((m) => m.content === "Ahmed prefers playing in the evening.");
+    expect(saved).toHaveLength(1);
+    expect(saved[0]!.visibility).toBe("PRIVATE");
+    expect(saved[0]!.confidence).toBe(1);
 
     const last = d.dm("player-a").at(-1)!;
-    expect(last.content).toContain("I'll remember that");
-    expect(last.components).toBeDefined();
+    expect(last.content).not.toMatch(/remember|noted|forget/i);
+    expect(d.raw.editChannelMessage).not.toHaveBeenCalled();
   });
 
   it("a DIRECT_CHAT conversation and a match's CONSOLE conversation coexist independently for the same player", async () => {

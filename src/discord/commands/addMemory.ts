@@ -19,9 +19,9 @@ const MEMORY_TYPE_CHOICES: Array<{ name: string; value: MemoryRow["type"] }> = [
 
 /** Plan section 24, in the plan's own order. */
 const VISIBILITY_CHOICES: Array<{ name: string; value: MemoryRow["visibility"] }> = [
-  { name: "Public", value: "PUBLIC" },
+  { name: "Public (default)", value: "PUBLIC" },
   { name: "Team", value: "TEAM" },
-  { name: "Private (default)", value: "PRIVATE" },
+  { name: "Private", value: "PRIVATE" },
   { name: "Protected (never given to the AI)", value: "PROTECTED" },
 ];
 
@@ -35,9 +35,11 @@ const VISIBILITY_CHOICES: Array<{ name: string; value: MemoryRow["visibility"] }
  * (retrieval, ranking, forbidden-topic filtering, /memories, the player's
  * own delete control) treats a memory created here exactly like any other.
  *
- * `visibility` defaults to PRIVATE when omitted — section 24: "Default to
- * the most restrictive reasonable visibility" — the admin can always
- * widen it explicitly.
+ * `visibility` defaults to PUBLIC when omitted (revised 2026-09-29 — plan
+ * section 24's note): admin-entered lore exists so Mari can use it when she
+ * talks to the person in the server, and a PRIVATE memory is never used
+ * there. The admin can still narrow it explicitly (TEAM / PRIVATE /
+ * PROTECTED) for anything sensitive.
  */
 const data = new SlashCommandBuilder()
   .setName("add-memory")
@@ -61,7 +63,7 @@ const data = new SlashCommandBuilder()
   .addStringOption((opt) =>
     opt
       .setName("visibility")
-      .setDescription("Who/what this can be used with. Defaults to Private.")
+      .setDescription("Who/what this can be used with. Defaults to Public.")
       .setRequired(false)
       .addChoices(...VISIBILITY_CHOICES),
   );
@@ -75,7 +77,7 @@ const addMemoryCommand: Command = {
     const target = interaction.options.getUser("player", true);
     const type = interaction.options.getString("type", true) as MemoryRow["type"];
     const content = interaction.options.getString("content", true).trim();
-    const visibility = (interaction.options.getString("visibility") ?? "PRIVATE") as MemoryRow["visibility"];
+    const visibility = (interaction.options.getString("visibility") ?? "PUBLIC") as MemoryRow["visibility"];
 
     if (content.length === 0) {
       await interaction.reply({ content: "❌ The fact can't be empty.", ephemeral: true });

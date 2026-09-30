@@ -242,20 +242,18 @@ describe("buildDirectChatContext (/mari, plan section 63's `/ai` pulled forward,
     expect(ctx.user).toContain("Ahmed mains Jett");
   });
 
-  it("the JSON output contract (response/should_follow_up/memory_candidate) matches every other conversation builder", () => {
+  it("free-form chats use their own JSON contract: response + memory_candidates + forget_memory_ids, and the model no longer decides when the chat ends (2026-09-29)", () => {
     const ctx = buildDirect([{ role: "USER", content: "hi" }]);
     expect(ctx.system).toContain('"response"');
-    expect(ctx.system).toContain('"should_follow_up"');
-    expect(ctx.system).toContain('"memory_candidate"');
+    expect(ctx.system).toContain('"memory_candidates"');
+    expect(ctx.system).toContain('"forget_memory_ids"');
+    expect(ctx.system).not.toContain("should_follow_up");
+    expect(ctx.system).not.toMatch(/TURN: FINAL/);
   });
 
-  it("the turn limit still produces a FINAL turn the same way CONSOLE's does", () => {
-    const transcript: ConversationTranscriptEntry[] = Array.from({ length: MAX_PLAYER_TURNS }, (_, i) => ({
-      role: "USER" as const,
-      content: `message ${i}`,
-    }));
-    const ctx = buildDirect(transcript);
-    expect(ctx.turn).toBe("FINAL");
-    expect(ctx.system).toContain("TURN: FINAL");
+  it("the prompt tells Mari to save quietly and never announce it (2026-09-29)", () => {
+    const ctx = buildDirect([{ role: "USER", content: "hi" }]);
+    expect(ctx.system).toMatch(/do NOT say "I'll remember that"/i);
+    expect(ctx.system).not.toMatch(/undo it/i);
   });
 });

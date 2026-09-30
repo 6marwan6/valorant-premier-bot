@@ -11,7 +11,8 @@ import type { PlayerRow } from "../../database/schema/players.js";
 import type { AttendanceRow } from "../../database/schema/attendance.js";
 import type { AiService } from "./aiService.js";
 import type { MemoryCandidate } from "./aiOutput.js";
-import { modeForStatus } from "./aiMode.js";
+import { isChatMode, modeForStatus, type ChatMode } from "./aiMode.js";
+import type { MemoryService } from "../memories/memoryService.js";
 import {
   CONSOLE_STATIC_OPENER,
   CONVERSATION_FALLBACK_MESSAGE,
@@ -22,6 +23,24 @@ import {
 /** Nobody has replied for this long -> the conversation is over (Discord DMs stay open forever; the chat shouldn't). */
 export const CONVERSATION_IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 
+/**
+ * The free-form chats (2026-09-29) close after 5 hours without a message —
+ * the player's own number. The next message opens a NEW chat, which starts
+ * from the memory table only: the old transcript is never carried over
+ * (plan section 29).
+ */
+export const CHAT_IDLE_TIMEOUT_MS = 5 * 60 * 60 * 1000;
+
+/**
+ * Backend cap on player messages in one free-form chat (plan section 37).
+ * Far above CONSOLE's 5 — a real chat runs long — but still bounded. Hitting
+ * it just closes this chat; the next message starts a fresh one.
+ */
+export const MAX_CHAT_PLAYER_TURNS = 40;
+
+/** Sent when the model can't answer mid-chat. The chat stays open — one glitch doesn't end a conversation. */
+export const CHAT_FALLBACK_MESSAGE = "My brain glitched for a second 😵 Say that again?";
+
 /** Longest player message stored/sent to the model. The reply modal caps at 500; a burst of typed DMs is joined and capped here (plan section 57). */
 export const MAX_PLAYER_MESSAGE_CHARS = 800;
 
@@ -31,6 +50,9 @@ const OPEN_MATCH_STATUSES: ReadonlyArray<MatchRow["status"]> = ["SCHEDULED", "CO
 export interface ConversationServiceOptions {
   idleTimeoutMs?: number;
   maxPlayerTurns?: number;
+  /** Free-form chats only (2026-09-29). */
+  chatIdleTimeoutMs?: number;
+  maxChatPlayerTurns?: number;
 }
 
 export type StartOutcome =
@@ -64,6 +86,14 @@ export type ReplyOutcome =
        * exclusive with the Reply button by construction, never both.
        */
       memoryCandidate: MemoryCandidate | null;
+      /**
+       * Free-form chats (2026-09-29): what this turn did to the player's memory
+       * table, for logging and tests. Never shown to the player — memories are
+       * saved silently and forgetting is confirmed by Mari's own reply text.
+       */
+      memoryEffects?: { saved: number; skipped: number; forgotten: number };
+      /** True on the reply that hit the chat length cap: this chat is now closed and the next message opens a fresh one. */
+      chatLimitReached?: boolean;
     };
 
 /**
@@ -83,6 +113,8 @@ export type ReplyOutcome =
 export class ConversationService {
   private readonly idleTimeoutMs: number;
   private readonly maxPlayerTurns: number;
+  private readonly chatIdleTimeoutMs: number;
+  private readonly maxChatPlayerTurns: number;
 
   constructor(
     private readonly conversations: AiConversationRepository,
@@ -90,9 +122,13 @@ export class ConversationService {
     private readonly matches: MatchRepository,
     private readonly ai: AiService,
     options: ConversationServiceOptions = {},
+    /** Optional so every pre-2026-09-29 call site keeps working: without it a chat still talks, it just neither remembers nor forgets. */
+    private readonly memoryService: MemoryService | null = null,
   ) {
     this.idleTimeoutMs = options.idleTimeoutMs ?? CONVERSATION_IDLE_TIMEOUT_MS;
     this.maxPlayerTurns = options.maxPlayerTurns ?? MAX_PLAYER_TURNS;
+    this.chatIdleTimeoutMs = options.chatIdleTimeoutMs ?? CHAT_IDLE_TIMEOUT_MS;
+    this.maxChatPlayerTurns = options.maxChatPlayerTurns ?? MAX_CHAT_PLAYER_TURNS;
   }
 
   /** True when the LLM layer is configured — without it there is nothing to converse with (plan design principle #8: behave exactly as before). */
@@ -143,27 +179,93 @@ export class ConversationService {
   }
 
   /**
-   * `/mari` (plan section 63's `/ai`, pulled forward — 2026-09-28): opens
-   * this player's one standing DIRECT_CHAT conversation, or returns the
-   * one already open. Unlike `startConsole`, there is no AI-authored
-   * opener to generate here — the player's own first message IS the first
-   * turn, so the caller feeds it straight into `handlePlayerReply` right
-   * after this (see discord/consoleConversation.ts's `startDirectChatDm`).
-   * Gated on `this.ai.enabled` only, deliberately NOT on
-   * `aiFollowUpsEnabled` (plan section 9) — that setting means "let Mari
-   * keep prompting me automatically" (CELEBRATE/ROAST/CONSOLE, all
-   * app-triggered); a player *initiating* a chat themselves is a different
-   * thing it was never meant to gate.
+   * The free-form chats (plan section 63's `/ai`; DM + server split
+   * 2026-09-29): opens this player's one standing chat of this kind, or
+   * returns the one already open. A chat that has been idle past the 5-hour
+   * limit is closed first (`IDLE_TIMEOUT`) and a NEW one is opened — so the
+   * player never has to "start over" by hand, and the new chat begins from
+   * the memory table only (plan section 29).
+   *
+   * There is no AI-authored opener: the player's own message IS the first
+   * turn, so the caller feeds it straight into `handlePlayerReply`. Gated on
+   * `this.ai.enabled` only, deliberately NOT on `aiFollowUpsEnabled` (plan
+   * section 9) — that setting means "let Mari keep prompting me
+   * automatically" (CELEBRATE/ROAST/CONSOLE, all app-triggered); a player
+   * *initiating* a chat themselves is a different thing it was never meant
+   * to gate.
    */
-  async openDirectChat(params: { guildId: string; player: PlayerRow }): Promise<
-    { kind: "unavailable" } | { kind: "ready"; conversation: AiConversationRow; created: boolean }
+  async openChat(params: { guildId: string; player: PlayerRow; mode: ChatMode; now?: Date }): Promise<
+    { kind: "unavailable" } | { kind: "ready"; conversation: AiConversationRow; created: boolean; rolledOver: boolean }
   > {
     if (!this.ai.enabled) return { kind: "unavailable" };
-    const { conversation, created } = await this.conversations.openOrGetDirectChat({
+    const now = params.now ?? new Date();
+
+    let rolledOver = false;
+    const current = await this.conversations.getOpenChat(params.guildId, params.player.id, params.mode);
+    if (current && now.getTime() - current.lastActivityAt.getTime() > this.chatIdleTimeoutMs) {
+      await this.conversations.end(current.id, "IDLE_TIMEOUT");
+      rolledOver = true;
+    }
+
+    const { conversation, created } = await this.conversations.openOrGetChat({
       guildId: params.guildId,
       playerId: params.player.id,
+      mode: params.mode,
     });
-    return { kind: "ready", conversation, created };
+    return { kind: "ready", conversation, created, rolledOver };
+  }
+
+  /** The 2026-09-28 name, kept so existing callers and tests read as before. */
+  async openDirectChat(params: { guildId: string; player: PlayerRow }) {
+    return this.openChat({ ...params, mode: "DIRECT_CHAT" });
+  }
+
+  /**
+   * A message typed into the bot's DM (gateway worker, 2026-09-29). Finds the
+   * conversation it belongs to — a still-valid open CONSOLE or DM chat living
+   * in this DM channel — or opens a fresh DM chat (which is also what happens
+   * after the 5-hour idle close: "if the chatter DMs the bot after, it's a new
+   * chat"). Then it is an ordinary turn.
+   */
+  async routeDmMessage(params: {
+    guildId: string;
+    player: PlayerRow;
+    dmChannelId: string;
+    /** The Discord message id — recorded as the poll cursor when this message opens a chat. */
+    discordMessageId: string;
+    text: string;
+    now?: Date;
+  }): Promise<{ kind: "unavailable" } | { kind: "routed"; conversation: AiConversationRow; outcome: ReplyOutcome }> {
+    if (!this.ai.enabled) return { kind: "unavailable" };
+    const now = params.now ?? new Date();
+
+    let conversation = await this.conversations.findOpenInDm(params.player.id, params.dmChannelId);
+    if (conversation) {
+      const invalid = await this.endReasonIfInvalid(conversation, now, { player: params.player });
+      if (invalid) {
+        await this.conversations.end(conversation.id, invalid);
+        conversation = undefined;
+      }
+    }
+
+    if (!conversation) {
+      const opened = await this.openChat({ guildId: params.guildId, player: params.player, mode: "DIRECT_CHAT", now });
+      if (opened.kind === "unavailable") return { kind: "unavailable" };
+      conversation = opened.conversation;
+    }
+    if (conversation.dmChannelId !== params.dmChannelId) {
+      // A fresh chat: remember where it lives. The poll cursor starts at this very message (already being handled).
+      await this.conversations.setDmChannel(conversation.id, params.dmChannelId, params.discordMessageId);
+    }
+
+    const outcome = await this.handlePlayerReply({
+      conversationId: conversation.id,
+      discordUserId: params.player.discordUserId,
+      text: params.text,
+      sourceRef: `message:${params.discordMessageId}`,
+      now,
+    });
+    return { kind: "routed", conversation, outcome };
   }
 
   /**
@@ -193,6 +295,11 @@ export class ConversationService {
    * happen — see AiConversationRepository.addMessage) so the caller has the
    * row id `MemoryService.autoSave` needs.
    */
+  /** Which of these `message:<id>` refs already have a stored player message (poller de-duplication against the gateway worker). */
+  async storedMessageRefs(conversationId: number, refs: string[]): Promise<Set<string>> {
+    return this.conversations.listStoredSourceRefs(conversationId, refs);
+  }
+
   async recordAssistantMessage(
     conversationId: number,
     text: string,
@@ -234,7 +341,9 @@ export class ConversationService {
     now: Date,
     loaded?: { player?: PlayerRow; match?: MatchRow },
   ): Promise<AiConversationEndReason | null> {
-    if (now.getTime() - conversation.lastActivityAt.getTime() > this.idleTimeoutMs) return "IDLE_TIMEOUT";
+    const chat = isChatMode(conversation.mode);
+    const idleLimit = chat ? this.chatIdleTimeoutMs : this.idleTimeoutMs;
+    if (now.getTime() - conversation.lastActivityAt.getTime() > idleLimit) return "IDLE_TIMEOUT";
 
     // DIRECT_CHAT (2026-09-28) has no match at all, so it has nothing to be
     // MATCH_CLOSED about — this check only ever applies to CONSOLE.
@@ -244,8 +353,12 @@ export class ConversationService {
     }
 
     const player = loaded?.player ?? (await this.players.getById(conversation.playerId));
-    // Removed from the team, or turned "AI follow-ups" off (plan section 9) mid-conversation: respect it.
-    if (!player || !player.active || !player.aiFollowUpsEnabled) return "COMPLETED";
+    // Removed from the team: nothing to say to them anymore.
+    if (!player || !player.active) return "COMPLETED";
+    // "AI follow-ups" off (plan section 9) mid-conversation: respect it — but it
+    // only governs Mari prompting the player. A chat the player started
+    // themselves is not a "follow-up" (see `openChat`), so it is exempt.
+    if (!chat && !player.aiFollowUpsEnabled) return "COMPLETED";
 
     return null;
   }
@@ -300,6 +413,10 @@ export class ConversationService {
     const transcript = await this.loadTranscript(conversation.id);
     const playerTurns = transcript.filter((entry) => entry.role === "USER").length;
 
+    if (isChatMode(conversation.mode)) {
+      return this.replyInChat({ conversation, player, transcript, playerTurns });
+    }
+
     const generated = await this.ai.respondInConversation({
       player,
       match: match ?? null,
@@ -334,6 +451,86 @@ export class ConversationService {
       continues,
       source: "ai",
       memoryCandidate: generated.memoryCandidate,
+    };
+  }
+
+  /**
+   * One turn of a free-form chat (DM or server — 2026-09-29). Differs from
+   * the CONSOLE turn above in exactly the ways the plan revision lists:
+   *
+   * - the model does not decide when the chat is over — only the backend
+   *   does (5 idle hours, checked on the next message; or the length cap);
+   * - a failure mid-chat does not end the chat — the player just gets a
+   *   "say that again" and the chat stays open;
+   * - memory is saved silently on ANY turn, and a forget request is applied
+   *   here, before the reply goes out, so Mari's "done, forgotten" is true
+   *   by the time the player reads it (plan section 37: the backend performs
+   *   the action, the model only suggested it).
+   */
+  private async replyInChat(params: {
+    conversation: AiConversationRow;
+    player: PlayerRow;
+    transcript: ConversationTranscriptEntry[];
+    playerTurns: number;
+  }): Promise<ReplyOutcome> {
+    const { conversation, player, transcript, playerTurns } = params;
+    const chatMode = conversation.mode as ChatMode;
+
+    const generated = await this.ai.respondInConversation({
+      player,
+      match: null,
+      chatMode,
+      conversationId: conversation.id,
+      transcript,
+    });
+
+    if (generated.source === "fallback") {
+      return { kind: "reply", conversation, text: CHAT_FALLBACK_MESSAGE, continues: true, source: "fallback", memoryCandidate: null };
+    }
+
+    const effects = { saved: 0, skipped: 0, forgotten: 0 };
+    let text = generated.text;
+
+    if (this.memoryService) {
+      // Forget first: a fact the player is retracting in this very message
+      // must not be re-saved from the same turn's candidates.
+      if (generated.forgetMemoryIds.length > 0) {
+        try {
+          const removed = await this.memoryService.forgetForPlayer({ playerId: player.id, memoryIds: generated.forgetMemoryIds });
+          effects.forgotten = removed.length;
+          if (removed.length === 0) text = `${text}\n\n(I couldn't find that in what I have stored, so nothing was removed — \`/memories\` shows everything.)`;
+        } catch {
+          text = "I couldn't forget that just now — try again, or remove it with `/memories`.";
+        }
+      }
+      if (generated.memoryCandidates.length > 0 && effects.forgotten === 0) {
+        try {
+          const result = await this.memoryService.saveFromChat({
+            playerId: player.id,
+            conversationId: conversation.id,
+            mode: chatMode,
+            candidates: generated.memoryCandidates,
+          });
+          effects.saved = result.saved.length;
+          effects.skipped = result.skipped;
+        } catch {
+          // Bookkeeping never stands between the player and their answer (plan section 48's spirit).
+        }
+      }
+    }
+
+    const atCap = playerTurns >= this.maxChatPlayerTurns;
+    if (atCap) await this.conversations.end(conversation.id, "TURN_LIMIT");
+
+    return {
+      kind: "reply",
+      conversation,
+      text,
+      continues: !atCap,
+      source: "ai",
+      memoryCandidate: null,
+      memoryEffects: effects,
+      chatLimitReached: atCap || undefined,
     };
   }
 

@@ -5,7 +5,10 @@ Private Discord bot for a 6–7 person Valorant Premier team. See
 the single source of truth for scope and behavior; this README only covers
 how to run what's built so far and the decisions made while building it.
 
-## Status: Phase 10 — Match Hype / Recaps ✅ (Phases 1–9 also complete)
+## Status: 2026-09-29 — DM chat / server chat + gateway worker ✅ (Phases 1–10 also complete)
+
+Newest work: [2026-09-29 — Mari as a real chat](#2026-09-29--mari-as-a-real-chat-dm--server-split-gateway-worker)
+(below the Phase 10 notes).
 
 Jump to [Phase 10 — hype & recaps](#phase-10--match-hype--recaps-what-was-built-and-the-choices-made)
 for the newest work. The Phase 5 notes below are kept as they were.
@@ -604,8 +607,9 @@ of thing (section 33: "implemented and tuned after the basic system
 works").
 
 **`last_used_at` (section 23) finally has a writer.** `MemoryRepository.touchLastUsed`
-is called, fire-and-forget, for whichever memories actually made it into a
-context — never every memory a player has. Nothing reads it back yet (no
+is called (awaited, with any error swallowed — a detached promise can be
+frozen or killed on serverless hosting, silently dropping the write) for
+whichever memories actually made it into a context — never every memory a player has. Nothing reads it back yet (no
 recency-of-*use* tie-breaker layered on top of section 33's recency-of-
 *creation* term), but it's real data now instead of permanently `null`.
 
@@ -658,10 +662,17 @@ events, and match memories (sections 38, 39, 40).
   the Phase 9 notes said retrieval was waiting for.
 - `MATCH_HYPE`: the reminder cron's nudge for the offset closest to
   kickoff (15 minutes in the default 3h/1h/15m schedule) becomes a
-  `🔥 **15 MINUTES**` header + opponent line (deterministic) + AI flavor
-  text built from the roster/agents in the database (section 38's split:
-  facts from the DB, AI only writes the personality layer).
-- Migration `0007_add_match_events_and_recap.sql`.
+  `🔥 15 MINUTES` embed title + AI flavor text on top of the deterministic
+  match line (`Match #id — <t:kickoff>`), built from the roster/agents in
+  the database (section 38's split: facts from the DB, AI only writes the
+  personality layer). Since the 2026-09-27 reminder-UI enhancement this
+  is the *same embed* as the plain nudge (coloured border, live Discord
+  timestamps, attendance tallies) — hype only swaps the title and adds
+  the AI text, it is not a separate message.
+- Migration `0008_add_match_events_and_recap.sql` (originally numbered
+  `0007`, colliding with `0007_drop_match_opponent`; renumbered on
+  2026-09-28 and written idempotently so it is safe on a database that
+  already ran the old file).
 
 **Choices the plan left open**
 
@@ -680,8 +691,8 @@ events, and match memories (sections 38, 39, 40).
 - **Protected topics = union across the roster.** A team message can name
   anyone, so its forbidden list is every active player's protected topics
   combined; the same list also filters the model's output.
-- **Facts stay outside the LLM.** The recap's header, opponent and
-  WIN/LOSS line are built by the app; only the body is AI. With AI off or
+- **Facts stay outside the LLM.** The recap's header, match id/kickoff
+  and WIN/LOSS line are built by the app; only the body is AI. With AI off or
   failing, a short generic line is posted instead. The `💔` header for a
   loss is my choice; the plan only shows a win example.
 - **One LLM, not two.** Section 57 suggests a cheaper model for
@@ -744,6 +755,189 @@ AI off, single-offset schedule).
   older than the one bundled in the zip (sections 21/44/CELEBRATE-ROAST
   revisions). Sections 38-40 and 59, which this phase uses, are identical
   in both.
+
+## 2026-09-28 — three additions beyond the phase plan
+
+Requested directly by the person running the project, each checked against
+`Full_Development_Plan.md` first, per this project's own ground rule.
+
+### Looser Date/Time input (plan section 11)
+
+The plan's own example (`Date: 18/09/2026`, `Time: 19:00`) is tried first,
+unconditionally, in `dateTime.ts`'s `parseMatchDateTime` — every existing
+admin habit and every pre-revision test keeps working byte for byte. Only
+when that exact shape doesn't match does either field fall through to a
+fixed, documented set of extra forms: `today`/`tomorrow`/`tonight`, a bare
+or `next`-prefixed weekday, `in N day(s)`/`in N week(s)`, and D/M/YYYY with
+either separator for the date; a named part of day (`morning` 09:00,
+`afternoon` 15:00, `evening`/`tonight` 19:00, `night` 21:00, `noon`,
+`midnight`), 12h `7pm`/`7:30pm`, or a relative duration (`2 hours`,
+`in 90m`, `1h30m` — counted from *now*, so it only combines with
+`date: today`) for the time. The two fields can mix strictness freely (an
+exact date with a loose time, and vice versa). Free-form NLP was
+deliberately left out — design principle #11, start simple — this is a
+fixed token set, not a general parser, and the error message says so.
+
+### `/mari` — plan section 63's `/ai`, pulled forward
+
+Section 63 lists `/ai` ("Allow players to directly talk to the team AI")
+as a Future Extension explicitly not expected to affect V1's architecture.
+It didn't: a `DIRECT_CHAT` conversation is just `matchId: null` (migration
+`0009` drops the `NOT NULL`, plus its own partial unique index —
+`(guild_id, player_id) WHERE match_id IS NULL AND ended_at IS NULL` — since
+a plain unique index treats every NULL as distinct and would happily let
+the same player open two "open" direct chats at once). Everything else —
+`ConversationService.handlePlayerReply`, the DM/Reply-button modal
+transport, turn limits, the memory-candidate auto-save flow — is reused
+completely unchanged; it was already written generically enough not to
+care what mode a conversation is in. The one new piece per mode is the
+context builder: `buildDirectChatContext` (a sibling of CONSOLE's, not a
+branch inside it — CONSOLE's rules are entirely about one situation,
+section 20's "wants to play but can't", which DIRECT_CHAT has no
+equivalent of). Two differences from CONSOLE worth remembering: roast
+intensity applies here (CONSOLE deliberately never roasts; free chat
+should still banter per the player's own dial), and there's no "opener"
+step — the player's own first message goes straight through
+`handlePlayerReply` like every later turn, so `respondInConversation`
+picks CONSOLE vs DIRECT_CHAT purely by whether a match was given, not a
+separate flag that could drift from it.
+
+Named after the bot's own in-character name rather than the plan's literal
+`/ai` — every private message elsewhere in this codebase already signs
+itself "M.A.R.I.".
+
+### `/add-memory` — manual starter facts about players
+
+Extends plan section 21's memory-creation flow to a case it doesn't cover:
+seeding lore the team already has (an existing running joke, a known
+preference) at onboarding, instead of waiting for it to resurface in a
+conversation Mari happens to be part of. `MemoryService.createFromAdminEntry`
+writes confidence `1.0` (section 26: an admin stating a fact is a confirmed
+fact, not an inferred guess) with a new `ADMIN_ENTRY` evidence source type
+(migration `0009`) whose `sourceId` is the entering admin's own Discord
+user id — traceable exactly like every other memory (section 25).
+Visibility is the admin's own explicit choice (defaults to `PRIVATE` when
+omitted — section 24's "most restrictive reasonable default"); nothing
+about *how* a memory was created changes *how* it's later allowed to be
+used — retrieval's forbidden-topic filter and the PROTECTED-visibility
+rule (section 10) apply to an admin-entered memory exactly like any other,
+confirmed end-to-end in `tests/integration/addMemoryE2E.test.ts`.
+
+## 2026-09-29 — Mari as a real chat: DM / server split, gateway worker
+
+Requested by the person running the project. Every change has a matching
+revision note in `Full_Development_Plan.md` dated 2026-09-29 (sections 4, 6,
+21, 24, 29, 42, 43, 44, 63) — the plan was edited first, code second.
+
+**What changed**
+
+- **Two free-form chats, one lifecycle.** `DIRECT_CHAT` (a DM, private) and
+  new `SERVER_CHAT` (public). One builder (`buildChatContext`) serves both;
+  they differ in who can read the answer, which changes only which memories
+  are eligible, which protected topics apply (a public reply uses the
+  *union* of every player's), and a few rule lines.
+- **`/mari` answers publicly in the channel it was used in.** `/mari` is
+  deferred *publicly* (`shouldDeferPublicly` in `handleDiscordInteraction.ts`,
+  decided from the raw payload — a deferral's visibility can't be changed
+  later). Errors meant only for the caller stay ephemeral: the adapter swaps
+  the public placeholder for a private followup. `/mari private:true` is the
+  old DM behaviour, kept as the fallback that needs no gateway worker.
+- **Gateway worker** (`worker/gateway.ts`, `npm run worker`): receives typed
+  DMs (`ConversationService.routeDmMessage`) and `@Mari` mentions
+  (`runServerChatTurn`) instantly. It is a thin shell over the same services
+  and database; it holds no state and is optional. See "Gateway worker" below.
+- **Memory is silent, on any turn.** The model returns
+  `memory_candidates` (0–3) every turn; the backend validates, de-duplicates
+  (`isSameFact`, evidence bumped instead of a second row) and saves.
+  No "I'll remember that", no Forget button — in DMs, server chats, and
+  CONSOLE's wrap-up save alike.
+- **Where a memory came from decides its visibility:** DM → `PRIVATE`,
+  server → `TEAM`, `/add-memory` default → `PUBLIC` (was `PRIVATE`).
+  A server chat therefore can never see a DM-learned fact; a DM chat sees
+  everything not `PROTECTED`.
+- **Forget by asking.** Only when the message matches `looksLikeForgetRequest`
+  does the prompt list the audience-visible memories with ids; the model
+  returns `forget_memory_ids`; the backend keeps only ids that were shown,
+  then `deleteManyForPlayer` re-checks ownership in SQL. Two independent
+  layers, both tested (the second by its own test — a mutation run showed the
+  end-to-end test alone did not exercise it).
+- **Lifecycle.** Free-form chats close after **5 h idle** (checked on the next
+  message) or at a **40-message cap** (`MAX_CHAT_PLAYER_TURNS`). The model
+  cannot end them (`should_follow_up` is gone from this contract). A model
+  failure mid-chat keeps the chat open ("say that again"), unlike CONSOLE.
+  The next message opens a new chat whose prompt has the memory table only —
+  never the old transcript (plan section 29). Within a chat only the newest
+  24 transcript entries are sent.
+- **Server chat also knows the database:** roster, next match + attendance,
+  last result + events, and up to 6 teammates' `TEAM`/`PUBLIC` memories
+  (`teamFactsService.ts`; design principle #9 — facts from the DB, never the
+  model). A DM chat gets the roster/matches but not teammates' memories.
+- **Retrieval for chats:** window 4 → 10 memories, plus a crude keyword-overlap
+  term against the player's latest message (plan section 33's
+  `semantic_similarity` without embeddings — design principle #11).
+- **Poller de-duplication:** with both a worker and the cron poller running,
+  the poller skips any message whose `message:<id>` is already stored
+  (`listStoredSourceRefs`) so nothing is answered twice.
+- **`/mari` roster check fixed:** it previously only checked that a player row
+  existed, so a soft-removed player got a confusing error. It now requires
+  `active` (server chat, `@Mari` and DMs alike).
+
+**Migration `0010_add_server_chat.sql`** — adds the `SERVER_CHAT` enum value and
+replaces the one-open-DIRECT_CHAT index with
+`ai_conversations_one_open_chat_idx (guild_id, player_id, mode)`, so a DM chat
+and a server chat can be open at once. Idempotent. Run `npm run db:migrate`,
+then **`npm run deploy-commands`** (the `/mari` definition changed).
+
+### Gateway worker (Wispbyte, or anything that runs Node)
+
+1. Upload the repo (or connect it) and set the start command to `npm run worker`
+   (`tsx worker/gateway.ts`; `tsx` is now a runtime dependency). Node 24 per
+   `package.json` `engines`; if the host is older, check that it still runs.
+2. Set the same env vars as the Vercel deployment — `DISCORD_BOT_TOKEN`,
+   `DISCORD_CLIENT_ID`, `DISCORD_GUILD_ID`, `DISCORD_PUBLIC_KEY`, `DATABASE_URL`
+   (Neon *pooled* string), `LLM_*` — plus **`GATEWAY_WORKER=true`**. If the host
+   wants an HTTP port, the worker listens on `$PORT` with a health response.
+3. Keep the Discord Interactions Endpoint URL pointing at Vercel. Interactions
+   never reach the worker, so nothing is handled twice.
+4. Message Content is *not* a privileged intent here: Discord includes message
+   content for DMs and for messages that mention the bot. **Verify on first
+   run** (DM the bot, then `@Mari hi` in the server). If mentions arrive empty,
+   enable the *Message Content Intent* in the Developer Portal.
+5. If the worker is down nothing breaks: slash commands, buttons, reminders,
+   `/mari` (public, or `private:true`), the Reply button and the cron poller keep
+   working — only typed DMs / `@Mari` lose their instant path.
+6. Security: the worker holds the bot token and `DATABASE_URL` on a third-party
+   host. Prefer a dedicated Neon role; rotate the token if you ever leave.
+
+**Not verified from this sandbox** (no route to Discord): discord.js delivering
+DM `messageCreate` events with `Partials.Channel` on the target host; the
+content-for-mentions behaviour above; that the host keeps a Node process alive
+24/7 on its free tier; the typing indicator refresh. Everything else was run:
+Postgres 16 locally, migrations applied, and `tests/integration/chatE2E.test.ts`
+drives the exact functions the worker calls (`routeDmMessage` +
+`deliverConversationReply`, `runServerChatTurn`).
+
+**Behaviour you might trip over**
+
+- A DM to the bot with no open chat *and* no worker running does nothing; use
+  `/mari private:true` to open one.
+- In a server chat the player's message is visible as the slash command / the
+  mention itself; there is no Reply button there (nothing to echo).
+- Forgetting deletes the memory and its evidence; the raw `ai_messages` rows
+  stay (never fed back after a chat closes). Purging those too is a small
+  follow-up if wanted.
+- The public "forget" reply repeats what was dropped, which is fine because a
+  server chat can only forget things that were already public.
+
+**Tests:** 398 unit, 173 integration (all run against real Postgres, all
+passing). New: `tests/unit/chatFeatures.test.ts` (parser, prompts, retrieval,
+gating, deferral) and `tests/integration/chatE2E.test.ts` (21 tests: separation
+both ways, silent save, dedupe, forget + ownership, 5 h rollover, cap, failure
+handling, worker/poller idempotency). Five old tests that asserted the removed
+Forget-button flow / DM-only `/mari` / `PRIVATE` default were rewritten to the
+new behaviour rather than deleted. Mutation checks: making server-chat saves
+`PRIVATE`, letting a public audience read `PRIVATE`, and dropping the SQL
+ownership check each made tests fail.
 
 ## A dependency vulnerability found and fixed (Phase 2)
 

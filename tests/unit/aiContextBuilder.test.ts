@@ -20,7 +20,7 @@ describe("roastBandFor (plan section 9 scale)", () => {
 
 describe("buildAIContext", () => {
   it("includes profile, match facts, response and forbidden topics as data", () => {
-    const ctx = buildAIContext({ player: makePlayer(), mode: "CELEBRATE", match: makeMatch() });
+    const ctx = buildAIContext({ player: makePlayer(), mode: "CELEBRATE", match: makeMatch(), includeValorant: true });
     expect(ctx.user).toContain("Name: Ahmed");
     expect(ctx.user).toContain("Role: DUELIST");
     expect(ctx.user).toContain("Agents: Jett, Raze");

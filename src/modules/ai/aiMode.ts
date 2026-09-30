@@ -17,7 +17,21 @@ export type AiMode = "CELEBRATE" | "ROAST" | "CONSOLE";
  * never going to be called with this mode anyway; widening its type too
  * would just force dead Record entries into it.
  */
-export type ConversationMode = AiMode | "DIRECT_CHAT";
+export type ConversationMode = AiMode | "DIRECT_CHAT" | "SERVER_CHAT";
+
+/**
+ * The two free-form chats with Mari (plan section 63, revised 2026-09-29):
+ * DIRECT_CHAT in a DM (private) and SERVER_CHAT in the server (public).
+ * They share one lifecycle — no match, closed by idleness or a length cap
+ * rather than by the model deciding it is "done", memories saved silently
+ * on any turn, "forget" by asking — so code that cares about that
+ * lifecycle asks this instead of comparing against both names.
+ */
+export type ChatMode = "DIRECT_CHAT" | "SERVER_CHAT";
+
+export function isChatMode(mode: string): mode is ChatMode {
+  return mode === "DIRECT_CHAT" || mode === "SERVER_CHAT";
+}
 
 /**
  * Plan sections 18-20: PLAYING -> CELEBRATE, CANNOT_PLAY -> ROAST,
