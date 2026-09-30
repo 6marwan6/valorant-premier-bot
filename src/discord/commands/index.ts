@@ -13,6 +13,7 @@ import memoriesCommand from "./memories.js";
 import completeMatchCommand from "./completeMatch.js";
 import mariCommand from "./mari.js";
 import addMemoryCommand from "./addMemory.js";
+import mariSayCommand from "./mariSay.js";
 
 /**
  * Central command registry. Every command file exports a default `Command`
@@ -29,6 +30,7 @@ import addMemoryCommand from "./addMemory.js";
  * (section 42: /profile, /ai-settings; section 41: /complete-match, /team).
  * 2026-09-28: /mari (section 63's `/ai`, pulled forward) and /add-memory
  * (manual starter facts, an admin extension of section 21).
+ * 2026-09-30: /mari-say (admin has Mari post a message verbatim in a channel).
  */
 export const commands: Command[] = [
   setupCommand,
@@ -45,6 +47,7 @@ export const commands: Command[] = [
   completeMatchCommand,
   mariCommand,
   addMemoryCommand,
+  mariSayCommand,
 ];
 
 export const commandsByName: Map<string, Command> = new Map(

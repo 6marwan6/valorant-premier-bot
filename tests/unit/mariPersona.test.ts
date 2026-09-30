@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildAIContext } from "../../src/modules/ai/aiContextBuilder.js";
 import { buildDirectChatContext, buildServerChatContext, buildConversationContext } from "../../src/modules/ai/conversationContextBuilder.js";
 import { buildMatchHypeContext } from "../../src/modules/ai/teamAiContextBuilder.js";
-import { chatMentionsValorant, valorantSpotlight, lowestRoastIntensity } from "../../src/modules/ai/mariPersona.js";
+import { MARI_PERSONA, chatMentionsValorant, valorantSpotlight, lowestRoastIntensity } from "../../src/modules/ai/mariPersona.js";
 import { makeMatch, makePlayer } from "./helpers/aiFixtures.js";
 
 const user = (content: string) => ({ role: "USER" as const, content });
@@ -148,5 +148,15 @@ describe("Valorant details only when they fit", () => {
     expect(chatMentionsValorant([user("lol razer keyboard")], ["Raze"])).toBe(false);
     expect(chatMentionsValorant([user("i miss playing raze")], ["Raze"])).toBe(true);
     expect(chatMentionsValorant([])).toBe(false);
+  });
+});
+
+describe("Mari's stretched-out, self-loving voice (2026-09-30)", () => {
+  it("the shared persona block carries the signature style and its guardrails", () => {
+    expect(MARI_PERSONA).toContain("stretch words out");
+    expect(MARI_PERSONA).toContain('"heyyyy"');
+    expect(MARI_PERSONA).toContain("shamelessly in love with yourself");
+    expect(MARI_PERSONA).toContain("never guilt-trip anyone");
+    expect(MARI_PERSONA).toContain("turn the bubbly way down");
   });
 });

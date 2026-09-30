@@ -18,7 +18,8 @@
     "test:integration": "vitest run tests/integration",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "worker": "tsx worker/gateway.ts"
+    "worker": "tsx worker/gateway.ts",
+    "build:worker": "node scripts/buildWorker.mjs"
   },
   "dependencies": {
     "@vercel/functions": "^3.9.9",
@@ -40,6 +41,7 @@
     "@types/pg": "^8.11.10",
     "@vercel/node": "^13.0.2",
     "drizzle-kit": "^0.31.11",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.2",
     "vite": "^8.3.1",
     "vitest": "^5.0.1"

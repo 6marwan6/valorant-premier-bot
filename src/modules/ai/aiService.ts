@@ -8,7 +8,7 @@ import type { MemoryRow } from "../../database/schema/memories.js";
 import { LlmError, type LlmClient } from "../../services/ai/llmClient.js";
 import { buildAIContext, forbiddenTopicsFor } from "./aiContextBuilder.js";
 import { modeForStatus, type AiMode, type ChatMode, type ConversationMode } from "./aiMode.js";
-import { parseAiOutput, parseChatOutput, parseMatchEventExtraction, parseTeamMessage, type ExtractedMatchEvent, type MemoryCandidate } from "./aiOutput.js";
+import { parseAdminRewrite, parseAiOutput, parseChatOutput, parseMatchEventExtraction, parseTeamMessage, type ExtractedMatchEvent, type MemoryCandidate, type ParseTeamMessageResult } from "./aiOutput.js";
 import {
   buildConversationContext,
   buildDirectChatContext,
@@ -19,7 +19,7 @@ import {
   type ConversationTranscriptEntry,
 } from "./conversationContextBuilder.js";
 import type { ServerChatFacts, TeamFactsService } from "./teamFactsService.js";
-import { buildMatchEventExtractionContext, buildMatchHypeContext, buildMatchRecapContext, type TeamAIContext } from "./teamAiContextBuilder.js";
+import { buildAdminRewriteContext, buildMatchEventExtractionContext, buildMatchHypeContext, buildMatchRecapContext, type TeamAIContext } from "./teamAiContextBuilder.js";
 import { listEligible, retrieveMemories } from "../memories/memoryRetrieval.js";
 
 /** Plan section 48's own example fallback wording. */
@@ -358,7 +358,11 @@ export class AiService {
    * without a truthful message, but "truthful" looks different in each
    * spot).
    */
-  private async completeTeamBroadcast(context: TeamAIContext, logBase: Record<string, unknown>): Promise<TeamAiOutcome> {
+  private async completeTeamBroadcast(
+    context: TeamAIContext,
+    logBase: Record<string, unknown>,
+    parse: (raw: string, forbiddenTopics: string[]) => ParseTeamMessageResult = parseTeamMessage,
+  ): Promise<TeamAiOutcome> {
     if (!this.llm) return { source: "fallback" };
 
     const startedAt = Date.now();
@@ -372,7 +376,7 @@ export class AiService {
         outputTokens: result.outputTokens,
       };
 
-      const parsed = parseTeamMessage(result.text, context.forbiddenTopics);
+      const parsed = parse(result.text, context.forbiddenTopics);
       if (!parsed.ok) {
         this.logger.warn({ ...base, ...metrics, success: false, reason: parsed.reason }, "Team AI output rejected");
         return { source: "fallback" };
@@ -404,6 +408,18 @@ export class AiService {
       matchId: params.match.id,
       rosterSize: params.roster.length,
     });
+  }
+
+  /**
+   * /mari-say with `ai_voice` (2026-09-30): rewrites an admin's draft in
+   * Mari's voice. Same never-throws / "fallback means the caller says so"
+   * contract as the other team writes — /mari-say posts NOTHING on a
+   * fallback, because silently posting a different text than the admin
+   * asked for would be worse than an error.
+   */
+  async rewriteAdminMessage(params: { draft: string; roster: PlayerRow[] }): Promise<TeamAiOutcome> {
+    const context = buildAdminRewriteContext(params);
+    return this.completeTeamBroadcast(context, { event: "ai.adminRewrite", draftChars: params.draft.length }, parseAdminRewrite);
   }
 
   /** Plan section 39 "Post-Match Mode". `matchEvents` are the already-persisted, evidence-linked facts (section 40); the WIN/LOSS and match id/kickoff facts themselves stay outside the LLM (section 14's principle, applied here too — see postMatchService.ts). */

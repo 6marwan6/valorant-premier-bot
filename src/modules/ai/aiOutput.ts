@@ -133,6 +133,40 @@ export function parseTeamMessage(raw: string, forbiddenTopics: string[]): ParseT
   return { ok: true, value: { response: neutralizeMentions(result.data.response) } };
 }
 
+// --- 2026-09-30: /mari-say ai_voice (admin draft rewritten in Mari's voice) ---
+//
+// Same {"response": "..."} contract and the same checks as a team broadcast,
+// but with a longer cap: an admin's announcement/intro can legitimately run
+// past a hype line. Kept under 1500 so the ephemeral preview (the text in a
+// code block, plus a short header) still fits in one Discord message.
+
+export const MAX_ADMIN_REWRITE_LENGTH = 1500;
+
+const adminRewriteSchema = z.object({
+  response: z.string().trim().min(1).max(MAX_ADMIN_REWRITE_LENGTH),
+});
+
+export function parseAdminRewrite(raw: string, forbiddenTopics: string[]): ParseTeamMessageResult {
+  const json = extractJsonObject(raw);
+  if (!json) return { ok: false, reason: "invalid_json" };
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(json);
+  } catch {
+    return { ok: false, reason: "invalid_json" };
+  }
+
+  const result = adminRewriteSchema.safeParse(parsedJson);
+  if (!result.success) return { ok: false, reason: "invalid_shape" };
+
+  if (mentionsForbiddenTopic(result.data.response, forbiddenTopics)) {
+    return { ok: false, reason: "protected_topic" };
+  }
+
+  return { ok: true, value: { response: neutralizeMentions(result.data.response) } };
+}
+
 // --- Phase 10: match-event extraction (plan section 40) --------------------
 //
 // Turns /complete-match's freeform admin `notes` into structured,
