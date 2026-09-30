@@ -12,6 +12,7 @@ export function makePlayer(overrides: Partial<PlayerRow> = {}): PlayerRow {
     agents: ["Jett", "Raze"],
     preferredAgent: "Jett",
     roastIntensity: 80,
+    banterStyle: "NEUTRAL",
     personalReferencesEnabled: true,
     runningJokesEnabled: true,
     valorantReferencesEnabled: true,
