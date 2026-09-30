@@ -51,7 +51,6 @@ describe("command registry", () => {
         "complete-match",
         "mari",
         "add-memory",
-        "mari-say",
       ].sort(),
     );
   });

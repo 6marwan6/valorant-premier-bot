@@ -9,7 +9,7 @@ import type { MatchEventRow } from "../../database/schema/matchEvents.js";
 import type { MemoryRow } from "../../database/schema/memories.js";
 import type { PlayerRow } from "../../database/schema/players.js";
 import { forbiddenTopicsFor } from "./aiContextBuilder.js";
-import { isEligible, scoreMemory } from "../memories/memoryRetrieval.js";
+import { isEligible, isRelevantTo, scoreMemory } from "../memories/memoryRetrieval.js";
 
 /**
  * Everything a *server* chat (`/mari`, `@Mari` — plan section 63, revised
@@ -75,8 +75,12 @@ export interface ServerChatFacts {
   rosterForbiddenTopics: string[];
 }
 
-/** A public reply is compact (plan section 57): a handful of teammate facts at most. */
-export const MAX_SHARED_MEMORIES = 6;
+/**
+ * A public reply is compact (plan section 57). A ceiling, not a target
+ * (2026-09-30): teammates' memories are only loaded when the conversation
+ * actually leans toward them — see `loadSharedMemories`.
+ */
+export const MAX_SHARED_MEMORIES = 2;
 const MAX_LAST_MATCH_EVENTS = 6;
 
 export class TeamFactsService {
@@ -170,13 +174,29 @@ export class TeamFactsService {
     if (others.length === 0) return [];
     const nameById = new Map(others.map((p) => [p.id, p.displayName]));
     const shared = await this.memories.listSharedForPlayers(others.map((p) => p.id));
+    // Relevance gate (2026-09-30): a teammate's memory only rides along when
+    // the recent messages connect to it — a shared meaningful word, or the
+    // teammate being named. No message text, or nothing on-topic, means none;
+    // before this the top few were always attached and Mari kept dropping
+    // them into replies that had nothing to do with them.
+    const query = queryText ?? "";
+    const mentioned = new Set(others.filter((p) => nameMentioned(p.displayName, query)).map((p) => p.id));
     return shared
       .filter((m) => isEligible(m, "PUBLIC_CHANNEL", forbiddenTopics))
+      .filter((m) => isRelevantTo(m.content, query) || mentioned.has(m.playerId))
       .map((m) => ({ memory: m, score: scoreMemory(m, "SERVER_CHAT", now, queryText) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, MAX_SHARED_MEMORIES)
       .map(({ memory }) => ({ ownerName: nameById.get(memory.playerId) ?? "a teammate", type: memory.type, content: memory.content }));
   }
+}
+
+/** Whole-word, case-insensitive: "omar" counts for Omar, "ali" does not count inside "reality". Names under 3 characters are ignored (too many accidental hits). */
+function nameMentioned(displayName: string, text: string): boolean {
+  const name = displayName.trim().toLowerCase();
+  if (name.length < 3 || text === "") return false;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, "u").test(text.toLowerCase());
 }
 
 function toRosterEntry(player: PlayerRow): RosterEntry {

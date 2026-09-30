@@ -139,6 +139,7 @@ describeIfDb("Phase 9 — retrieval (integration)", () => {
     const d = fakeDiscord();
     const { llm, prompts } = fakeLlm(() => json("LET'S GOOO"));
     const ctx = ctxWith(d, llm);
+    ctx.services.ai.memorySpotlightOneIn = 1; // every reaction gets the memory block, so "reached the prompt" is deterministic
     const match = await openMatch(ctx);
     const player = await ctx.repositories.players.getByDiscordUserId(guildId, "player-a");
 
@@ -173,6 +174,7 @@ describeIfDb("Phase 9 — retrieval (integration)", () => {
     const d = fakeDiscord();
     const { llm } = fakeLlm(() => json("Nice."));
     const ctx = ctxWith(d, llm);
+    ctx.services.ai.memorySpotlightOneIn = 1;
     const match = await openMatch(ctx);
     const player = await ctx.repositories.players.getByDiscordUserId(guildId, "player-a");
 
@@ -191,7 +193,7 @@ describeIfDb("Phase 9 — retrieval (integration)", () => {
     expect(after!.lastUsedAt).not.toBeNull();
   });
 
-  it("a CONSOLE conversation (a real private DM) can use the player's own PRIVATE memories", async () => {
+  it("a CONSOLE conversation (a real private DM) can use the player's own PRIVATE memories — once what they say connects to one, not before", async () => {
     const d = fakeDiscord();
     const { llm, prompts } = fakeLlm(({ system }) => (system.includes("TURN: OPENING") ? json("What happened?", true) : json("Noted.")));
     const ctx = ctxWith(d, llm);
@@ -208,6 +210,17 @@ describeIfDb("Phase 9 — retrieval (integration)", () => {
 
     await dispatchButton(fakeButton(`attendance:${match.id}:WANTS_TO_BUT_CANNOT`, "player-a", guildId), ctx);
 
+    // The opening has nothing from the player to connect a memory to (2026-09-30 relevance gate).
+    expect(prompts.at(-1)!.user).not.toContain("A private preference, fine to surface in Ahmed's own DM.");
+
+    const conversation = await ctx.repositories.aiConversations.getOpenForPlayerMatch(player!.id, match.id);
+    expect(conversation).toBeDefined();
+    await ctx.services.conversations.handlePlayerReply({
+      conversationId: conversation!.id,
+      discordUserId: "player-a",
+      text: "what is my private preference again?",
+      sourceRef: `p9-console-reply-${match.id}`,
+    });
     expect(prompts.at(-1)!.user).toContain("A private preference, fine to surface in Ahmed's own DM.");
   });
 });

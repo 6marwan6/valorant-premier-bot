@@ -122,7 +122,7 @@ describe("AiService — Phase 9 retrieval wiring", () => {
     const { repo, listByPlayer } = fakeMemoryRepo(memories);
     const llm = fakeLlm(async () => ({ text: json("ok"), model: "m", inputTokens: 1, outputTokens: 1 }));
     const logger = fakeLogger();
-    await new AiService(llm, logger as unknown as Logger, repo).respondToAttendance(params);
+    await new AiService(llm, logger as unknown as Logger, repo).respondToAttendance({ ...params, includeMemories: true });
 
     expect(listByPlayer).toHaveBeenCalledWith(params.player.id);
     const sentUser = llm.complete.mock.calls[0]![0].user;
@@ -138,7 +138,7 @@ describe("AiService — Phase 9 retrieval wiring", () => {
     const excluded = makeMemory({ visibility: "PRIVATE", content: "Excluded — PRIVATE, public audience." });
     const { repo, touchLastUsed } = fakeMemoryRepo([kept, excluded]);
     const llm = fakeLlm(async () => ({ text: json("ok"), model: "m", inputTokens: 1, outputTokens: 1 }));
-    await new AiService(llm, fakeLogger() as unknown as Logger, repo).respondToAttendance(params);
+    await new AiService(llm, fakeLogger() as unknown as Logger, repo).respondToAttendance({ ...params, includeMemories: true });
 
     expect(touchLastUsed).toHaveBeenCalledWith([kept.id]);
   });
@@ -146,7 +146,7 @@ describe("AiService — Phase 9 retrieval wiring", () => {
   it("never bumps last_used_at when nothing was eligible", async () => {
     const { repo, touchLastUsed } = fakeMemoryRepo([makeMemory({ visibility: "PRIVATE" })]); // PRIVATE, but this is a public CELEBRATE
     const llm = fakeLlm(async () => ({ text: json("ok"), model: "m", inputTokens: 1, outputTokens: 1 }));
-    await new AiService(llm, fakeLogger() as unknown as Logger, repo).respondToAttendance(params);
+    await new AiService(llm, fakeLogger() as unknown as Logger, repo).respondToAttendance({ ...params, includeMemories: true });
     expect(touchLastUsed).not.toHaveBeenCalled();
   });
 
@@ -156,7 +156,7 @@ describe("AiService — Phase 9 retrieval wiring", () => {
     (repo.touchLastUsed as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("db down"));
     const llm = fakeLlm(async () => ({ text: json("ok"), model: "m", inputTokens: 1, outputTokens: 1 }));
     const logger = fakeLogger();
-    const outcome = await new AiService(llm, logger as unknown as Logger, repo).respondToAttendance(params);
+    const outcome = await new AiService(llm, logger as unknown as Logger, repo).respondToAttendance({ ...params, includeMemories: true });
     expect(outcome.source).toBe("ai"); // the reply itself still succeeded
     await vi.waitFor(() => expect(logger.warn).toHaveBeenCalled());
   });
@@ -175,7 +175,7 @@ describe("AiService — Phase 9 retrieval wiring", () => {
       player: params.player,
       match: params.match,
       conversationId: 1,
-      transcript: [],
+      transcript: [{ role: "USER", content: "tell me a private fact" }],
     });
     expect(llm.complete.mock.calls[0]![0].user).toContain("A private fact, fine in a DM.");
   });
@@ -190,7 +190,7 @@ describe("AiService — Phase 9 retrieval wiring", () => {
       player: params.player,
       match: null,
       conversationId: 1,
-      transcript: [{ role: "USER", content: "yo mari" }],
+      transcript: [{ role: "USER", content: "why is my ping so bad" }],
     });
 
     // Free-form chats (2026-09-29): the model never decides the chat is over, and candidates/forget ids are lists.
@@ -201,6 +201,32 @@ describe("AiService — Phase 9 retrieval wiring", () => {
     // DIRECT_CHAT has no ROAST/CELEBRATE/CONSOLE specialty (memoryRetrieval.ts), so a
     // PRIVATE memory is still retrievable here — it's a real 1:1 DM, same as CONSOLE.
     expect(sentUser).toContain("Blames ping a lot.");
+  });
+
+  it("relevance gate (2026-09-30): a greeting connects to nothing, so no memory reaches the prompt and none is touched", async () => {
+    const memories = [makeMemory({ type: "RUNNING_JOKE", visibility: "PRIVATE", content: "Blames ping a lot." })];
+    const { repo, touchLastUsed } = fakeMemoryRepo(memories);
+    const llm = fakeLlm(async () => ({ text: json("sup"), model: "m", inputTokens: 1, outputTokens: 1 }));
+    const logger = fakeLogger();
+    await new AiService(llm, logger as unknown as Logger, repo).respondInConversation({
+      player: params.player,
+      match: null,
+      conversationId: 1,
+      transcript: [{ role: "USER", content: "yo mari" }],
+    });
+    const sentUser = llm.complete.mock.calls[0]![0].user;
+    expect(sentUser).not.toContain("Blames ping a lot.");
+    expect(sentUser).not.toContain("RELEVANT MEMORIES");
+    expect(touchLastUsed).not.toHaveBeenCalled();
+    expect(logger.info.mock.calls[0]![0]).toMatchObject({ memoryCount: 0 });
+  });
+
+  it("button reactions skip memory retrieval entirely when the spotlight says so (includeMemories: false)", async () => {
+    const { repo, listByPlayer } = fakeMemoryRepo([makeMemory({ type: "RUNNING_JOKE", visibility: "PUBLIC", content: "Kept." })]);
+    const llm = fakeLlm(async () => ({ text: json("ok"), model: "m", inputTokens: 1, outputTokens: 1 }));
+    await new AiService(llm, fakeLogger() as unknown as Logger, repo).respondToAttendance({ ...params, includeMemories: false });
+    expect(listByPlayer).not.toHaveBeenCalled();
+    expect(llm.complete.mock.calls[0]![0].user).not.toContain("RELEVANT MEMORIES");
   });
 
   it("respondInConversation falls back the same way for DIRECT_CHAT as for CONSOLE when the LLM fails", async () => {

@@ -213,7 +213,7 @@ describeIfDb("DM chat / server chat (2026-09-29)", () => {
     await ctx.repositories.memories.create({ playerId: omar.id, type: "HABIT", content: "OMAR-PRIVATE-SECRET", confidence: 1, visibility: "PRIVATE", aiUsable: true, evidence: [] });
     await ctx.repositories.memories.create({ playerId: omar.id, type: "HABIT", content: "OMAR-PROTECTED-FACT", confidence: 1, visibility: "PROTECTED", aiUsable: true, evidence: [] });
 
-    await dispatchCommand(mariInteraction(guildId, "u-ahmed", "what do you know about the team?").interaction, ctx);
+    await dispatchCommand(mariInteraction(guildId, "u-ahmed", "what is the admin lore about ahmed, the server team fact and the omar team joke?").interaction, ctx);
     const prompt = lastUser();
 
     expect(prompt).toContain("ADMIN-LORE-AHMED");
@@ -321,7 +321,7 @@ describeIfDb("DM chat / server chat (2026-09-29)", () => {
     await repo.create({ playerId: ahmed.id, type: "HABIT", content: "ADMIN-FENCED-PROTECTED", confidence: 1, visibility: "PROTECTED", aiUsable: true, evidence: [] });
     await repo.create({ playerId: omar.id, type: "HABIT", content: "OMARS-TEAM-FACT", confidence: 1, visibility: "TEAM", aiUsable: true, evidence: [] });
 
-    await workerDm(ctx, ahmed, "hey", "5201");
+    await workerDm(ctx, ahmed, "tell me the server one, the admin public one and the dm private one", "5201");
     const prompt = lastUser();
     for (const fact of ["FROM-SERVER-TEAM", "FROM-ADMIN-PUBLIC", "FROM-DM-PRIVATE"]) expect(prompt).toContain(fact);
     expect(prompt).not.toContain("ADMIN-FENCED-PROTECTED");
@@ -350,7 +350,7 @@ describeIfDb("DM chat / server chat (2026-09-29)", () => {
 
     // Just over 5 hours: the old chat is closed for idleness and a fresh one starts.
     await ageChat(first!.id, CHAT_IDLE_TIMEOUT_MS + 60_000);
-    await workerDm(ctx, ahmed, "back after a long break", "5303");
+    await workerDm(ctx, ahmed, "back after a long break, still streaming on sundays?", "5303");
     const chats = await chatRows();
     expect(chats).toHaveLength(2);
     expect(chats[0]!.endReason).toBe("IDLE_TIMEOUT");

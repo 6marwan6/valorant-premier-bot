@@ -49,16 +49,10 @@ export class DiscordRestClient {
     private readonly applicationId: string,
   ) {}
 
-  /** Posts a brand-new message to a channel — used by /post-match, /mari-say and the reminder cron job (plain-text roster announcement, or an embed nudge — reminderMessages.ts). */
+  /** Posts a brand-new message to a channel — used by /post-match and the reminder cron job (plain-text roster announcement, or an embed nudge — reminderMessages.ts). */
   async sendChannelMessage(channelId: string, payload: ReplyPayload): Promise<{ id: string }> {
     return (await this.rest.post(Routes.channelMessages(channelId), {
-      body: {
-        content: payload.content,
-        embeds: serializeEmbeds(payload.embeds),
-        components: serializeComponents(payload.components),
-        // Only when asked (admin-typed text in /mari-say): otherwise Discord's default applies, as before.
-        allowed_mentions: payload.suppressMentions ? { parse: [] } : undefined,
-      },
+      body: { content: payload.content, embeds: serializeEmbeds(payload.embeds), components: serializeComponents(payload.components) },
     })) as { id: string };
   }
 

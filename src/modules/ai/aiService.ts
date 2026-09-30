@@ -21,6 +21,7 @@ import {
 import type { ServerChatFacts, TeamFactsService } from "./teamFactsService.js";
 import { buildAdminRewriteContext, buildMatchEventExtractionContext, buildMatchHypeContext, buildMatchRecapContext, type TeamAIContext } from "./teamAiContextBuilder.js";
 import { listEligible, retrieveMemories } from "../memories/memoryRetrieval.js";
+import { memorySpotlight, recentPlayerText } from "./mariPersona.js";
 
 /** Plan section 48's own example fallback wording. */
 export const AI_FALLBACK_MESSAGE = "Your response has been recorded 👍";
@@ -97,6 +98,13 @@ export class AiService {
   }
 
   /**
+   * Test seam: memories reach a CELEBRATE/ROAST reaction on about one click in
+   * this many (mariPersona.memorySpotlight). Integration tests set it to 1 to
+   * make "the memory reached the prompt" deterministic.
+   */
+  memorySpotlightOneIn = 3;
+
+  /**
    * Phase 9 (plan sections 30/33): fetches a player's memories, runs them
    * through retrieveMemories, and best-effort bumps `last_used_at` on
    * whatever was actually selected. Returns `[]` with no repository
@@ -135,6 +143,8 @@ export class AiService {
     player: PlayerRow;
     match: MatchRow;
     status: AttendanceRow["status"];
+    /** Test/override hook. By default memories are only put in front of the model on about one reaction in three (mariPersona.memorySpotlight): a button click has no message to judge relevance against. */
+    includeMemories?: boolean;
   }): Promise<AiOutcome> {
     const fallback: AiOutcome = { text: AI_FALLBACK_MESSAGE, source: "fallback" };
     if (!this.llm) return fallback;
@@ -146,7 +156,8 @@ export class AiService {
     // for the *output* validation below; forbiddenTopicsFor is the one
     // function both sides call so they can never drift apart.
     const forbiddenTopics = forbiddenTopicsFor(params.player);
-    const memories = await this.retrieveFor(params.player, mode, forbiddenTopics);
+    const includeMemories = params.includeMemories ?? memorySpotlight(`${params.player.id}:${params.match.id}:${mode}`, this.memorySpotlightOneIn);
+    const memories = includeMemories ? await this.retrieveFor(params.player, mode, forbiddenTopics) : [];
     const context = buildAIContext({ player: params.player, mode, match: params.match, memories });
     const startedAt = Date.now();
     // Plan sections 51/58: metadata only — never prompt or response content.
@@ -220,8 +231,11 @@ export class AiService {
     const mode: ConversationMode = params.match ? "CONSOLE" : (params.chatMode ?? "DIRECT_CHAT");
     const isChat = mode === "DIRECT_CHAT" || mode === "SERVER_CHAT";
 
-    // What the latest player message says — retrieval's keyword term and the forget-request gate both read it.
+    // What the latest player message says — the forget-request gate reads it.
     const latestPlayerText = [...params.transcript].reverse().find((entry) => entry.role === "USER")?.content ?? "";
+    // What "the context" is for the relevance gates (memories, teammates' facts): the last couple of player messages,
+    // so a short follow-up still leans on what it follows. Empty (a CONSOLE opening) means nothing qualifies.
+    const contextText = recentPlayerText(params.transcript);
 
     // Database facts for the free-form chats (roster, matches, and — public
     // chat only — teammates' shared memories). Loaded BEFORE retrieval
@@ -230,7 +244,7 @@ export class AiService {
     let facts: ServerChatFacts | null = null;
     if (isChat && this.teamFacts) {
       try {
-        facts = await this.teamFacts.load({ guildId: params.player.guildId, chatterPlayerId: params.player.id, queryText: latestPlayerText });
+        facts = await this.teamFacts.load({ guildId: params.player.guildId, chatterPlayerId: params.player.id, queryText: contextText });
       } catch (err) {
         // Facts are enrichment, never a reason to fail a chat (plan section 48's spirit).
         this.logger.warn({ event: "ai.chat.factsFailed", err: err instanceof Error ? err.message : String(err) }, "Could not load team facts; chatting without them");
@@ -245,7 +259,7 @@ export class AiService {
       params.player,
       mode,
       forbiddenTopics,
-      isChat ? latestPlayerText : undefined,
+      contextText,
     );
 
     const wantsForget = isChat && looksLikeForgetRequest(latestPlayerText);
@@ -376,7 +390,7 @@ export class AiService {
         outputTokens: result.outputTokens,
       };
 
-      const parsed = parse(result.text, context.forbiddenTopics);
+      const parsed = parseTeamMessage(result.text, context.forbiddenTopics);
       if (!parsed.ok) {
         this.logger.warn({ ...base, ...metrics, success: false, reason: parsed.reason }, "Team AI output rejected");
         return { source: "fallback" };

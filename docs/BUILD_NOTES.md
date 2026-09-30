@@ -939,6 +939,58 @@ new behaviour rather than deleted. Mutation checks: making server-chat saves
 `PRIVATE`, letting a public audience read `PRIVATE`, and dropping the SQL
 ownership check each made tests fail.
 
+## 2026-09-30 — Facts are used when the conversation leans toward them
+
+**Problem.** Retrieval always filled its quota (10 memories per chat turn, 4 per
+reaction, 6 teammate memories in the server chat) and the prompt block was
+labelled "RELEVANT MEMORIES" whether or not they were. The model treats
+whatever is in front of it as something to use, so Mari kept forcing facts
+into replies that had nothing to do with them. The same happened with the
+match blocks (who's playing, last result), which were attached to every chat.
+
+**Can prompt wording alone fix it?** Only partly, and not reliably: the same
+lesson was already learned with role/agent recitation (see `mariPersona.ts`,
+"prompt wording alone did not stop that"). So the fix is mostly *not putting
+irrelevant facts in the prompt*, plus rule text that makes "use none" the
+default.
+
+**What changed (plan sections 30, 32, 33, 57; design principle #11).**
+- `memoryRetrieval.ts`: relevance gate. When retrieval gets the player's
+  recent text, a memory must share a meaningful word with it
+  (`MIN_QUERY_RELEVANCE`) or it is dropped before ranking, however high its
+  importance/recency. Greetings and filler therefore retrieve nothing. Light
+  stemming (exam/exams) and a list of words that appear in nearly every
+  Valorant-team memory (game, play, valorant, team...) so they don't count as
+  a match. Ceilings lowered: 3 per chat turn (was 10), 2 per reaction (was 4).
+  Privacy filtering still runs first.
+- "Context" = the player's last two messages (`recentPlayerText`), so a short
+  follow-up ("and ali?") still leans on what it follows. CONSOLE reply turns
+  are gated the same way; the CONSOLE *opening* has no player text, so it
+  carries no memories.
+- CELEBRATE/ROAST (button reactions) have no text to judge against, so the
+  memory block is shown on about one reaction in three
+  (`memorySpotlight`, same idea as `valorantSpotlight`).
+- `teamFactsService.ts`: a teammate's shared memory rides along only when it
+  connects to the recent messages or the teammate is named; ceiling 2 (was 6).
+- `conversationContextBuilder.ts`: the next-match block only when the recent
+  messages are about the match/schedule, the last-match block only when they
+  are about how it went (`chatMentionsMatch` / `chatMentionsMatchHistory`).
+  Roster names stay (Mari needs them to talk about a teammate) and the TEAM
+  block is labelled reference-only.
+- Prompt rules (single-shot, CONSOLE, DM/server chat): using no memory is the
+  normal case; at most one; skip it if it needs a stretch; never repeat one
+  already brought up in the conversation.
+
+**Not built, on purpose:** embeddings. The relevance check is one function
+(`keywordOverlap` behind `isRelevantTo`); if keyword matching turns out to
+miss too many paraphrases in real use, that is the single seam to swap for
+embedding similarity (plan section 32) without touching anything else.
+
+**Tests.** New `tests/unit/relevanceGate.test.ts`; existing tests that
+attached memories to unrelated messages were updated to send on-topic ones.
+`AiService.memorySpotlightOneIn` is the test seam integration tests use to
+make the reaction spotlight deterministic.
+
 ## A dependency vulnerability found and fixed (Phase 2)
 
 `npm audit` flagged a **high-severity SQL-injection advisory in

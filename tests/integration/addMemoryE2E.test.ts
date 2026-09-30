@@ -192,7 +192,7 @@ describeIfDb("/add-memory — manual starter facts about players (2026-09-28)", 
     const player = (await aiCtx.repositories.players.getByDiscordUserId(guildId, "player-a"))!;
     const match = await aiCtx.repositories.matches.create({ guildId, scheduledAt: new Date(Date.now() + 86_400_000), timezone: "Europe/Berlin" } as never);
 
-    await aiCtx.services.ai.respondToAttendance({ player, match, status: "PLAYING" });
+    await aiCtx.services.ai.respondToAttendance({ player, match, status: "PLAYING", includeMemories: true }); // the spotlight would otherwise decide
 
     const sentPrompt = (llm.complete.mock.calls[0]![0] as { user: string }).user;
     expect(sentPrompt).not.toContain("SECRET-PROTECTED-FACT-should-never-leak");

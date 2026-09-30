@@ -54,7 +54,7 @@ export const SPICE_BAND_GUIDANCE: Record<RoastBand, string> = {
   NORMAL: "2 — cheeky. Light flirting, teasing double meanings, a 😏 or 😘 now and then.",
   STRONG: "3 — openly flirty and suggestive. Innuendo, thirsty jokes, sexy emoji (😏🥵🍑) used as a joke.",
   MAXIMUM:
-    "4 (max) — shameless and raunchy. Dirty jokes, blunt sexual innuendo, over-the-top thirsty comebacks.",
+    "4 (max) — shameless and raunchy. Dirty jokes, blunt sexual innuendo, over-the-top thirsty comebacks. Still comedy: never graphic, no erotica, no roleplay.",
 };
 
 export const BANTER_STYLES = ["NEUTRAL", "FLIRTY", "ANNOYING"] as const;
@@ -95,6 +95,42 @@ function hashSeed(seed: string): number {
  */
 export function valorantSpotlight(seed: string, oneIn = 4): boolean {
   return hashSeed(seed) % oneIn === 0;
+}
+
+/**
+ * Button reactions (CELEBRATE / ROAST) have no message text to match a memory
+ * against, so "is it relevant?" cannot be asked. Same trick as the Valorant
+ * spotlight: the memory block is only put in front of the model on about one
+ * reaction in three, so a reaction is usually just a reaction. Deterministic
+ * per (player, match, mode) — a double-click gets the same answer.
+ */
+export function memorySpotlight(seed: string, oneIn = 3): boolean {
+  return hashSeed(`memory:${seed}`) % oneIn === 0;
+}
+
+/** The player's last couple of messages, joined: what "the context" means for the relevance gates (a one-word follow-up like "why?" still leans on the message before it). */
+export function recentPlayerText(transcript: Array<{ role: "USER" | "ASSISTANT"; content: string }>, messages = 2): string {
+  return transcript
+    .filter((entry) => entry.role === "USER")
+    .slice(-messages)
+    .map((entry) => entry.content)
+    .join(" ");
+}
+
+const MATCH_WORDS =
+  /\b(premier|kick-?off|tonight|tomorrow|lineup|line-up|roster|attendance|(next|upcoming|this|the) (match|game)|who'?s (playing|in|coming|available|on)|who is (playing|in|coming|available)|are we (playing|on)|do we have (a )?(match|game)|schedule|scheduled|what time|when('?s| is| do| are) (the|our|we)|can'?t make|cannot make|confirmed|available)\b/i;
+
+const MATCH_HISTORY_WORDS =
+  /\b(last (match|game)|previous (match|game)|yesterday'?s|results?|we (won|lost)|did we (win|lose)|win|won|loss|lost|lose|gg|clutch(ed)?|mvp|top[- ]?frag(ged)?|recap|how did (it|we|that|the (match|game)) go|how'?d (it|we|that|the (match|game)) go)\b/i;
+
+/** Chats: the next-match block (kickoff, who's playing) is only shown when the recent player messages are about the match or the schedule. */
+export function chatMentionsMatch(transcript: Array<{ role: "USER" | "ASSISTANT"; content: string }>): boolean {
+  return MATCH_WORDS.test(recentPlayerText(transcript));
+}
+
+/** Chats: the last-match block (result, events) is only shown when the recent player messages are about how the last match went. */
+export function chatMentionsMatchHistory(transcript: Array<{ role: "USER" | "ASSISTANT"; content: string }>): boolean {
+  return MATCH_HISTORY_WORDS.test(recentPlayerText(transcript));
 }
 
 const VALORANT_WORDS =

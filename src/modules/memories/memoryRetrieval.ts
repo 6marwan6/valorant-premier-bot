@@ -27,15 +27,31 @@ import { mentionsForbiddenTopic } from "../ai/aiOutput.js";
  */
 
 /** Plan sections 32/57: "Only the highest-value memories should reach the LLM" — keep prompts compact. */
-export const MAX_RETRIEVED_MEMORIES = 4;
+export const MAX_RETRIEVED_MEMORIES = 2;
 
 /**
- * A real chat (2026-09-29) has to feel like it knows the person, and a
- * 6-7 person team's per-player memory count is small — so the free-form
- * chats get a wider window than a one-shot reaction does. Still bounded
- * (plan section 57: compact prompts).
+ * Ceiling for a free-form chat turn (2026-09-30). This is a CEILING, not a
+ * target: with the relevance gate below, a turn usually has zero or one
+ * memory that actually connects to what the player just said. It used to
+ * be 10 and always filled, which is exactly what made Mari cram facts into
+ * every reply (plan sections 30/32: "only the highest-value memories should
+ * reach the LLM" — nothing says the list must be full).
  */
-export const MAX_RETRIEVED_CHAT_MEMORIES = 10;
+export const MAX_RETRIEVED_CHAT_MEMORIES = 3;
+
+/**
+ * Relevance gate (2026-09-30). When retrieval is given the player's recent
+ * message text, a memory only qualifies if `keywordOverlap` reaches this
+ * floor — i.e. it shares at least one meaningful word with what was just
+ * said (one shared word out of a 4+-word message = 0.25). A greeting or
+ * "lol" has no meaningful words, so nothing qualifies and the prompt carries
+ * no memories at all. Section 33 is a *hybrid score*; this adds the missing
+ * "is it about this at all?" question in front of it, so the recency /
+ * importance / confidence terms rank only among memories that pass.
+ * The overlap function is the single seam to replace with embedding
+ * similarity later (section 32) — nothing else here would need to change.
+ */
+export const MIN_QUERY_RELEVANCE = 0.25;
 
 export function retrievalLimitFor(mode: ConversationMode): number {
   return mode === "DIRECT_CHAT" || mode === "SERVER_CHAT" ? MAX_RETRIEVED_CHAT_MEMORIES : MAX_RETRIEVED_MEMORIES;
@@ -100,13 +116,25 @@ const STOP_WORDS = new Set([
   "there", "their", "will", "would", "could", "should", "its", "too", "very", "really", "got", "get", "out", "into",
   "did", "does", "tell", "say", "said", "know", "think", "much", "some", "any", "all", "one", "now", "also", "yes", "yeah",
   "okay", "please", "mari", "hey", "hello", "lol", "gonna", "going",
+  // Words that appear in nearly every Valorant-team memory: matching on them says nothing about *this* message.
+  "game", "games", "play", "plays", "played", "playing", "valorant", "match", "matches", "team", "tonight", "today",
+  "player", "always", "every", "sometimes", "often", "frequently",
 ]);
+
+/** Light suffix stripping so "exams"/"exam" and "streaming"/"streams" line up. Not a real stemmer, on purpose. */
+function stem(word: string): string {
+  for (const suffix of ["ing", "ed", "es", "s"]) {
+    if (word.length >= suffix.length + 4 && word.endsWith(suffix)) return word.slice(0, -suffix.length);
+  }
+  return word;
+}
 
 export function tokenize(text: string): string[] {
   return text
     .toLowerCase()
     .split(/[^a-z0-9\u00c0-\uffff]+/)
-    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w));
+    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
+    .map(stem);
 }
 
 export function keywordOverlap(memoryContent: string, queryText: string | undefined): number {
@@ -205,21 +233,35 @@ export function retrieveMemories(params: {
   forbiddenTopics: string[];
   limit?: number;
   now?: Date;
-  /** The player's latest message, for the free-form chats (see `keywordOverlap`). Omitted -> ranking is exactly what it was before. */
+  /**
+   * What the player just said, for anything that has a message to react to
+   * (the chats and CONSOLE replies). When this is a string — even an empty
+   * one — the relevance gate applies: a memory has to actually connect to it
+   * (`MIN_QUERY_RELEVANCE`) or it is left out, however high it would rank.
+   * Left `undefined` (CELEBRATE/ROAST react to a button click, there is no
+   * text), ranking is exactly what it was and the caller decides whether to
+   * retrieve at all.
+   */
   queryText?: string;
 }): MemoryRow[] {
   const audience = audienceForMode(params.mode);
   const now = params.now ?? new Date();
   const limit = params.limit ?? retrievalLimitFor(params.mode);
+  const gated = params.queryText !== undefined;
 
   return params.memories
     .filter((m) => isEligible(m, audience, params.forbiddenTopics))
+    .filter((m) => !gated || isRelevantTo(m.content, params.queryText))
     .map((m) => ({ memory: m, score: scoreMemory(m, params.mode, now, params.queryText) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((x) => x.memory);
 }
 
+/** The relevance gate on its own: does this text connect to what was just said? Also used for teammates' shared memories (teamFactsService.ts). */
+export function isRelevantTo(content: string, queryText: string | undefined): boolean {
+  return keywordOverlap(content, queryText) >= MIN_QUERY_RELEVANCE;
+}
 
 /**
  * Every memory the audience may see at all (no ranking, no limit) — what a

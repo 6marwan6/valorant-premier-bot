@@ -96,10 +96,32 @@ describe("chat context builders", () => {
     expect(ctx.system).toMatch(/PUBLIC server channel/);
     expect(ctx.user).toContain("Playing: Omar");
     expect(ctx.user).toContain("No response yet: Hassan");
-    expect(ctx.user).toContain("Last completed match");
+    // 2026-09-30: "who's playing?" is about the next match, not about how the last one went.
+    expect(ctx.user).not.toContain("Last completed match");
     expect(ctx.user).toContain("Omar: Says he is him.");
     expect(ctx.user).toContain("- Health");
     expect(ctx.system).not.toContain("should_follow_up");
+  });
+
+  it("team fact blocks only appear when the conversation leans toward them (2026-09-30)", () => {
+    const build = (content: string) => buildServerChatContext({ player, transcript: [{ role: "USER", content }], facts, forbiddenTopics: [] }).user;
+    const history = build("how did the last match go?");
+    expect(history).toContain("Last completed match");
+    expect(history).not.toContain("Playing: Omar");
+    const idle = build("this song is so good lol");
+    expect(idle).not.toContain("Next Premier match");
+    expect(idle).not.toContain("Last completed match");
+    expect(idle).toContain("- Omar"); // names stay: Mari needs them to talk about a teammate
+    expect(idle).toContain("reference only");
+  });
+
+  it("a follow-up leans on the message before it (last two player messages count as the context)", () => {
+    const transcript = [
+      { role: "USER" as const, content: "who's playing tonight?" },
+      { role: "ASSISTANT" as const, content: "omar so far" },
+      { role: "USER" as const, content: "and ali?" },
+    ];
+    expect(buildServerChatContext({ player, transcript, facts, forbiddenTopics: [] }).user).toContain("Want to play but can't: Ali");
   });
 
   it("DM chat says it is private and never lists teammates' shared memories", () => {
@@ -225,7 +247,7 @@ describe("AiService.respondInConversation — chat modes (2026-09-29)", () => {
     const llm = llmReturning('{"response":"hi"}');
     await new AiService(llm, noopLogger, repo).respondInConversation({
       player, match: null, chatMode: "SERVER_CHAT", conversationId: 1,
-      transcript: [{ role: "USER", content: "hello" }],
+      transcript: [{ role: "USER", content: "what did I say in the server?" }],
     });
     const sent = (llm.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { user: string };
     expect(sent.user).toContain("Said in the server.");
