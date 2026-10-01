@@ -2,7 +2,7 @@
 
 ## Controlling her voice from `/mari-join`
 
-`/mari-join` (admin only) now takes three optional options next to `channel`, `time` and `date`:
+`/mari-join` (admin only) takes three optional options next to `channel` and `time` (there is no `date` any more: a clock time that already passed today means tomorrow):
 
 | Option | Values | Notes |
 |---|---|---|
@@ -32,34 +32,54 @@ Each answered turn now logs one `voice.turn.timing` line (no message content):
 
 | Field | Meaning |
 |---|---|
-| `silenceMs` | quiet time she waits for before sending the utterance (`VOICE_SILENCE_MS`, now 700, was 900) |
+| `endWaitMs` | quiet time she actually waited after the last audio before sending the utterance: the full `VOICE_SILENCE_MS` (700), or the shorter `VOICE_VAD_END_MS` (450) when the VAD says the tail was not speech |
+| `vad`, `speechMs` | whether the local VAD ran, and how many ms of real speech it found (0 = noise, dropped before STT) |
 | `sttMs` | Groq Whisper transcription |
 | `brainMs` | transcript in, reply text out: the language model plus database work |
 | `firstAudioMs` | reply text in, first sound playing: TTS of the first chunk plus joining the player |
-| `perceivedMs` | what the player actually waits: silence + stt + brain + first audio |
+| `perceivedMs` | what the player actually waits: endWait + stt + brain + first audio |
 
-Changes made for speed, none of which need a new library:
+Changes made for speed:
 
-- Playback starts when the **first** chunk is ready; later chunks follow in order. Before, she waited for
-  every chunk to be synthesized and resampled first.
-- The first chunk is one sentence, so the first TTS request is as short as possible.
-- The silence window is 200 ms shorter, tunable with `VOICE_SILENCE_MS`.
+- Playback starts when the **first** chunk is ready; later chunks follow in order. The first chunk is one sentence.
+- **Local VAD (Silero, `worker/vad.ts`).** Ends a turn after `VOICE_VAD_END_MS` instead of `VOICE_SILENCE_MS` when
+  the last audio was not speech, and drops utterances with no speech in them before they cost an STT call.
+  Honest limits: Discord clients stop sending audio when you stop talking, so the audio rarely contains the
+  trailing silence, and a VAD can't tell a pause between two sentences from the end of a turn. Expect a gain on
+  turns that end in breath/noise and a clear gain in *not answering noise*; read `endWaitMs` in the timing line
+  to see what you actually get. It costs about 140 MB of disk and 100 MB of RAM; `VOICE_VAD=0` turns it off, and
+  if it can't load she just uses the fixed window.
+- **Spoken replies are short.** Her prompt is told the reply will be spoken: one or two short sentences, plain
+  words. That is the biggest `brainMs` lever, because output tokens are the latency.
+- **Optional faster model for voice only:** `VOICE_LLM_MODEL` (same provider as `LLM_MODEL`), and
+  `VOICE_LLM_MAX_TOKENS` if you want a hard cap (leave it unset unless replies get cut off: the reply is JSON, and
+  a cap that is too small breaks it).
 
-## Libraries: what would and would not help
+## Not built (needs a plan decision)
 
-Measure first: run a few turns and read `voice.turn.timing`.
+- **Streaming the model's reply into TTS sentence by sentence** would hide most of `brainMs`, but the plan
+  (sections 10, 35, 55) requires the whole reply to pass validation (protected topics, mention neutralization,
+  memory handling) before it is used, and the reply is a JSON object. Speaking the first sentence before the rest
+  is validated would break that rule. If you want it, the plan needs a revision (for example: validate each
+  sentence as it arrives, drop memory/forget side effects for spoken turns).
+- **Streaming TTS** is a service feature, not a library; the plan names Groq Orpheus, which returns a whole WAV
+  per request.
 
-- `brainMs` dominates: a faster model for voice, shorter spoken replies, or streaming the model's
-  output sentence by sentence into TTS (touches `llmClient` and the structured reply path).
-- `firstAudioMs` dominates: a TTS service that streams audio. That is a service, not a library, and
-  the 2026-10-01 plan revision names Groq Orpheus, so switching needs a plan revision first.
-- `sttMs` is already one hosted request; a local Whisper on CPU would be slower, not faster.
-- Native Opus (`@discordjs/opus` instead of `opusscript`) only saves CPU on 20 ms frames. Not the
-  bottleneck here.
-- A VAD library (e.g. Silero through `onnxruntime-node`) could end utterances smarter than a fixed
-  silence window. It is the one heavy local addition with a plausible gain, and the next step after
-  the numbers above if the 0.7 s wait still feels long.
-- FFmpeg is not needed: no transcoding happens.
+## When she answers, and joining
+
+- Two or more humans in the channel: only when she hears her name. Exactly one human with her: she answers
+  whatever they say (junk transcripts like "you" / "thank you" are dropped). Only roster players are listened to.
+- She joins by herself only for `VOICE_CHANNEL_ID`. **If that variable is empty she joins only through
+  `/mari-join`.** The worker re-checks every ~15 s, so a player already in the channel counts.
+- She posts a text hello when she joins (voice channel chat, else the match channel). If neither is writable the
+  log says `voice.announce.failed` with the reason (usually Send Messages missing in the voice channel's chat).
+
+## Her voice
+
+Defaults: Orpheus voice `hannah`, direction `flirty`, pitch 1.08. These are guesses made without being able to
+listen: try `autumn` or `diana`, other direction words (`playful`, `teasing`, `cheerful`), and pitch 1.05 to 1.15
+live with `/mari-join channel:<her channel> voice:... direction:... pitch:...`, then put the winner in `.env`.
+What she says is unchanged (her persona and each player's spice level); only the delivery is new.
 
 The Groq free-plan self-limits in `worker/voice.ts` (`STT_MAX_PER_MINUTE`, `MAX_TTS_CHUNKS`,
 `MAX_SPOKEN_CHARS`) are unchanged; raise them if you are on a paid Groq tier.

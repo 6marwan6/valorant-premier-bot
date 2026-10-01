@@ -151,6 +151,41 @@ Store:
 > installs ~14 MB). The serverless app never touches voice. Every other
 > "out of scope" item is unchanged.
 
+> **Revision, 2026-10-01 (b) (Marwan, product owner):** four changes to the
+> voice exception above, all inside the gateway worker and all optional:
+>
+> 1. **When she answers.** With **two or more humans** in her voice channel
+>    she still answers only when her name is said. With **exactly one human**
+>    with her she answers whatever that player says, no name needed (there is
+>    nobody else they could be talking to). Only roster players are ever
+>    captured or transcribed, as before. A headcount she can't determine
+>    counts as "several". Without the name, junk transcripts (Whisper's
+>    "you" / "thank you" on silence) are dropped.
+> 2. **A small local model for voice activity detection** (Silero VAD, ~2 MB,
+>    run through the WASM `onnxruntime-web`; no audio leaves the machine for
+>    it, nothing is stored). This narrows the "no local model" sentence above:
+>    speech-to-text and text-to-speech stay hosted (Groq); only this gate is
+>    local. It drops utterances with no real speech before they reach
+>    speech-to-text and ends a turn sooner when the tail was not speech. It is
+>    optional (`VOICE_VAD=0`, or a failed install, falls back to the fixed
+>    silence window; design principle #8). Cost: roughly +140 MB on disk and
+>    +100 MB RAM on the worker.
+> 3. **Delivery.** Mari's default spoken delivery is a young, playful, flirty
+>    gamer girl (Orpheus direction `flirty`, pitch 1.08). This is delivery
+>    only: what she may say is governed exactly as before (roast intensity /
+>    spice level per player, section 9; protected topics, section 10; output
+>    validation, sections 35/55). Spoken replies are asked to be one or two
+>    short sentences, and an optional faster model may be configured for them
+>    (`VOICE_LLM_MODEL`). Every spoken reply still passes the same full-output
+>    validation as a typed one before any of it is spoken, which is why her
+>    reply is **not** streamed to speech sentence by sentence.
+> 4. **Joining.** Besides the voice-state event, the worker re-checks the
+>    default channel (`VOICE_CHANNEL_ID`) every poll tick, so she joins a
+>    player who was already in the channel, retries after a failed join, and
+>    does not rejoin straight after being kicked until the channel empties.
+>    On joining she posts a text hello in the voice channel's chat, or the
+>    match channel if that isn't writable.
+
 Do not build:
 
 - Web dashboard.
@@ -1548,9 +1583,13 @@ Initial commands:
 
 Commands should be permission-controlled.
 
+> **Revision, 2026-10-01 (b):** the `date` option of `/mari-join` is
+> **removed**. `time` stays; a clock time that has already passed today means
+> that time tomorrow (the confirmation shows the exact moment).
+
 > **Revision, 2026-10-01:** `/mari-join` added (admin only) — tells Mari
 > which **voice channel** to join and **when** (`time`, optional, default
-> now; `date`, optional; the same forms `/create-match` accepts, in the team
+> now; ~~`date`, optional~~ (removed, see above); the same forms `/create-match` accepts, in the team
 > timezone). It only writes a request to the database (`voice_join_requests`,
 > one pending at a time — a newer request replaces it); the gateway worker
 > (section 4's 2026-10-01 revision) polls for due requests and joins, so it

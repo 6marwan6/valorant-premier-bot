@@ -9,7 +9,7 @@
  * dist/gateway.js + dist/package.json after `npm run build:worker`.
  */
 import { build } from "esbuild";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 
 mkdirSync("dist", { recursive: true });
 
@@ -27,6 +27,8 @@ await build({
     // Voice (worker/voice.ts): native add-ons / WASM that can't be inlined. They are
     // loaded with dynamic import() at runtime and installed from dist/package.json.
     "@discordjs/voice", "@snazzah/davey", "opusscript",
+    // Optional local voice-activity detection (worker/vad.ts): WASM, loaded lazily, installed from dist/package.json.
+    "onnxruntime-web",
   ],
   // Inlined so src/config/logger.ts skips the pino-pretty transport (a
   // worker thread that can't be bundled). Production logging is plain JSON.
@@ -41,9 +43,14 @@ await build({
 // The host's start script runs `node <MAIN_FILE>` for *.js files. `"type": "module"`
 // makes Node treat gateway.js as ESM (it uses top-level await). No dependencies,
 // so the host's automatic `npm install` finishes instantly.
-// Only the runtime packages that can't be bundled (~14 MB in total). The host runs
-// `npm install` once. Text-to-speech is Groq's hosted Orpheus, so no local model or
-// ONNX runtime is installed.
+// The Silero VAD model sits next to gateway.js (worker/vad.ts looks for ./silero_vad.onnx).
+copyFileSync("worker/models/silero_vad.onnx", "dist/silero_vad.onnx");
+
+// Only the runtime packages that can't be bundled (~14 MB for the required ones). The host runs
+// `npm install` once. Speech-to-text and text-to-speech are Groq's hosted Whisper/Orpheus.
+// `onnxruntime-web` is OPTIONAL (a failed install just means no VAD; the worker falls back to the
+// fixed silence window): it adds roughly 140 MB on disk and ~100 MB of RAM while loaded.
+// Set VOICE_VAD=0 on a host that is tight on memory.
 writeFileSync(
   "dist/package.json",
   JSON.stringify(
@@ -56,6 +63,9 @@ writeFileSync(
         "@snazzah/davey": "^0.1.12",
         dotenv: "^16.4.7",
         opusscript: "^0.0.8",
+      },
+      optionalDependencies: {
+        "onnxruntime-web": "^1.30.0",
       },
     },
     null,

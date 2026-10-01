@@ -27,8 +27,8 @@ const PAST_GRACE_MS = 5 * 60_000;
  * - `channel` (required): the voice channel.
  * - `time` (optional): when. Omitted = now. Same forms as /create-match's time
  *   field: 19:00, 7pm, "2 hours", evening ... interpreted in the team timezone.
- * - `date` (optional, needs `time`): same forms as /create-match's date field;
- *   defaults to today.
+ *   There is no date option (removed 2026-10-01): a clock time that has already
+ *   passed today means the same time TOMORROW (the reply shows the exact moment).
  * - Only one request waits at a time: a new one replaces the previous one, which
  *   is also how an admin fixes a wrong time.
  * - Mari joins at the time — or, if the channel is still empty then, as soon as
@@ -55,14 +55,7 @@ const data = new SlashCommandBuilder()
   .addStringOption((opt) =>
     opt
       .setName("time")
-      .setDescription("When to join, in the team timezone: 19:00, 7pm, evening, 2 hours ... (default: now)")
-      .setRequired(false)
-      .setMaxLength(40),
-  )
-  .addStringOption((opt) =>
-    opt
-      .setName("date")
-      .setDescription("Which day (needs time): today, tomorrow, a weekday, 18/09/2026 ... (default: today)")
+      .setDescription("When (team timezone): 19:00, 7pm, 2 hours ... Default: now. A time already past = tomorrow")
       .setRequired(false)
       .setMaxLength(40),
   )
@@ -97,7 +90,6 @@ const mariJoinCommand: Command = {
 
     const channel = interaction.options.getChannel("channel", true);
     const timeStr = interaction.options.getString("time")?.trim() ?? "";
-    const dateStr = interaction.options.getString("date")?.trim() ?? "";
     const rawDirection = interaction.options.getString("direction");
     const overrides: VoiceOverrides = {
       voice: interaction.options.getString("voice"),
@@ -116,19 +108,22 @@ const mariJoinCommand: Command = {
 
     const now = new Date();
     let joinAt = now;
-    if (dateStr && !timeStr) {
-      await interaction.reply({ content: "❌ `date` needs a `time` too (e.g. `date: tomorrow`, `time: 19:00`). Leave both out to join right now.", ephemeral: true });
-      return;
-    }
+    let rolledToTomorrow = false;
     if (timeStr) {
-      const parsed = parseMatchDateTime(dateStr || "today", timeStr, guard.config.timezone, now);
+      let parsed = parseMatchDateTime("today", timeStr, guard.config.timezone, now);
       if (!parsed.ok) {
         await interaction.reply({ content: `❌ ${parsed.error}`, ephemeral: true });
         return;
       }
       if (parsed.scheduledAt.getTime() < now.getTime() - PAST_GRACE_MS) {
-        await interaction.reply({ content: "❌ That time has already passed today. Add `date: tomorrow` (or leave `time` out to join right now).", ephemeral: true });
-        return;
+        // No date option any more: a time that already passed today means tomorrow at that time.
+        const tomorrow = parseMatchDateTime("tomorrow", timeStr, guard.config.timezone, now);
+        if (!tomorrow.ok) {
+          await interaction.reply({ content: "❌ That time has already passed today. Give a clock time like `19:00`, or leave `time` out to join right now.", ephemeral: true });
+          return;
+        }
+        parsed = tomorrow;
+        rolledToTomorrow = true;
       }
       joinAt = parsed.scheduledAt.getTime() < now.getTime() ? now : parsed.scheduledAt;
     }
@@ -160,6 +155,7 @@ const mariJoinCommand: Command = {
         ? `✅ Mari will join <#${channel.id}> in a few seconds (once someone is in there).`
         : `✅ Mari will join <#${channel.id}> <t:${unix}:F> (<t:${unix}:R>), or as soon as someone is in there within 30 minutes after that.`,
     ];
+    if (rolledToTomorrow) lines.push("🗓️ That time has already passed today, so I used tomorrow.");
     if (hasOverrides(overrides)) lines.push(`🎚️ ${describeOverrides(overrides)} (if she's already in that channel, it changes right away)`);
     if (outcome.replaced) lines.push(`↪️ That replaces the earlier request for <#${outcome.replaced.channelId}>.`);
     lines.push("-# Needs the gateway worker running with voice enabled. She leaves when the channel empties.");

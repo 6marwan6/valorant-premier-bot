@@ -12,6 +12,15 @@
 export const ORPHEUS_VOICES = ["autumn", "diana", "hannah", "austin", "daniel", "troy"] as const;
 export const DEFAULT_VOICE = "hannah";
 
+/**
+ * Mari's default delivery (2026-10-01 plan revision): a young, playful, flirty gamer girl. The WORDS
+ * are already that (MARI_PERSONA); this only sets how Orpheus delivers them. Pitch above 1 also
+ * speeds her up a little, which reads as younger and more energetic. Env (VOICE_DIRECTION /
+ * VOICE_PITCH) and /mari-join still override both.
+ */
+export const DEFAULT_DIRECTION = "flirty";
+export const DEFAULT_PITCH = 1.08;
+
 /** Pitch also shifts tempo (see samplesToDiscordPcm); outside this range she sounds broken. */
 export const MIN_PITCH = 0.8;
 export const MAX_PITCH = 1.25;
@@ -45,6 +54,15 @@ export function pickVoice(name: string | undefined | null): string {
 export function sanitizeDirection(raw: string | undefined | null): string {
   const cleaned = (raw ?? "").replace(/[^\p{L} ]/gu, "").trim().slice(0, 30);
   return ["none", "off", "default", "clear"].includes(cleaned.toLowerCase()) ? "" : cleaned;
+}
+
+/**
+ * VOICE_DIRECTION: unset or blank means "use the default direction"; "none" (or off/default/clear)
+ * means "deliberately no direction". sanitizeDirection alone can't tell those two apart.
+ */
+export function directionFromEnv(raw: string | undefined | null): string {
+  if (raw === undefined || raw === null || raw.trim() === "") return DEFAULT_DIRECTION;
+  return sanitizeDirection(raw);
 }
 
 export function clampPitch(value: number | null | undefined, fallback = 1): number {

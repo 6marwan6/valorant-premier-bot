@@ -1470,3 +1470,33 @@ have hit it, rather than being a theoretical gap in coverage.
 
 Each phase will be checked against `Full_Development_Plan.md` before
 implementation, per the ground rule for this project.
+
+## 2026-10-01 (b) — voice: listening rule, local VAD, delivery, joining
+
+Requested by the product owner; each item checked against `Full_Development_Plan.md` first, and the plan was
+revised where it said otherwise (section 4 note "2026-10-01 (b)", section 41 note on `/mari-join`).
+
+- **Listening rule** (`decideAnswer`, `worker/voice.ts`): 2+ humans in her channel -> name required; exactly one
+  human -> no name needed; unknown headcount -> treated as several. Without the name, Whisper's silence
+  hallucinations are dropped (`isLikelyNoise`). Roster-only capture is unchanged.
+- **Local VAD** (`worker/vad.ts`): Silero v5 through `onnxruntime-web` (WASM). Chosen over `onnxruntime-node`
+  because that package downloads its binaries from NuGet at install time. Optional and lazy: no package, no model,
+  or a runtime failure -> the old fixed silence window. The model (`worker/models/silero_vad.onnx`, MIT) is copied
+  next to `dist/gateway.js` by `build:worker`. Measured here: ~2 ms per 32 ms window, +~100 MB RSS, 139 MB of
+  `node_modules`. The plan said "no local model", so this is a recorded revision, not a quiet change.
+- **`/mari-join`**: `date` removed. A past clock time rolls to tomorrow (`parseMatchDateTime("tomorrow", ...)`).
+- **Join message**: voice-channel chat first, match channel as fallback, logged (`voice.announce.failed`) instead
+  of swallowed.
+- **Auto-join**: `autoJoinTick` every poll tick (already-present players, retry after a failed join, no instant
+  rejoin after a kick). Needs `VOICE_CHANNEL_ID`; the worker now logs `voice.autojoin.off` when it is empty.
+- **Delivery**: default direction `flirty`, pitch 1.08 (`voiceSettings.ts`). Spoken replies carry a
+  "REPLY MEDIUM" data line (short, plain) and may use `VOICE_LLM_MODEL` / `VOICE_LLM_MAX_TOKENS`
+  (`LlmRequest.model/maxTokens`, passed `runServerChatTurn -> handlePlayerReply -> respondInConversation`).
+- **Deliberately not built**: sentence-by-sentence streaming of the model reply into TTS. The reply is JSON that
+  must pass `parseChatOutput` (protected topics, mentions, memory candidates) before use (plan sections 10/35/55);
+  speaking unvalidated text would break that. See `docs/VOICE.md`.
+
+Verified here: unit suite (new: `vad`, `voiceCapture`, `voiceListening`, `spokenReply`; capture test drives real
+Opus packets built from a speech fixture through the real Silero model), typecheck, command validation, worker
+bundle. Not verifiable from this sandbox (no Discord/Groq route): how the voice sounds, the real-call
+`endWaitMs`, Groq accepting `[flirty]`, and the voice channel's chat permissions on your server.

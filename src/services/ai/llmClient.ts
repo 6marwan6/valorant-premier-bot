@@ -11,6 +11,9 @@ import type { Logger } from "../../config/logger.js";
 export interface LlmRequest {
   system: string;
   user: string;
+  /** Per-request overrides (2026-10-01, spoken replies): a faster model / a tighter output cap than the configured defaults. */
+  model?: string;
+  maxTokens?: number;
 }
 
 export interface LlmResult {
@@ -79,12 +82,12 @@ export class OpenAiCompatibleLlmClient implements LlmClient {
           authorization: `Bearer ${this.config.apiKey}`,
         },
         body: JSON.stringify({
-          model: this.config.model,
+          model: request.model ?? this.config.model,
           messages: [
             { role: "system", content: request.system },
             { role: "user", content: request.user },
           ],
-          max_tokens: this.config.maxTokens,
+          max_tokens: request.maxTokens ?? this.config.maxTokens,
           temperature: 0.9,
           ...this.config.extraBody,
         }),
@@ -105,7 +108,7 @@ export class OpenAiCompatibleLlmClient implements LlmClient {
 
       return {
         text,
-        model: json.model ?? this.config.model,
+        model: json.model ?? request.model ?? this.config.model,
         inputTokens: json.usage?.prompt_tokens ?? null,
         outputTokens: json.usage?.completion_tokens ?? null,
       };

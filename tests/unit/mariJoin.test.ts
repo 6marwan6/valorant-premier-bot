@@ -5,9 +5,9 @@ import mariJoinCommand from "../../src/discord/commands/mariJoin.js";
 
 const fakeLogger = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
 
-function setup(opts: { time?: string; date?: string; admin?: boolean; channelType?: ChannelType; timezone?: string; replaced?: boolean; saveFails?: boolean }) {
+function setup(opts: { time?: string; admin?: boolean; channelType?: ChannelType; timezone?: string; replaced?: boolean; saveFails?: boolean }) {
   const reply = vi.fn(async (_payload?: unknown) => undefined);
-  const strings: Record<string, string | undefined> = { time: opts.time, date: opts.date };
+  const strings: Record<string, string | undefined> = { time: opts.time };
   const interaction = {
     guildId: "guild-1",
     user: { id: "admin-1" },
@@ -56,13 +56,14 @@ describe("/mari-join", () => {
     expect(text(t.reply)).toContain("few seconds");
   });
 
-  it("schedules a future time in the team timezone (tomorrow 19:00 Cairo = 16:00 or 17:00 UTC)", async () => {
-    const t = setup({ date: "tomorrow", time: "19:00" });
+  it("schedules a clock time in the team timezone (19:00 Cairo = 16:00 or 17:00 UTC, today or tomorrow)", async () => {
+    const t = setup({ time: "19:00" });
     await mariJoinCommand.execute(t.interaction, t.ctx);
     const joinAt = t.schedule.mock.calls[0]![0].joinAt;
     expect([16, 17]).toContain(joinAt.getUTCHours());
     expect(joinAt.getUTCMinutes()).toBe(0);
-    expect(joinAt.getTime()).toBeGreaterThan(Date.now());
+    expect(joinAt.getTime()).toBeGreaterThan(Date.now() - 6 * 60_000);
+    expect(joinAt.getTime()).toBeLessThan(Date.now() + 24 * 3_600_000 + 60_000);
     expect(text(t.reply)).toMatch(/<t:\d+:F>/);
   });
 
@@ -74,20 +75,22 @@ describe("/mari-join", () => {
     expect(diff).toBeLessThan(121 * 60_000);
   });
 
-  it("rejects a date without a time", async () => {
-    const t = setup({ date: "tomorrow" });
-    await mariJoinCommand.execute(t.interaction, t.ctx);
-    expect(t.schedule).not.toHaveBeenCalled();
-    expect(text(t.reply)).toContain("needs a `time`");
+  it("has no date option any more", () => {
+    const names = (mariJoinCommand.data.toJSON().options ?? []).map((o) => o.name);
+    expect(names).not.toContain("date");
+    expect(names).toContain("time");
   });
 
-  it("rejects a time earlier today instead of silently joining now", async () => {
+  it("a clock time that already passed today means tomorrow, and says so", async () => {
     const t = setup({ time: "00:01", timezone: "UTC" });
     // 00:01 UTC is more than five minutes ago unless the suite runs in the first minutes of the day.
     if (Date.now() % 86_400_000 < 10 * 60_000) return;
     await mariJoinCommand.execute(t.interaction, t.ctx);
-    expect(t.schedule).not.toHaveBeenCalled();
-    expect(text(t.reply)).toContain("already passed");
+    const joinAt = t.schedule.mock.calls[0]![0].joinAt;
+    expect(joinAt.getTime()).toBeGreaterThan(Date.now());
+    expect(joinAt.getUTCHours()).toBe(0);
+    expect(joinAt.getUTCMinutes()).toBe(1);
+    expect(text(t.reply)).toContain("used tomorrow");
   });
 
   it("rejects garbage times with the parser's hint", async () => {

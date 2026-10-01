@@ -147,7 +147,7 @@ describe("voice config", () => {
     expect(loadVoiceConfig("g", {} as NodeJS.ProcessEnv)).toBeNull();
     expect(loadVoiceConfig("g", { VOICE_CHANNEL_ID: "c" } as NodeJS.ProcessEnv)).toBeNull();
     const cfg = loadVoiceConfig("g", { GROQ_API_KEY: "k" } as NodeJS.ProcessEnv);
-    expect(cfg).toMatchObject({ channelId: null, voice: "hannah", ttsModel: "canopylabs/orpheus-v1-english", direction: "", pitch: 1 });
+    expect(cfg).toMatchObject({ channelId: null, voice: "hannah", ttsModel: "canopylabs/orpheus-v1-english", direction: "flirty", pitch: 1.08 });
   });
 
   it("VOICE_CHANNEL_ID is optional: it only names the default auto-join channel", () => {

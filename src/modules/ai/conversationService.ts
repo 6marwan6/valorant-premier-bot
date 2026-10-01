@@ -18,6 +18,7 @@ import {
   CONVERSATION_FALLBACK_MESSAGE,
   MAX_PLAYER_TURNS,
   type ConversationTranscriptEntry,
+  type SpokenReplyOptions,
 } from "./conversationContextBuilder.js";
 
 /** Nobody has replied for this long -> the conversation is over (Discord DMs stay open forever; the chat shouldn't). */
@@ -375,6 +376,8 @@ export class ConversationService {
     discordUserId: string;
     text: string;
     sourceRef: string;
+    /** Set when the reply will be spoken aloud (voice worker). */
+    voice?: SpokenReplyOptions;
     now?: Date;
   }): Promise<ReplyOutcome> {
     const now = params.now ?? new Date();
@@ -414,7 +417,7 @@ export class ConversationService {
     const playerTurns = transcript.filter((entry) => entry.role === "USER").length;
 
     if (isChatMode(conversation.mode)) {
-      return this.replyInChat({ conversation, player, transcript, playerTurns });
+      return this.replyInChat({ conversation, player, transcript, playerTurns, voice: params.voice });
     }
 
     const generated = await this.ai.respondInConversation({
@@ -472,6 +475,7 @@ export class ConversationService {
     player: PlayerRow;
     transcript: ConversationTranscriptEntry[];
     playerTurns: number;
+    voice?: SpokenReplyOptions;
   }): Promise<ReplyOutcome> {
     const { conversation, player, transcript, playerTurns } = params;
     const chatMode = conversation.mode as ChatMode;
@@ -482,6 +486,7 @@ export class ConversationService {
       chatMode,
       conversationId: conversation.id,
       transcript,
+      voice: params.voice,
     });
 
     if (generated.source === "fallback") {

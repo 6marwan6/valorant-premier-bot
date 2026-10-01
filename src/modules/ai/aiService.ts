@@ -17,6 +17,7 @@ import {
   MAX_FORGET_CANDIDATES,
   type ConversationContext,
   type ConversationTranscriptEntry,
+  type SpokenReplyOptions,
 } from "./conversationContextBuilder.js";
 import type { ServerChatFacts, TeamFactsService } from "./teamFactsService.js";
 import { buildAdminRewriteContext, buildMatchEventExtractionContext, buildMatchHypeContext, buildMatchRecapContext, type TeamAIContext } from "./teamAiContextBuilder.js";
@@ -225,6 +226,8 @@ export class AiService {
     conversationId: number;
     transcript: ConversationTranscriptEntry[];
     maxPlayerTurns?: number;
+    /** Chat only: the reply will be spoken aloud, so it is asked to be short, and may use a faster model / tighter output cap. */
+    voice?: SpokenReplyOptions;
   }): Promise<ConversationAiOutcome> {
     if (!this.llm) return { source: "fallback" };
 
@@ -284,6 +287,7 @@ export class AiService {
         // A DM chat is about the person in it: roster and match facts, but not teammates' memories.
         facts: facts && mode === "DIRECT_CHAT" ? { ...facts, sharedMemories: [] } : facts,
         forbiddenTopics,
+        spoken: Boolean(params.voice),
       };
       context = mode === "SERVER_CHAT" ? buildServerChatContext(chatParams) : buildDirectChatContext(chatParams);
     }
@@ -296,12 +300,18 @@ export class AiService {
       playerId: params.player.id,
       matchId: params.match?.id ?? null,
       conversationId: params.conversationId,
-      model: this.llm.model,
+      model: params.voice?.model ?? this.llm.model,
+      spoken: Boolean(params.voice),
       memoryCount: memories.length,
     };
 
     try {
-      const result = await this.llm.complete({ system: context.system, user: context.user });
+      const result = await this.llm.complete({
+        system: context.system,
+        user: context.user,
+        model: params.voice?.model,
+        maxTokens: params.voice?.maxTokens,
+      });
       const metrics = {
         latencyMs: Date.now() - startedAt,
         inputTokens: result.inputTokens,

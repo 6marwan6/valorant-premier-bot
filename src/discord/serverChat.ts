@@ -1,5 +1,6 @@
 import type { AppContext } from "../appContext.js";
 import type { PlayerRow } from "../database/schema/players.js";
+import type { SpokenReplyOptions } from "../modules/ai/conversationContextBuilder.js";
 
 /**
  * The server side of the free-form chat with Mari (plan section 42/63,
@@ -42,6 +43,8 @@ export async function runServerChatTurn(
     /** `command:<interaction id>` or `message:<discord message id>` — the idempotency key (plan section 50). */
     sourceRef: string;
     deliver: (text: string) => Promise<void>;
+    /** Set for a reply that will be spoken aloud (voice worker): short, plain text, optionally a faster model. */
+    voice?: SpokenReplyOptions;
     now?: Date;
   },
 ): Promise<ServerChatResult> {
@@ -57,6 +60,7 @@ export async function runServerChatTurn(
     discordUserId: player.discordUserId,
     text: params.text,
     sourceRef: params.sourceRef,
+    voice: params.voice,
     now: params.now,
   });
 

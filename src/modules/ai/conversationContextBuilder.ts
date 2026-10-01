@@ -322,7 +322,22 @@ const CHAT_TURN_INSTRUCTIONS = {
   REPLY: "TURN: REPLY. Respond naturally to the player's latest message in CONVERSATION.",
 } as const;
 
+/**
+ * A reply that will be read out loud in a voice channel (2026-10-01). Only changes HOW she writes (short,
+ * plain) and, optionally, which model/output cap generates it. Every privacy rule and the output
+ * validation (parseChatOutput) are the same as for a typed reply: nothing is spoken that was not validated.
+ */
+export interface SpokenReplyOptions {
+  model?: string;
+  maxTokens?: number;
+}
+
+export const SPOKEN_REPLY_LINE =
+  "REPLY MEDIUM: your reply is spoken out loud in a voice call. One or two short sentences (under about 30 words), plain words only: no emoji, no lists, no stretched spellings like heyyyy, no links. Sound like a playful, flirty young gamer girl talking, not typing.";
+
 export interface ChatContextParams {
+  /** True when the reply will be spoken aloud (voice worker). */
+  spoken?: boolean;
   player: PlayerRow;
   /** Oldest first. */
   transcript: ConversationTranscriptEntry[];
@@ -482,6 +497,7 @@ function buildChatContext(mode: ChatMode, params: ChatContextParams): Conversati
     }
   }
 
+  if (params.spoken) lines.push("", SPOKEN_REPLY_LINE);
   lines.push("", `MODE: ${mode}`, "</application_data>", "", "Write M.A.R.I.'s next message now.");
 
   return {
