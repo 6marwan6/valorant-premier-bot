@@ -109,3 +109,40 @@ describe("buildCommandInteractionAdapter — getBoolean", () => {
     expect(adapter.options.getBoolean("running_jokes")).toBeNull();
   });
 });
+
+describe("buildCommandInteractionAdapter — getNumber", () => {
+  it("reads a decimal option (/mari-join pitch)", () => {
+    const raw = fakeRaw({ options: [{ name: "pitch", type: ApplicationCommandOptionType.Number, value: 1.08 }] });
+    const adapter = buildCommandInteractionAdapter(raw, noopDiscord);
+    expect(adapter.options.getNumber("pitch")).toBe(1.08);
+  });
+
+  it("returns null when absent and throws when required", () => {
+    const adapter = buildCommandInteractionAdapter(fakeRaw({ options: [] }), noopDiscord);
+    expect(adapter.options.getNumber("pitch")).toBeNull();
+    expect(() => adapter.options.getNumber("pitch", true)).toThrow(/pitch/);
+  });
+});
+
+describe("adapter covers every option type the registered commands use", () => {
+  it("has a getter for each option type (so a missing one fails here, not in production)", async () => {
+    const { commands } = await import("../../src/discord/commands/index.js");
+    const getterFor: Record<number, string> = {
+      [ApplicationCommandOptionType.String]: "getString",
+      [ApplicationCommandOptionType.Integer]: "getInteger",
+      [ApplicationCommandOptionType.Number]: "getNumber",
+      [ApplicationCommandOptionType.Boolean]: "getBoolean",
+      [ApplicationCommandOptionType.User]: "getUser",
+      [ApplicationCommandOptionType.Channel]: "getChannel",
+      [ApplicationCommandOptionType.Role]: "getRole",
+    };
+    const adapter = buildCommandInteractionAdapter(fakeRaw({ options: [] }), noopDiscord) as unknown as { options: Record<string, unknown> };
+    for (const command of commands) {
+      for (const opt of command.data.toJSON().options ?? []) {
+        const getter = getterFor[opt.type];
+        expect(getter, `${command.data.name}.${opt.name} has an unsupported option type ${opt.type}`).toBeDefined();
+        expect(typeof adapter.options[getter!], `${command.data.name}.${opt.name} needs ${getter}`).toBe("function");
+      }
+    }
+  });
+});

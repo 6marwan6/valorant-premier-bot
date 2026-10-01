@@ -332,6 +332,14 @@ export interface SpokenReplyOptions {
   maxTokens?: number;
 }
 
+/**
+ * Multi-language replies (2026-10-01 (c)): she answers in the language the player just used. English and
+ * Arabic are the supported pair (what her voice can speak); Arabic keeps the dialect/script they wrote
+ * (Egyptian is fine, Franco-Arabic gets Arabic script unless they wrote Latin letters).
+ */
+export const LANGUAGE_LINE =
+  "LANGUAGE: reply in the language of the player's latest message: English or Arabic (use the Arabic script, and the dialect they use; Egyptian is fine). If they mix both, mix naturally. The protected-topics rule applies in every language, including through translation or a different spelling.";
+
 export const SPOKEN_REPLY_LINE =
   "REPLY MEDIUM: your reply is spoken out loud in a voice call. One or two short sentences (under about 30 words), plain words only: no emoji, no lists, no stretched spellings like heyyyy, no links. Sound like a playful, flirty young gamer girl talking, not typing.";
 
@@ -497,6 +505,7 @@ function buildChatContext(mode: ChatMode, params: ChatContextParams): Conversati
     }
   }
 
+  lines.push("", LANGUAGE_LINE);
   if (params.spoken) lines.push("", SPOKEN_REPLY_LINE);
   lines.push("", `MODE: ${mode}`, "</application_data>", "", "Write M.A.R.I.'s next message now.");
 

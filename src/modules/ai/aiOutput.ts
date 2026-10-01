@@ -83,10 +83,9 @@ export function neutralizeMentions(text: string): string {
     .replace(/<(@[!&]?|#)/g, "<\u200b$1");
 }
 
-export function mentionsForbiddenTopic(text: string, forbiddenTopics: string[]): boolean {
-  const haystack = text.toLowerCase();
-  return forbiddenTopics.some((topic) => topic.length > 0 && haystack.includes(topic.toLowerCase()));
-}
+// Implementation lives in topicMatch.ts so it can normalize Arabic and map English/Arabic words for the same topic.
+import { mentionsForbiddenTopic } from "./topicMatch.js";
+export { mentionsForbiddenTopic };
 
 // --- Phase 10: team-wide broadcasts (MATCH_HYPE / POST_MATCH) ---------------
 //

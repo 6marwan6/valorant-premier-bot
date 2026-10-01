@@ -187,6 +187,31 @@ Store:
 > day: its gain didn't justify ~140 MB of disk and ~100 MB of RAM, so the
 > "no local model" rule above stands unchanged.)
 
+> **Revision, 2026-10-01 (c) (Marwan, product owner):** **English and
+> Arabic**, in text and in voice, and a hardening pass on voice listening.
+>
+> 1. **Language.** Mari answers in the language the player just used,
+>    English or Arabic (their script and dialect; Egyptian is fine). Her
+>    voice speaks Arabic with Groq's Orpheus Arabic model (Saudi accent; it
+>    takes no vocal directions) and English with the English model, chosen per
+>    sentence by script. Speech-to-text stays Groq Whisper, now
+>    `whisper-large-v3` with the language left on auto. Other languages are
+>    out of scope.
+> 2. **Protected topics apply in both languages (sections 10/44).** The
+>    output/retrieval check is still a keyword layer, now with Arabic
+>    normalization and a small English/Arabic word table per common topic
+>    (family, health, relationships, university, religion, politics, money,
+>    work, looks). It is best-effort: it cannot catch a rephrasing it has no
+>    word for, so the model is also told in every prompt that the rule holds
+>    in every language.
+> 3. **Listening reliability.** A follow-up from someone she just answered
+>    needs no name for 12 s; Arabic spellings of her name are recognized;
+>    clips as short as 0.3 s are transcribed (was 0.7 s, which dropped a short
+>    "Mari?"); Whisper's own confidence now rejects silence-hallucinations;
+>    one retry after a timeout/429/5xx; and every utterance logs what became
+>    of it (busy, too short, STT failed/empty/filtered, no name, noise,
+>    answered) without its content (section 51).
+
 Do not build:
 
 - Web dashboard.

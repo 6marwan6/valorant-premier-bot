@@ -65,3 +65,17 @@ describe("spoken chat replies", () => {
     expect(out.source).toBe("fallback");
   });
 });
+
+describe("replies follow the player's language (English or Arabic)", () => {
+  it("typed and spoken chat contexts both carry the language rule, inside the data block", async () => {
+    const { LANGUAGE_LINE } = await import("../../src/modules/ai/conversationContextBuilder.js");
+    const transcript = [{ role: "USER" as const, content: "ازيك يا ماري" }];
+    for (const spoken of [false, true]) {
+      const ctx = buildServerChatContext({ player: makePlayer(), transcript, spoken });
+      expect(ctx.user).toContain(LANGUAGE_LINE);
+      expect(ctx.user.indexOf(LANGUAGE_LINE)).toBeLessThan(ctx.user.indexOf("</application_data>"));
+    }
+    expect(LANGUAGE_LINE).toMatch(/Arabic/);
+    expect(LANGUAGE_LINE).toMatch(/protected-topics rule applies in every language/);
+  });
+});

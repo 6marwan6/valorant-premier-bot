@@ -43,6 +43,10 @@
  *   VOICE_DIRECTION     delivery hint sent as [word] (default "flirty": a young, playful gamer girl);
  *                       "none" sends no direction
  *   VOICE_PITCH         pitch multiplier, 1 = unchanged (default 1.08; also a little faster)
+ *   VOICE_STT_MODEL     Groq Whisper model (default whisper-large-v3; whisper-large-v3-turbo is a little faster)
+ *   VOICE_STT_LANGUAGE  auto (default: English + Arabic) or a fixed code such as en / ar
+ *   VOICE_ARABIC        0 = never speak Arabic (replies still come out in English-voice only)
+ *   VOICE_TTS_ARABIC_MODEL / VOICE_NAME_AR   Arabic model and voice (default orpheus-arabic-saudi / noura)
  *   VOICE_LISTEN        auto (default) | name | always: whether she needs her name (see 3 above)
  *   VOICE_WARMUP        0 = skip the warm-up she does on joining (default on)
  *   VOICE_LLM_MODEL     optional faster model just for spoken replies (same provider as LLM_MODEL)
@@ -64,6 +68,7 @@ import type OpusScript from "opusscript";
 import type { AppContext } from "../src/appContext.js";
 import { runServerChatTurn } from "../src/discord/serverChat.js";
 import { MAX_PLAYER_MESSAGE_CHARS } from "../src/modules/ai/conversationService.js";
+import { normalizeText } from "../src/modules/ai/topicMatch.js";
 import {
   DEFAULT_PITCH,
   ORPHEUS_VOICES,
@@ -90,11 +95,17 @@ export const TTS_MAX_INPUT_CHARS = 200;
 /** Cap requests per reply so one long answer can't burn the free quota. */
 const MAX_TTS_CHUNKS = 3;
 const GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
-const GROQ_STT_MODEL = "whisper-large-v3-turbo";
+const DEFAULT_STT_MODEL = "whisper-large-v3";
+const DEFAULT_ARABIC_TTS_MODEL = "canopylabs/orpheus-arabic-saudi";
+/** Orpheus Arabic voices: fahad, sultan (male); lulwa, noura (female). */
+const DEFAULT_ARABIC_VOICE = "noura";
 
 /** Quiet time that ends an utterance. Was 900; 700 trims 0.2 s off every answer (VOICE_SILENCE_MS overrides). */
 const DEFAULT_SILENCE_MS = 700;
-const MIN_UTTERANCE_MS = 700;
+/** Was 700, which silently dropped a short "Mari?" (about 500 ms of speech). Noise this short is filtered after transcription instead. */
+const MIN_UTTERANCE_MS = 300;
+/** After she answers someone, their next utterance within this long needs no name (a follow-up in a group). */
+const FOLLOWUP_MS = 12_000;
 const MAX_UTTERANCE_MS = 20_000;
 /** Groq's free plan allows 20 requests/minute; stay under it. */
 const STT_MAX_PER_MINUTE = 15;
@@ -111,6 +122,31 @@ const LOOP_LAG_WARN_MS = 1_500;
 
 /** Whisper spells a name however it likes; accept the usual suspects. */
 const WAKE_WORD = /\b(mari|marie|mary|maree|marry|maari|mahri)\b/i;
+/** Arabic spellings of her name, compared as whole words after normalizeText (JS \b doesn't work on Arabic letters). */
+const ARABIC_WAKE_WORDS = new Set(["ماري", "ماريه", "مارى", "ميري", "ماره"].map(normalizeText));
+
+export function hasWakeWord(transcript: string): boolean {
+  if (WAKE_WORD.test(transcript)) return true;
+  return normalizeText(transcript)
+    .split(/[^\p{L}\p{N}]+/u)
+    .some((token) => ARABIC_WAKE_WORDS.has(token));
+}
+
+/** Share of letters that are Arabic script: decides which TTS model speaks a chunk. */
+export function arabicRatio(text: string): number {
+  const letters = text.match(/\p{L}/gu) ?? [];
+  if (letters.length === 0) return 0;
+  const arabic = text.match(/[\u0600-\u06FF\u0750-\u077F]/g) ?? [];
+  return arabic.length / letters.length;
+}
+
+export type SpokenLanguage = "ar" | "en";
+export function languageOf(text: string): SpokenLanguage {
+  return arabicRatio(text) >= 0.4 ? "ar" : "en";
+}
+
+/** Whisper's well-known Arabic hallucinations on silence ("subtitles by...", "subscribe to the channel"). */
+const ARABIC_HALLUCINATION_PARTS = ["ترجمه نانسي", "قنقر", "اشترك في القناه", "اشتركوا في القناه", "شكرا على المشاهده", "شكرا للمشاهده"].map(normalizeText);
 
 /** What Whisper tends to "hear" in silence, breathing or a keyboard. Only consulted when she answers WITHOUT her name. */
 const WHISPER_HALLUCINATIONS = new Set([
@@ -129,11 +165,28 @@ const WHISPER_HALLUCINATIONS = new Set([
 ]);
 
 export function isLikelyNoise(transcript: string): boolean {
+  const arabic = normalizeText(transcript);
+  if (ARABIC_HALLUCINATION_PARTS.some((part) => arabic.includes(part))) return true;
   const t = transcript.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, " ").replace(/\s+/g, " ").trim();
   return t.length < 2 || WHISPER_HALLUCINATIONS.has(t);
 }
 
-export type AnswerDecision = { answer: true; reason: "wakeWord" | "alone" | "listenAll" } | { answer: false; reason: "noWakeWord" | "noise" };
+export interface SttSegment {
+  no_speech_prob?: number;
+  avg_logprob?: number;
+}
+
+/**
+ * Whisper's own confidence says "this was not speech" (its standard skip rule: no_speech_prob above 0.6 AND
+ * avg_logprob below -1), or it was so unsure of every segment that the text is guesswork. Catches the invented
+ * "thank you" / Arabic subtitle credits on silence in any language, without a word list.
+ */
+export function isSilenceTranscript(segments: SttSegment[] | undefined): boolean {
+  if (!segments || segments.length === 0) return false;
+  return segments.every((s) => ((s.no_speech_prob ?? 0) > 0.6 && (s.avg_logprob ?? 0) < -1) || (s.avg_logprob ?? 0) < -1.6);
+}
+
+export type AnswerDecision = { answer: true; reason: "wakeWord" | "alone" | "listenAll" | "followUp" } | { answer: false; reason: "noWakeWord" | "noise" };
 
 /**
  * Should she answer this transcript? (2026-10-01 (b), plan section 4.) By the session's `listen` mode:
@@ -143,9 +196,11 @@ export type AnswerDecision = { answer: true; reason: "wakeWord" | "alone" | "lis
  *     (null) counts as "several": the cautious reading.
  * The name always works. Without it, junk transcripts are dropped (isLikelyNoise).
  */
-export function decideAnswer(p: { transcript: string; humans: number | null; listen?: ListenMode }): AnswerDecision {
-  if (WAKE_WORD.test(p.transcript)) return { answer: true, reason: "wakeWord" };
+export function decideAnswer(p: { transcript: string; humans: number | null; listen?: ListenMode; followUp?: boolean }): AnswerDecision {
+  if (hasWakeWord(p.transcript)) return { answer: true, reason: "wakeWord" };
   const listen = p.listen ?? "auto";
+  // She just answered this person a moment ago: a follow-up needs no name (and a long answer split in two by a pause isn't lost).
+  if (p.followUp) return isLikelyNoise(p.transcript) ? { answer: false, reason: "noise" } : { answer: true, reason: "followUp" };
   const withoutName = listen === "always" || (listen === "auto" && p.humans === 1);
   if (!withoutName) return { answer: false, reason: "noWakeWord" };
   if (isLikelyNoise(p.transcript)) return { answer: false, reason: "noise" };
@@ -159,6 +214,10 @@ export interface VoiceConfig {
   channelId: string | null;
   voice: string;
   ttsModel: string;
+  /** Groq Whisper model (VOICE_STT_MODEL). */
+  sttModel?: string;
+  /** Arabic speech (2026-10-01 (c)): a chunk that is mostly Arabic script is spoken by this model and voice instead. */
+  arabic?: { enabled: boolean; model: string; voice: string };
   /** Optional single vocal direction sent as "[direction]" before each chunk. */
   direction: string;
   pitch: number;
@@ -189,9 +248,16 @@ export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.
     channelId,
     voice: pickVoice(e.VOICE_NAME),
     ttsModel: e.VOICE_TTS_MODEL?.trim() || DEFAULT_TTS_MODEL,
+    sttModel: e.VOICE_STT_MODEL?.trim() || DEFAULT_STT_MODEL,
+    arabic: {
+      enabled: !["0", "false", "no", "off"].includes((e.VOICE_ARABIC ?? "").trim().toLowerCase()),
+      model: e.VOICE_TTS_ARABIC_MODEL?.trim() || DEFAULT_ARABIC_TTS_MODEL,
+      voice: e.VOICE_NAME_AR?.trim() || DEFAULT_ARABIC_VOICE,
+    },
     direction: directionFromEnv(e.VOICE_DIRECTION),
     pitch: num(e.VOICE_PITCH, DEFAULT_PITCH),
-    language: e.VOICE_STT_LANGUAGE?.trim() || "en",
+    // "auto": she hears English and Arabic (a fixed "en" would turn Arabic speech into garbage).
+    language: e.VOICE_STT_LANGUAGE?.trim() || "auto",
     debug: ["1", "true", "yes"].includes((e.VOICE_DEBUG ?? "").trim().toLowerCase()),
     silenceMs: Math.min(2_000, Math.max(300, Math.round(num(e.VOICE_SILENCE_MS, DEFAULT_SILENCE_MS)))),
     listen: pickListen(e.VOICE_LISTEN),
@@ -223,7 +289,7 @@ export function toSpeechText(input: string): string {
 
   if (t.length > MAX_SPOKEN_CHARS) {
     const cut = t.slice(0, MAX_SPOKEN_CHARS);
-    const lastStop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+    const lastStop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "), cut.lastIndexOf("؟ "));
     t = lastStop > 80 ? cut.slice(0, lastStop + 1) : cut;
   }
   return t;
@@ -292,11 +358,11 @@ export function chunkForTts(text: string, max = TTS_MAX_INPUT_CHARS): string[] {
   const clean = text.replace(/\s+/g, " ").trim();
   if (!clean) return [];
   const pieces: string[] = [];
-  for (const sentence of clean.split(/(?<=[.!?])\s+/)) {
+  for (const sentence of clean.split(/(?<=[.!?؟])\s+/)) {
     let rest = sentence;
     while (rest.length > max) {
       const window = rest.slice(0, max + 1);
-      let cut = Math.max(window.lastIndexOf(", "), window.lastIndexOf("; "), window.lastIndexOf(": "));
+      let cut = Math.max(window.lastIndexOf(", "), window.lastIndexOf("، "), window.lastIndexOf("; "), window.lastIndexOf(": "));
       if (cut < max * 0.4) cut = window.lastIndexOf(" ");
       if (cut < max * 0.4) cut = max; // no usable break: hard cut
       else cut += 1;
@@ -323,7 +389,7 @@ export function chunkForTts(text: string, max = TTS_MAX_INPUT_CHARS): string[] {
 export function firstSentenceFirst(chunks: string[]): string[] {
   const [head, ...rest] = chunks;
   if (head === undefined) return [];
-  const m = /^(.+?[.!?])\s+(\S.*)$/s.exec(head);
+  const m = /^(.+?[.!?؟])\s+(\S.*)$/s.exec(head);
   return m && m[1] && m[2] ? [m[1], m[2], ...rest] : chunks;
 }
 
@@ -441,6 +507,8 @@ interface Session {
   settings: VoiceSettings;
   /** Answered turns so far in this session; the first one is logged so a cold start is visible in `voice.turn.timing`. */
   turns: number;
+  /** userId -> until when their next utterance counts as a follow-up (no name needed). */
+  addressedUntil: Map<string, number>;
 }
 
 /** Per-turn stage timings, logged without any message content (plan sections 51 and 58). */
@@ -466,6 +534,7 @@ export class VoiceManager {
   private autoJoining = false;
   private warnedChannelMissing = false;
   private readonly sttTimes: number[] = [];
+  private warnedArabicTerms = false;
   private readonly rosterCache = new Map<string, { player: Awaited<ReturnType<VoiceManager["isActivePlayer"]>>; at: number }>();
 
   private constructor(
@@ -689,7 +758,7 @@ export class VoiceManager {
       player.on("error", (err) => this.ctx.logger.warn({ event: "voice.player.error", err: err.message }, "Audio player error"));
       player.on("stateChange", (o, n) => this.dbg("voice.player.state", { from: o.status, to: n.status }));
       connection.subscribe(player);
-      const session: Session = { channelId: channel.id, connection, player, capturing: new Set(), busy: false, turns: 0, settings: applyOverrides(this.defaultSettings(), overrides) };
+      const session: Session = { channelId: channel.id, connection, player, capturing: new Set(), busy: false, turns: 0, addressedUntil: new Map(), settings: applyOverrides(this.defaultSettings(), overrides) };
       this.session = session;
 
       connection.on(dv.VoiceConnectionStatus.Disconnected, () => void this.recover(session, connection));
@@ -823,7 +892,13 @@ export class VoiceManager {
   }
 
   private async onSpeechStart(session: Session, userId: string): Promise<void> {
-    if (this.session !== session || session.busy || session.capturing.has(userId)) return;
+    if (this.session !== session) return;
+    if (session.busy) {
+      // She is thinking or speaking: this utterance is not captured. Say so, so "she didn't answer" is explainable.
+      this.outcome("busy", { userId });
+      return;
+    }
+    if (session.capturing.has(userId)) return;
     if (userId === this.client.user?.id) return;
     session.capturing.add(userId);
     try {
@@ -837,7 +912,7 @@ export class VoiceManager {
       session.capturing.delete(userId);
       const ms = (pcm.length / BYTES_PER_FRAME / DISCORD_RATE) * 1000;
       if (ms < MIN_UTTERANCE_MS || session.busy || this.session !== session) {
-        this.dbg("voice.capture.dropped", { userId, ms: Math.round(ms), busy: session.busy });
+        this.outcome("tooShort", { userId, ms: Math.round(ms) });
         return;
       }
 
@@ -905,17 +980,22 @@ export class VoiceManager {
 
   private async handleUtterance(session: Session, userId: string, player: NonNullable<Awaited<ReturnType<VoiceManager["isActivePlayer"]>>>, pcm: Buffer): Promise<void> {
     const sttStart = Date.now();
-    const transcript = await this.transcribe(pcm);
+    const stt = await this.transcribe(pcm);
     const timing: TurnTiming = { sttMs: Date.now() - sttStart, brainMs: null, firstAudioMs: null, chunks: 0 };
-    if (!transcript) return;
-
-    const humans = this.humansInSession(session);
-    const decision = decideAnswer({ transcript, humans, listen: session.settings.listen });
-    if (!decision.answer) {
-      this.ctx.logger.debug({ event: "voice.ignored", reason: decision.reason, humans, listen: session.settings.listen }, decision.reason === "noise" ? "Dropped a junk transcript" : "Heard speech without her name");
+    if (!stt.text) {
+      this.outcome(`stt_${stt.status}`, { userId, sttMs: timing.sttMs, language: stt.language });
       return;
     }
-    this.ctx.logger.info({ event: "voice.heard", userId, chars: transcript.length, reason: decision.reason, humans, listen: session.settings.listen }, decision.reason === "wakeWord" ? "Heard Mari's name" : "Answering without her name");
+    const transcript = stt.text;
+
+    const humans = this.humansInSession(session);
+    const followUp = (session.addressedUntil.get(userId) ?? 0) > Date.now();
+    const decision = decideAnswer({ transcript, humans, listen: session.settings.listen, followUp });
+    if (!decision.answer) {
+      this.outcome(decision.reason, { userId, humans, listen: session.settings.listen, language: stt.language });
+      return;
+    }
+    this.ctx.logger.info({ event: "voice.heard", userId, chars: transcript.length, reason: decision.reason, humans, listen: session.settings.listen, language: stt.language }, decision.reason === "wakeWord" ? "Heard Mari's name" : "Answering without her name");
 
     const brainStart = Date.now();
     await runServerChatTurn(this.ctx, {
@@ -931,14 +1011,25 @@ export class VoiceManager {
       },
     });
 
+    session.addressedUntil.set(userId, Date.now() + FOLLOWUP_MS);
+
     // Where the delay goes, per stage, with no message content (plan sections 51 and 58). The player
     // also waited silenceMs before any of this started, which is why it is part of "perceivedMs".
     const silenceMs = this.cfg.silenceMs ?? DEFAULT_SILENCE_MS;
     const afterSilenceMs = timing.sttMs + (timing.brainMs ?? 0) + (timing.firstAudioMs ?? 0);
     this.ctx.logger.info(
-      { event: "voice.turn.timing", turn: ++session.turns, silenceMs, sttMs: timing.sttMs, brainMs: timing.brainMs, firstAudioMs: timing.firstAudioMs, chunks: timing.chunks, perceivedMs: silenceMs + afterSilenceMs },
+      { event: "voice.turn.timing", turn: ++session.turns, language: stt.language, silenceMs, sttMs: timing.sttMs, brainMs: timing.brainMs, firstAudioMs: timing.firstAudioMs, chunks: timing.chunks, perceivedMs: silenceMs + afterSilenceMs },
       "Voice turn timing",
     );
+  }
+
+  /**
+   * One metadata-only line per utterance saying what became of it (no content, plan sections 51/58), so
+   * "she didn't answer" has a reason in the log: busy | tooShort | stt_failed | stt_empty | stt_filtered |
+   * stt_rateLimited | noWakeWord | noise (an answered utterance is the `voice.turn.timing` line instead).
+   */
+  private outcome(outcome: string, extra: Record<string, unknown> = {}): void {
+    this.ctx.logger.info({ event: "voice.utterance", outcome, ...extra }, `Voice utterance: ${outcome}`);
   }
 
   /**
@@ -980,54 +1071,87 @@ export class VoiceManager {
 
   // -- speech to text (Groq Whisper, free plan) -------------------------------
 
-  private async transcribe(pcm: Buffer): Promise<string | null> {
+  /**
+   * Groq Whisper. `verbose_json` returns per-segment confidence, which is a far better test for "this was
+   * silence/noise, not speech" than a list of known hallucination strings (see isSilenceTranscript). One retry
+   * on a timeout, 429 or 5xx: a single hiccup used to mean she silently never answered.
+   */
+  private async transcribe(pcm: Buffer): Promise<{ text: string | null; status: "ok" | "empty" | "filtered" | "failed" | "rateLimited"; language?: string }> {
     const now = Date.now();
     while (this.sttTimes.length > 0 && now - (this.sttTimes[0] ?? now) > 60_000) this.sttTimes.shift();
     if (this.sttTimes.length >= STT_MAX_PER_MINUTE) {
       this.ctx.logger.warn({ event: "voice.stt.rateLimited" }, "Skipping an utterance to stay inside Groq's free limit");
-      return null;
+      return { text: null, status: "rateLimited" };
     }
     this.sttTimes.push(now);
 
-    const form = new FormData();
-    form.append("file", new Blob([new Uint8Array(pcmToWav16kMono(pcm))], { type: "audio/wav" }), "speech.wav");
-    form.append("model", GROQ_STT_MODEL);
-    form.append("response_format", "json");
-    form.append("temperature", "0");
-    form.append("prompt", "Mari, Valorant, Premier, Jett, Sage, Omen.");
-    if (this.cfg.language !== "auto") form.append("language", this.cfg.language);
+    const wav = new Uint8Array(pcmToWav16kMono(pcm));
+    const build = () => {
+      const form = new FormData();
+      form.append("file", new Blob([wav], { type: "audio/wav" }), "speech.wav");
+      form.append("model", this.cfg.sttModel ?? DEFAULT_STT_MODEL);
+      form.append("response_format", "verbose_json");
+      form.append("temperature", "0");
+      // Names and game words in both scripts, so "Mari" / "ماري" and the agents are spelled the way we match them.
+      form.append("prompt", "Mari, ماري, Valorant, Premier, Jett, Sage, Omen.");
+      if (this.cfg.language !== "auto") form.append("language", this.cfg.language);
+      return form;
+    };
 
-    const res = await fetch(GROQ_STT_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.cfg.groqApiKey}` },
-      body: form,
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) {
-      const body = (await res.text().catch(() => "")).slice(0, 300);
-      this.ctx.logger.warn({ event: "voice.stt.failed", status: res.status, body }, "Groq transcription failed");
-      return null;
+    let res: Response | null = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        res = await fetch(GROQ_STT_URL, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${this.cfg.groqApiKey}` },
+          body: build(),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (res.ok || (res.status !== 429 && res.status < 500) || attempt === 2) break;
+        const wait = Math.min(1_500, Number(res.headers.get("retry-after") ?? 0) * 1000 || 400);
+        this.ctx.logger.warn({ event: "voice.stt.retry", status: res.status, waitMs: wait }, "Groq transcription hiccup, retrying once");
+        await new Promise((r) => setTimeout(r, wait));
+      } catch (err) {
+        if (attempt === 2) {
+          this.ctx.logger.warn({ event: "voice.stt.failed", err: err instanceof Error ? err.message : String(err) }, "Groq transcription failed");
+          return { text: null, status: "failed" };
+        }
+        this.ctx.logger.warn({ event: "voice.stt.retry", err: err instanceof Error ? err.message : String(err) }, "Groq transcription hiccup, retrying once");
+        await new Promise((r) => setTimeout(r, 400));
+      }
     }
-    const json = (await res.json()) as { text?: string };
+    if (!res || !res.ok) {
+      const body = res ? (await res.text().catch(() => "")).slice(0, 300) : "";
+      this.ctx.logger.warn({ event: "voice.stt.failed", status: res?.status, body }, "Groq transcription failed");
+      return { text: null, status: "failed" };
+    }
+    const json = (await res.json()) as { text?: string; language?: string; segments?: SttSegment[] };
     const text = json.text?.trim();
-    this.dbg("voice.stt.result", { transcript: text ?? "" });
-    return text ? text : null;
+    this.dbg("voice.stt.result", { transcript: text ?? "", language: json.language });
+    if (!text) return { text: null, status: "empty", language: json.language };
+    if (isSilenceTranscript(json.segments)) return { text: null, status: "filtered", language: json.language };
+    return { text, status: "ok", language: json.language };
   }
 
-  // -- text to speech (Groq Orpheus, hosted) ---------------------------------
-
-  /** One request = one chunk of at most 200 characters; returns the WAV bytes. */
   private async synthesize(text: string, settings: VoiceSettings): Promise<Buffer> {
-    const input = settings.direction ? `[${settings.direction}] ${text}` : text;
+    // A chunk that is mostly Arabic script goes to the Arabic model (its own voice; it takes no [direction]).
+    const arabic = this.cfg.arabic?.enabled !== false && this.cfg.arabic !== undefined && languageOf(text) === "ar";
+    const model = arabic ? this.cfg.arabic!.model : this.cfg.ttsModel;
+    const voice = arabic ? this.cfg.arabic!.voice : settings.voice;
+    const input = !arabic && settings.direction ? `[${settings.direction}] ${text}` : text;
     const res = await fetch(GROQ_TTS_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.cfg.groqApiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: this.cfg.ttsModel, voice: settings.voice, input, response_format: "wav" }),
+      body: JSON.stringify({ model, voice, input, response_format: "wav" }),
       signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) {
       const body = (await res.text().catch(() => "")).slice(0, 300);
-      this.ctx.logger.warn({ event: "voice.tts.failed", status: res.status, body }, "Groq text-to-speech failed");
+      this.ctx.logger.warn({ event: "voice.tts.failed", status: res.status, model, body }, "Groq text-to-speech failed");
+      if (arabic && (res.status === 400 || res.status === 403) && !this.warnedArabicTerms) {
+        this.warnedArabicTerms = true;
+        this.ctx.logger.error({ event: "voice.tts.arabicTerms", model }, "Arabic speech was refused. Accept the model's terms once in the Groq console (Playground > text-to-speech > the Arabic model), then it works");
+      }
       throw new Error(`Groq TTS HTTP ${res.status}`);
     }
     return Buffer.from(await res.arrayBuffer());

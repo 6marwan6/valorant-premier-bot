@@ -1496,3 +1496,16 @@ revised where it said otherwise (section 4 note "2026-10-01 (b)", section 41 not
 
 Not verifiable from this sandbox (no Discord/Groq route): how the voice sounds, the real cold-start timings,
 Groq accepting `[flirty]`, and the actual cause of any LLM-provider cold start.
+
+## 2026-10-01 (c) — English + Arabic, listening hardening
+
+- **Languages**: `LANGUAGE_LINE` in chat contexts (typed + spoken); Arabic TTS per chunk by script
+  (`languageOf`, `synthesize`); STT `whisper-large-v3`, language auto; Arabic punctuation in chunking.
+- **Protected topics**: `src/modules/ai/topicMatch.ts` (Arabic normalization + English/Arabic topic groups),
+  re-exported from `aiOutput.ts` so every caller (output, memory candidates, retrieval) gets it. English matching
+  is unchanged (a test pins that "mom" is not caught by "family").
+- **Hardening**: min clip 0.3 s, follow-up window (12 s), Arabic wake words, `verbose_json` confidence filter,
+  one STT retry, `voice.utterance` outcome log, `busy` now logged.
+- **`getNumber` was missing from the HTTP adapter** (found when `/mari-join` threw); a test now checks every
+  option type used by any command has a getter.
+- **Not built**: other STT provider (needs a plan decision), voice notes (needs trigger/language decisions).

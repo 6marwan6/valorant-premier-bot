@@ -101,3 +101,43 @@ What she says is unchanged (her persona and each player's spice level); only the
 
 The Groq free-plan self-limits in `worker/voice.ts` (`STT_MAX_PER_MINUTE`, `MAX_TTS_CHUNKS`,
 `MAX_SPOKEN_CHARS`) are unchanged; raise them if you are on a paid Groq tier.
+
+## English and Arabic (2026-10-01 (c))
+
+- **She answers in the language you used.** One prompt rule, for typed and spoken replies. If you mix, she mixes.
+- **Hearing:** Groq Whisper `whisper-large-v3`, language on `auto`. If you only ever speak one language, set
+  `VOICE_STT_LANGUAGE=en` or `ar`: a fixed language is more reliable than auto-detection on short clips.
+- **Speaking:** each sentence goes to the Arabic Orpheus model if it is mostly Arabic script, otherwise to the
+  English one. The Arabic voice is a **Saudi accent** and ignores `direction` (no flirty tag there), so she'll
+  sound different in Arabic. **Accept the Arabic model's terms in the Groq console once**, or you get HTTP 400
+  (the log says `voice.tts.arabicTerms`). Pitch still applies.
+- **Protected topics** are matched in both languages (see the plan, section 4, (c) item 2). It's a keyword layer,
+  not a translator: have players list their protected topics in the words they'd actually use.
+
+## Why she sometimes didn't answer, and what changed
+
+| Cause | Fix |
+|---|---|
+| A short "Mari?" was under 0.7 s and dropped | Minimum is now 0.3 s |
+| Your sentence was cut by a pause; neither half had her name | A follow-up within 12 s of her answering needs no name |
+| Arabic "ماري" wasn't recognized as her name | Arabic spellings added |
+| A Groq hiccup (timeout/429/5xx) = silent failure | One retry |
+| You spoke while she was thinking/speaking | Still ignored (no barge-in yet), but now logged as `busy` |
+| Whisper invented text from silence/noise | Rejected by Whisper's own confidence, not just a word list |
+
+Every utterance now logs `voice.utterance` with an `outcome` (`busy`, `tooShort`, `stt_failed`, `stt_empty`,
+`stt_filtered`, `stt_rateLimited`, `noWakeWord`, `noise`); an answered one logs `voice.turn.timing`. When she
+doesn't respond, that line says why.
+
+## Faster / more accurate: what is and isn't built
+
+Built (all on Groq, no new vendor): the fixes above, and `whisper-large-v3` by default.
+
+**Not built, your call:** a different speech-to-text provider. Honest state of the evidence: published Arabic
+comparisons are mostly written by vendors and they disagree (one benchmark says Whisper on Groq is poor for Gulf
+Arabic and Deepgram Nova-3 wins; another ranks Nova-3 9th on an open Arabic leaderboard). Deepgram Nova-3 Arabic
+does list Egyptian (`ar-EG`) and has streaming plus a $200 starting credit, so it is the one worth A/B testing
+on *your* voices. Streaming STT is also the only real lever on speed (she could be transcribing while you talk,
+instead of waiting 0.7 s of silence and then uploading the clip). It needs a new API key, a plan revision (a
+second vendor hears the team's voices), and a switch like `VOICE_STT_PROVIDER=groq|deepgram`. Libraries don't
+help here: the hosted APIs are the model.

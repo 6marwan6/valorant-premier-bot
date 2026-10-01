@@ -82,6 +82,13 @@ export function buildCommandInteractionAdapter(
         if (required) throw new Error(`Missing required integer option: ${name}`);
         return null;
       },
+      /** Decimal options (/mari-join pitch). Was missing, so any command using one threw "getNumber is not a function" over HTTP. */
+      getNumber(name: string, required?: boolean): number | null {
+        const opt = findOption(options, name);
+        if (opt && opt.type === ApplicationCommandOptionType.Number) return Number(opt.value);
+        if (required) throw new Error(`Missing required number option: ${name}`);
+        return null;
+      },
       getChannel(name: string): { id: string } | null {
         const opt = findOption(options, name);
         if (opt && opt.type === ApplicationCommandOptionType.Channel) return { id: opt.value };
