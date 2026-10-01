@@ -9,6 +9,7 @@ import { PlayerRepository } from "./database/repositories/playerRepository.js";
 import { AiConversationRepository } from "./database/repositories/aiConversationRepository.js";
 import { MemoryRepository } from "./database/repositories/memoryRepository.js";
 import { MatchEventRepository } from "./database/repositories/matchEventRepository.js";
+import { VoiceJoinRepository } from "./database/repositories/voiceJoinRepository.js";
 import { MatchService } from "./modules/matches/matchService.js";
 import { AttendanceService } from "./modules/attendance/attendanceService.js";
 import { DiscordRestClient } from "./discord/discordRest.js";
@@ -49,6 +50,7 @@ export interface AppContext {
     aiConversations: AiConversationRepository;
     memories: MemoryRepository;
     matchEvents: MatchEventRepository;
+    voiceJoins: VoiceJoinRepository;
   };
   services: {
     matches: MatchService;
@@ -76,6 +78,7 @@ export function buildAppContext(params: {
   const aiConversationRepo = new AiConversationRepository(params.db);
   const memoryRepo = new MemoryRepository(params.db);
   const matchEventRepo = new MatchEventRepository(params.db);
+  const voiceJoinRepo = new VoiceJoinRepository(params.db);
   const { llm: llmOverride, ...contextParams } = params;
   const llm = llmOverride !== undefined ? llmOverride : createLlmClient(params.env, params.logger);
   // 2026-09-29: roster / next match / last result / teammates' public memories, read from the DB for the free-form chats.
@@ -93,6 +96,7 @@ export function buildAppContext(params: {
       aiConversations: aiConversationRepo,
       memories: memoryRepo,
       matchEvents: matchEventRepo,
+      voiceJoins: voiceJoinRepo,
     },
     services: {
       matches: new MatchService(matchRepo, serverConfigRepo),

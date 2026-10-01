@@ -140,6 +140,17 @@ Store:
 > Reply-button/cron-poll paths keep working (design principle #8). Every
 > other "out of scope" item above is unchanged.
 
+> **Revision, 2026-10-01 (Marwan, product owner):** the "Voice AI" item
+> below gets one narrow exception, and only inside the gateway worker
+> above: Mari may join the single configured voice channel, hear roster
+> players say her name, and answer out loud (`worker/voice.ts`). It is
+> optional and off unless `GROQ_API_KEY` is set; an admin chooses the
+> channel and the time with `/mari-join` (section 41);
+> nothing is recorded or stored; speech-to-text is Groq Whisper and
+> text-to-speech is Groq Orpheus (hosted — no local model, so the host
+> installs ~14 MB). The serverless app never touches voice. Every other
+> "out of scope" item is unchanged.
+
 Do not build:
 
 - Web dashboard.
@@ -1536,6 +1547,19 @@ Initial commands:
 ```
 
 Commands should be permission-controlled.
+
+> **Revision, 2026-10-01:** `/mari-join` added (admin only) — tells Mari
+> which **voice channel** to join and **when** (`time`, optional, default
+> now; `date`, optional; the same forms `/create-match` accepts, in the team
+> timezone). It only writes a request to the database (`voice_join_requests`,
+> one pending at a time — a newer request replaces it); the gateway worker
+> (section 4's 2026-10-01 revision) polls for due requests and joins, so it
+> works only while the worker is running with voice enabled. If the channel
+> is still empty at the join time she waits up to 30 minutes for someone to
+> come in, then the request expires; she never sits alone in an empty
+> channel. Design principles #2 (the database is the source of truth), #8
+> (nothing else depends on the worker) and section 50 (claiming a request is
+> atomic, so a retry can't join twice) apply.
 
 > **Revision, 2026-09-28:** `/add-memory` added — manual starter facts
 > about a player (section 22's nine categories, an explicit visibility per

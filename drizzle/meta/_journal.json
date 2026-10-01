@@ -85,6 +85,13 @@
       "when": 1790565390122,
       "tag": "0011_add_banter_style",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790807451334,
+      "tag": "0012_add_voice_join_requests",
+      "breakpoints": true
     }
   ]
 }

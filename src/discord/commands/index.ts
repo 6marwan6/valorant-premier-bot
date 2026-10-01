@@ -14,6 +14,7 @@ import completeMatchCommand from "./completeMatch.js";
 import mariCommand from "./mari.js";
 import addMemoryCommand from "./addMemory.js";
 import mariSayCommand from "./mariSay.js";
+import mariJoinCommand from "./mariJoin.js";
 
 /**
  * Central command registry. Every command file exports a default `Command`
@@ -31,6 +32,7 @@ import mariSayCommand from "./mariSay.js";
  * 2026-09-28: /mari (section 63's `/ai`, pulled forward) and /add-memory
  * (manual starter facts, an admin extension of section 21).
  * 2026-09-30: /mari-say (admin has Mari post a message verbatim in a channel).
+ * 2026-10-01: /mari-join (admin tells Mari which voice channel to join, and when).
  */
 export const commands: Command[] = [
   setupCommand,
@@ -48,6 +50,7 @@ export const commands: Command[] = [
   mariCommand,
   addMemoryCommand,
   mariSayCommand,
+  mariJoinCommand,
 ];
 
 export const commandsByName: Map<string, Command> = new Map(

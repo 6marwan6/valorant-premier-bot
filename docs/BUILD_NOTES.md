@@ -1039,6 +1039,80 @@ plan section 11's own worked example already uses it, and the team is
 Cairo-based. Still overridable per-guild via `/setup` if that's ever
 wrong for a given deployment.
 
+## Voice (gateway worker) — Groq Orpheus, 2026-10-01
+
+Mari can join a voice channel, hear roster players say her name, and answer
+aloud (`worker/voice.ts`; plan section 4 revision of 2026-10-01).
+
+**Why Kokoro was dropped.** `kokoro-js` dragged in `onnxruntime-node` (208 MB),
+`onnxruntime-web` (92 MB) and the Hugging Face libraries — a 422 MB install plus
+an ~86 MB model download on first run. Small free hosts fail that install in a
+different way each time, and a missing/corrupt `node_modules` switched ALL voice
+off (the worker logs `voice.disabled` with the package that failed). Text-to-speech
+is now Groq's hosted Orpheus, through the same `GROQ_API_KEY` as Whisper.
+
+**Host install: ~14 MB, 12 packages** — `@discordjs/voice`, `@snazzah/davey`
+(required by `@discordjs/voice` for Discord's DAVE encryption; ships a
+per-platform native build, so it must be installed ON the host, never copied from
+your PC), `opusscript`, `dotenv`. Upload only `dist/gateway.js` +
+`dist/package.json` and let the host run `npm install`. Never upload `node_modules`.
+
+**Orpheus facts (from Groq's docs)** — model `canopylabs/orpheus-v1-english`,
+endpoint `/openai/v1/audio/speech`, WAV only, **max 200 characters per request**,
+voices autumn / diana / hannah / austin / daniel / troy, `[direction]` tags for
+delivery. So a reply is split at sentence boundaries into chunks of <=200 chars
+(max 3 per reply, replies capped at 400 spoken chars), synthesized in parallel and
+played as one clip. `[bracketed]` text in a reply is stripped before synthesis so
+chat content can never act as a vocal direction.
+
+**Check before relying on it:** Groq's free-plan TTS request/day limits (see
+console.groq.com/docs/rate-limits) and whether your account must accept Canopy
+Labs' model terms in the Groq console — a 400/403 from `voice.tts.failed` in the
+logs shows the exact message. With `VOICE_DEBUG=1` she speaks a greeting on join,
+which tells "can't speak" apart from "can't hear".
+
+**Not verified from this sandbox:** a live call to Groq (no route to api.groq.com)
+and a live Discord voice session. Verified: WAV parsing, chunking, config and PCM
+resampling (`tests/unit/voiceTts.test.ts`, 18 tests), typecheck, the bundle starting
+on the 14 MB install, and all voice packages loading from it.
+
+### `/mari-join` — which channel, and when (2026-10-01)
+
+`/mari-join channel:<voice channel> [time] [date]` (admin only). `time` omitted =
+now; otherwise the same forms as `/create-match` (`19:00`, `7pm`, `evening`,
+`2 hours`), in the team timezone; `date` needs a `time` and defaults to today.
+A time earlier today is rejected instead of silently meaning "now".
+
+- The command only stores a row in `voice_join_requests` (migration
+  `0012_add_voice_join_requests.sql`); the **worker** polls every 15 s
+  (`VoiceManager.runScheduledJoins`) and joins. So it needs the worker running with
+  voice enabled, and the serverless app never touches voice.
+- One pending request per guild: a new one replaces the old one (that is also how
+  you fix a wrong time). There is no separate cancel command yet.
+- At the join time she joins if someone is in the channel; if it is empty she waits
+  up to 30 minutes, then the request is `EXPIRED`. She leaves when the channel empties.
+- An explicit request moves her out of whatever channel she was in.
+- Claiming a request is an atomic `PENDING -> CLAIMED` update (plan section 50), so
+  overlapping ticks can't join twice. Outcomes are `DONE`, `FAILED` (channel missing,
+  or no Connect/Speak permission: see `voice.join.*` in the worker log), `EXPIRED`,
+  `CANCELLED`.
+- `VOICE_CHANNEL_ID` is now optional: it only names a default channel she also
+  auto-joins when a roster player walks in. Voice is enabled by `GROQ_API_KEY` alone.
+
+**After deploying:** run `npm run db:migrate` and `npm run deploy-commands`, then
+upload the rebuilt `dist/gateway.js`.
+
+**Tests:** `tests/unit/mariJoin.test.ts` (command), `tests/unit/voiceScheduledJoins.test.ts`
+(worker polling with fakes), `decideJoin` cases in `tests/unit/voiceTts.test.ts`,
+`tests/integration/voiceJoinRepository.test.ts` (real Postgres: replace, atomic claim,
+due-ness, finish). Not verified: a real join in Discord (no route from this sandbox).
+
+**Env:** `VOICE_SPEED` no longer exists (Orpheus has no speed setting). An old
+`VOICE_NAME=af_heart` falls back to `hannah`. New optional: `VOICE_TTS_MODEL`,
+`VOICE_DIRECTION`. `VOICE_PITCH` now defaults to 1.
+
+---
+
 ## Hosting & Deployment: serverless (Vercel + Neon), by design
 
 This app targets **free-tier serverless hosting**: Vercel Functions +
