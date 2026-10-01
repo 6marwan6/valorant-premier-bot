@@ -25,12 +25,34 @@ export const DEFAULT_PITCH = 1.08;
 export const MIN_PITCH = 0.8;
 export const MAX_PITCH = 1.25;
 
+/**
+ * Whether she needs to hear her name before answering (2026-10-01 (b), plan section 4):
+ *   name   - always: "Mari, ..." (a group in the channel; she must not talk over match comms)
+ *   always - never: she answers everything the roster player says (just one person with her)
+ *   auto   - "always" while exactly one human is in her channel, "name" otherwise
+ */
+export const LISTEN_MODES = ["auto", "name", "always"] as const;
+export type ListenMode = (typeof LISTEN_MODES)[number];
+export const DEFAULT_LISTEN: ListenMode = "auto";
+
+export const LISTEN_CHOICES: Array<{ name: string; value: ListenMode }> = [
+  { name: "Group: she waits for her name", value: "name" },
+  { name: "Just one person: no name needed", value: "always" },
+  { name: "Auto: no name needed only while one person is with her", value: "auto" },
+];
+
+export function pickListen(raw: string | undefined | null): ListenMode {
+  const v = (raw ?? "").trim().toLowerCase();
+  return (LISTEN_MODES as readonly string[]).includes(v) ? (v as ListenMode) : DEFAULT_LISTEN;
+}
+
 /** What an admin typed in /mari-join. null/undefined = "not specified, keep what she has". */
 export interface VoiceOverrides {
   voice?: string | null;
   /** "" = explicitly no direction. */
   direction?: string | null;
   pitch?: number | null;
+  listen?: string | null;
 }
 
 /** The settings a live session actually speaks with. */
@@ -38,6 +60,7 @@ export interface VoiceSettings {
   voice: string;
   direction: string;
   pitch: number;
+  listen: ListenMode;
 }
 
 /** An unknown voice name falls back to the default instead of failing every request. */
@@ -71,7 +94,7 @@ export function clampPitch(value: number | null | undefined, fallback = 1): numb
 }
 
 export function hasOverrides(o: VoiceOverrides): boolean {
-  return o.voice != null || o.direction != null || o.pitch != null;
+  return o.voice != null || o.direction != null || o.pitch != null || o.listen != null;
 }
 
 /** Layers the admin's choices over a base; every unspecified field is kept. */
@@ -80,6 +103,7 @@ export function applyOverrides(base: VoiceSettings, o: VoiceOverrides): VoiceSet
     voice: o.voice != null ? pickVoice(o.voice) : base.voice,
     direction: o.direction != null ? sanitizeDirection(o.direction) : base.direction,
     pitch: o.pitch != null ? clampPitch(o.pitch, base.pitch) : base.pitch,
+    listen: o.listen != null ? pickListen(o.listen) : base.listen,
   };
 }
 
@@ -89,5 +113,6 @@ export function describeOverrides(o: VoiceOverrides): string {
   if (o.voice != null) parts.push(`voice **${pickVoice(o.voice)}**`);
   if (o.direction != null) parts.push(o.direction === "" ? "no direction" : `direction **${o.direction}**`);
   if (o.pitch != null) parts.push(`pitch **${clampPitch(o.pitch)}**`);
+  if (o.listen != null) parts.push(pickListen(o.listen) === "name" ? "listening: **needs her name**" : pickListen(o.listen) === "always" ? "listening: **no name needed**" : "listening: **auto**");
   return parts.join(" · ");
 }

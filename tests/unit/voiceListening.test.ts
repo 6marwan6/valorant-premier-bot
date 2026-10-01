@@ -42,7 +42,7 @@ describe("voice defaults: a young, playful, flirty gamer girl", () => {
 
   it("defaults to the flirty direction and a slightly raised pitch", () => {
     const cfg = loadVoiceConfig("g", env({}));
-    expect(cfg).toMatchObject({ direction: DEFAULT_DIRECTION, pitch: DEFAULT_PITCH, voice: "hannah", vad: true });
+    expect(cfg).toMatchObject({ direction: DEFAULT_DIRECTION, pitch: DEFAULT_PITCH, voice: "hannah", listen: "auto", warmup: true });
     expect(DEFAULT_DIRECTION).toBe("flirty");
     expect(DEFAULT_PITCH).toBeGreaterThan(1);
   });
@@ -55,13 +55,32 @@ describe("voice defaults: a young, playful, flirty gamer girl", () => {
     expect(loadVoiceConfig("g", env({ VOICE_DIRECTION: "none" }))?.direction).toBe("");
   });
 
-  it("reads the VAD and spoken-reply LLM settings", () => {
-    const cfg = loadVoiceConfig("g", env({ VOICE_VAD: "0", VOICE_VAD_END_MS: "50", VOICE_LLM_MODEL: " fast-model ", VOICE_LLM_MAX_TOKENS: "180" }));
-    expect(cfg).toMatchObject({ vad: false, vadEndMs: 200, llmModel: "fast-model", llmMaxTokens: 180 });
+  it("reads the listen mode, warm-up switch and spoken-reply LLM settings", () => {
+    const cfg = loadVoiceConfig("g", env({ VOICE_LISTEN: "Name", VOICE_WARMUP: "0", VOICE_LLM_MODEL: " fast-model ", VOICE_LLM_MAX_TOKENS: "180" }));
+    expect(cfg).toMatchObject({ listen: "name", warmup: false, llmModel: "fast-model", llmMaxTokens: 180 });
     const plain = loadVoiceConfig("g", env({}));
     expect(plain?.llmModel).toBeUndefined();
     expect(plain?.llmMaxTokens).toBeUndefined();
-    expect(plain?.vadEndMs).toBe(450);
+    expect(loadVoiceConfig("g", env({ VOICE_LISTEN: "garbage" }))?.listen).toBe("auto");
+  });
+});
+
+describe("explicit listen modes (set per session with /mari-join listen:...)", () => {
+  it('"name" needs her name even when she is alone with one person', () => {
+    expect(decideAnswer({ transcript: "what do you think", humans: 1, listen: "name" })).toEqual({ answer: false, reason: "noWakeWord" });
+    expect(decideAnswer({ transcript: "mari what do you think", humans: 1, listen: "name" })).toEqual({ answer: true, reason: "wakeWord" });
+  });
+
+  it('"always" answers without her name regardless of the headcount, but still drops junk', () => {
+    expect(decideAnswer({ transcript: "what do you think", humans: 4, listen: "always" })).toEqual({ answer: true, reason: "listenAll" });
+    expect(decideAnswer({ transcript: "what do you think", humans: null, listen: "always" })).toEqual({ answer: true, reason: "listenAll" });
+    expect(decideAnswer({ transcript: "Thank you.", humans: 1, listen: "always" })).toEqual({ answer: false, reason: "noise" });
+  });
+
+  it('"auto" (and no mode at all) keeps the headcount rule', () => {
+    expect(decideAnswer({ transcript: "what do you think", humans: 1, listen: "auto" })).toEqual({ answer: true, reason: "alone" });
+    expect(decideAnswer({ transcript: "what do you think", humans: 2, listen: "auto" })).toEqual({ answer: false, reason: "noWakeWord" });
+    expect(decideAnswer({ transcript: "what do you think", humans: 1 })).toEqual({ answer: true, reason: "alone" });
   });
 });
 
@@ -166,36 +185,43 @@ describe("VoiceManager.autoJoinTick (she joins by herself, not only through /mar
   });
 });
 
-describe("the text message on entering", () => {
-  const announce = (m: VoiceManager, ch: unknown) => (m as unknown as { announceJoin: (c: unknown) => Promise<void> }).announceJoin(ch);
-
-  it("posts in the voice channel's own chat when it can", async () => {
+describe("no text message when she joins (2026-10-01 (b))", () => {
+  it("has no join announcement at all", async () => {
     const t = await setup({});
-    await announce(t.manager, t.channel);
-    expect(t.channel.send).toHaveBeenCalledTimes(1);
-    expect(t.matchText.send).not.toHaveBeenCalled();
+    expect((t.manager as unknown as { announceJoin?: unknown }).announceJoin).toBeUndefined();
+  });
+});
+
+describe("cold start", () => {
+  it("looking a player up twice in a minute hits the database once (the first words are no longer lost to a DB wait)", async () => {
+    const t = await setup({ roster: ["p1"] });
+    const rosterPlayer = (id: string) => (t.manager as unknown as { rosterPlayer: (id: string) => Promise<unknown> }).rosterPlayer(id);
+    expect(await rosterPlayer("p1")).toMatchObject({ discordUserId: "p1" });
+    await rosterPlayer("p1");
+    await rosterPlayer("stranger");
+    await rosterPlayer("stranger");
+    expect((t.ctx.repositories.players.getByDiscordUserId as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
   });
 
-  it("falls back to the match channel when the voice chat isn't writable", async () => {
-    const t = await setup({ sendFails: true });
-    await announce(t.manager, t.channel);
-    expect(t.matchText.send).toHaveBeenCalledTimes(1);
-    expect(String((t.matchText.send.mock.calls[0] as unknown as [string])[0])).toContain("<#voice-9>");
+  it("the warm-up looks up the players already there, opens a Groq connection, synthesizes one throw-away word, and logs timings", async () => {
+    const t = await setup({ members: [human("p1"), bot("b")], roster: ["p1"] });
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+    const synth = vi.fn(async () => Buffer.alloc(0));
+    (t.manager as unknown as { synthesize: typeof synth }).synthesize = synth;
+    await t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "flirty", pitch: 1.08, listen: "auto" });
+    expect(synth).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0]![0])).toContain("api.groq.com");
+    expect((t.ctx.repositories.players.getByDiscordUserId as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1); // the human, not the bot
+    expect(t.logger.info.mock.calls.some((c) => (c[0] as { event: string }).event === "voice.warmup")).toBe(true);
+    spy.mockRestore();
   });
 
-  it("logs why when neither place works, instead of staying silent", async () => {
-    const t = await setup({ sendFails: true, matchChannel: null });
-    await announce(t.manager, t.channel);
-    const warned = t.logger.warn.mock.calls.map((c) => c[0] as { event: string; voiceChatError?: string });
-    expect(warned.some((w) => w.event === "voice.announce.failed" && w.voiceChatError === "Missing Permissions")).toBe(true);
-  });
-
-  it("tells the players the new listening rule", async () => {
-    const t = await setup({});
-    await announce(t.manager, t.channel);
-    const text = String((t.channel.send.mock.calls[0] as unknown as [string])[0]);
-    expect(text).toMatch(/just you and me/i);
-    expect(text).toMatch(/say my name/i);
+  it("a failing warm-up step is reported, never thrown", async () => {
+    const t = await setup({ members: [human("p1")], roster: ["p1"] });
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Promise.reject(new Error("offline")));
+    (t.manager as unknown as { synthesize: () => Promise<never> }).synthesize = async () => Promise.reject(new Error("tts down"));
+    await expect(t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "", pitch: 1, listen: "auto" })).resolves.toBeUndefined();
+    spy.mockRestore();
   });
 });
 

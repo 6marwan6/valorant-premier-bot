@@ -3,6 +3,7 @@ import type { Command } from "./types.js";
 import { requireAdminWithConfig } from "../commandGuards.js";
 import { parseMatchDateTime } from "../../modules/matches/dateTime.js";
 import {
+  LISTEN_CHOICES,
   MAX_PITCH,
   MIN_PITCH,
   ORPHEUS_VOICES,
@@ -39,6 +40,10 @@ const PAST_GRACE_MS = 5 * 60_000;
  *   now — so `/mari-join channel:#x voice:troy` changes the voice of a live session without
  *   moving her. They apply to this session only; she goes back to the defaults next time she
  *   joins fresh (an auto-join or a request that names a different channel).
+ * - `listen` (optional, 2026-10-01 (b)): whether she needs her name. "Group" = only when she hears
+ *   "Mari"; "Just one person" = she answers everything the roster player says; "Auto" (the default)
+ *   = no name needed only while exactly one human is with her. Same rules as the other choices:
+ *   left out keeps what she has, applies to this session, changes a live session without moving her.
  * - Admin only, like every command that changes how the bot behaves.
  */
 const data = new SlashCommandBuilder()
@@ -73,6 +78,13 @@ const data = new SlashCommandBuilder()
       .setRequired(false)
       .setMaxLength(30),
   )
+  .addStringOption((opt) =>
+    opt
+      .setName("listen")
+      .setDescription("Does she need to hear her name? Group = yes; Just one person = no (default: auto)")
+      .setRequired(false)
+      .addChoices(...LISTEN_CHOICES),
+  )
   .addNumberOption((opt) =>
     opt
       .setName("pitch")
@@ -95,6 +107,7 @@ const mariJoinCommand: Command = {
       voice: interaction.options.getString("voice"),
       direction: rawDirection === null ? null : sanitizeDirection(rawDirection),
       pitch: interaction.options.getNumber("pitch"),
+      listen: interaction.options.getString("listen"),
     };
     if (rawDirection !== null && rawDirection.trim() !== "" && overrides.direction === "" && !/^(none|off|default|clear)$/i.test(rawDirection.trim())) {
       await interaction.reply({ content: "❌ `direction` must be plain words (letters only), e.g. `cheerful`. Type `none` to clear it.", ephemeral: true });

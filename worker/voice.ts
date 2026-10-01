@@ -15,13 +15,13 @@
  * The loop, per utterance:
  *   1. A roster player speaks. Anyone NOT on the active roster is never
  *      captured or transcribed at all (privacy + it saves the free STT quota).
- *   2. Their Opus packets are decoded, cut when they stop talking (a fixed silence window, or
- *      sooner when the local Silero VAD says the tail was not speech, worker/vad.ts; an
- *      utterance with no real speech in it is dropped before it reaches STT), and sent to
+ *   2. Their Opus packets are decoded, cut at ~0.7 s of silence, and sent to
  *      Groq's hosted Whisper (free plan, no card) for transcription.
- *   3. With two or more humans in the channel she only answers if her name was said
- *      ("Mari, ...") — she must not talk over match comms. With exactly one human with her
- *      she answers everything they say (2026-10-01 revision, plan section 4).
+ *   3. Whether she needs her name is the session's `listen` mode (plan section 4, 2026-10-01 (b)):
+ *      "name" = only when "Mari, ..." is said (a group: she must not talk over match comms);
+ *      "always" = answers everything the roster player says (just one person with her);
+ *      "auto" (default) = "always" while exactly one human is in the channel, else "name".
+ *      /mari-join sets it per session.
  *   4. The transcript goes through the SAME runServerChatTurn the `@Mari`
  *      mention uses (same persona, same memory filtering for a public
  *      audience); only `deliver` differs — it speaks instead of posting.
@@ -43,8 +43,8 @@
  *   VOICE_DIRECTION     delivery hint sent as [word] (default "flirty": a young, playful gamer girl);
  *                       "none" sends no direction
  *   VOICE_PITCH         pitch multiplier, 1 = unchanged (default 1.08; also a little faster)
- *   VOICE_VAD           0 = never load the local VAD (default on when onnxruntime-web is installed)
- *   VOICE_VAD_END_MS    wait after the last audio when the tail was not speech (default 450, 200-1500)
+ *   VOICE_LISTEN        auto (default) | name | always: whether she needs her name (see 3 above)
+ *   VOICE_WARMUP        0 = skip the warm-up she does on joining (default on)
  *   VOICE_LLM_MODEL     optional faster model just for spoken replies (same provider as LLM_MODEL)
  *   VOICE_LLM_MAX_TOKENS optional output cap for spoken replies; leave unset unless replies get cut off
  *   VOICE_STT_LANGUAGE  ISO code for Whisper (default en; "auto" = detect)
@@ -67,6 +67,8 @@ import { MAX_PLAYER_MESSAGE_CHARS } from "../src/modules/ai/conversationService.
 import {
   DEFAULT_PITCH,
   ORPHEUS_VOICES,
+  pickListen,
+  type ListenMode,
   applyOverrides,
   directionFromEnv,
   hasOverrides,
@@ -74,7 +76,6 @@ import {
   type VoiceOverrides,
   type VoiceSettings,
 } from "../src/modules/voice/voiceSettings.js";
-import { SpeechTracker, endDelayMs, loadSileroVad, pcm48kStereoToMono16kFloat, type VadModel } from "./vad.js";
 
 // Kept exported from here: the unit tests (and anything else) import them from the worker module.
 export { ORPHEUS_VOICES, pickVoice };
@@ -94,9 +95,6 @@ const GROQ_STT_MODEL = "whisper-large-v3-turbo";
 /** Quiet time that ends an utterance. Was 900; 700 trims 0.2 s off every answer (VOICE_SILENCE_MS overrides). */
 const DEFAULT_SILENCE_MS = 700;
 const MIN_UTTERANCE_MS = 700;
-/** With VAD the real measure is speech time, not clip length (Discord only sends audio while someone talks). "Mari." alone is ~300 ms. */
-const MIN_SPEECH_MS = 250;
-const DEFAULT_VAD_END_MS = 450;
 const MAX_UTTERANCE_MS = 20_000;
 /** Groq's free plan allows 20 requests/minute; stay under it. */
 const STT_MAX_PER_MINUTE = 15;
@@ -135,19 +133,23 @@ export function isLikelyNoise(transcript: string): boolean {
   return t.length < 2 || WHISPER_HALLUCINATIONS.has(t);
 }
 
-export type AnswerDecision = { answer: true; reason: "wakeWord" | "alone" } | { answer: false; reason: "noWakeWord" | "noise" };
+export type AnswerDecision = { answer: true; reason: "wakeWord" | "alone" | "listenAll" } | { answer: false; reason: "noWakeWord" | "noise" };
 
 /**
- * Should she answer this transcript? (2026-10-01, plan section 4's voice revision.)
- *   - Two or more humans in the channel: only when her name was said, so she never talks over match comms.
- *   - Exactly one human with her: they can only be talking to her, so no name is needed.
- *   - `humans` unknown (null) counts as "several": the cautious reading.
+ * Should she answer this transcript? (2026-10-01 (b), plan section 4.) By the session's `listen` mode:
+ *   - "name": only when her name was said, so she never talks over a group's match comms.
+ *   - "always": whatever the roster player says (a single person with her).
+ *   - "auto": "always" while exactly one human is in her channel, otherwise "name". `humans` unknown
+ *     (null) counts as "several": the cautious reading.
  * The name always works. Without it, junk transcripts are dropped (isLikelyNoise).
  */
-export function decideAnswer(p: { transcript: string; humans: number | null }): AnswerDecision {
+export function decideAnswer(p: { transcript: string; humans: number | null; listen?: ListenMode }): AnswerDecision {
   if (WAKE_WORD.test(p.transcript)) return { answer: true, reason: "wakeWord" };
-  if (p.humans === 1) return isLikelyNoise(p.transcript) ? { answer: false, reason: "noise" } : { answer: true, reason: "alone" };
-  return { answer: false, reason: "noWakeWord" };
+  const listen = p.listen ?? "auto";
+  const withoutName = listen === "always" || (listen === "auto" && p.humans === 1);
+  if (!withoutName) return { answer: false, reason: "noWakeWord" };
+  if (isLikelyNoise(p.transcript)) return { answer: false, reason: "noise" };
+  return { answer: true, reason: listen === "always" ? "listenAll" : "alone" };
 }
 
 export interface VoiceConfig {
@@ -164,10 +166,10 @@ export interface VoiceConfig {
   debug: boolean;
   /** Silence that ends an utterance; omitted = DEFAULT_SILENCE_MS. */
   silenceMs?: number;
-  /** Load the local Silero VAD (worker/vad.ts). Omitted = off, which is also what happens if it can't load. */
-  vad?: boolean;
-  /** Wait after the last audio when the VAD says the tail was not speech; omitted = DEFAULT_VAD_END_MS. */
-  vadEndMs?: number;
+  /** Default listening mode for a session; /mari-join can override it. Omitted = "auto". */
+  listen?: ListenMode;
+  /** Warm connections and the database when she joins. Omitted = off (tests); loadVoiceConfig turns it on. */
+  warmup?: boolean;
   /** Optional model/output cap for spoken replies only (everything else keeps LLM_MODEL / LLM_MAX_TOKENS). */
   llmModel?: string;
   llmMaxTokens?: number;
@@ -192,8 +194,8 @@ export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.
     language: e.VOICE_STT_LANGUAGE?.trim() || "en",
     debug: ["1", "true", "yes"].includes((e.VOICE_DEBUG ?? "").trim().toLowerCase()),
     silenceMs: Math.min(2_000, Math.max(300, Math.round(num(e.VOICE_SILENCE_MS, DEFAULT_SILENCE_MS)))),
-    vad: !["0", "false", "no", "off"].includes((e.VOICE_VAD ?? "").trim().toLowerCase()),
-    vadEndMs: Math.min(1_500, Math.max(200, Math.round(num(e.VOICE_VAD_END_MS, DEFAULT_VAD_END_MS)))),
+    listen: pickListen(e.VOICE_LISTEN),
+    warmup: !["0", "false", "no", "off"].includes((e.VOICE_WARMUP ?? "").trim().toLowerCase()),
     llmModel: e.VOICE_LLM_MODEL?.trim() || undefined,
     llmMaxTokens: e.VOICE_LLM_MAX_TOKENS ? Math.round(num(e.VOICE_LLM_MAX_TOKENS, 0)) || undefined : undefined,
   };
@@ -437,6 +439,8 @@ interface Session {
   recovering?: boolean;
   /** What she speaks with in this session: the VOICE_* defaults, then whatever /mari-join chose. */
   settings: VoiceSettings;
+  /** Answered turns so far in this session; the first one is logged so a cold start is visible in `voice.turn.timing`. */
+  turns: number;
 }
 
 /** Per-turn stage timings, logged without any message content (plan sections 51 and 58). */
@@ -462,29 +466,18 @@ export class VoiceManager {
   private autoJoining = false;
   private warnedChannelMissing = false;
   private readonly sttTimes: number[] = [];
-  private readonly rosterCache = new Map<string, { active: boolean; at: number }>();
+  private readonly rosterCache = new Map<string, { player: Awaited<ReturnType<VoiceManager["isActivePlayer"]>>; at: number }>();
 
   private constructor(
     private readonly client: Client,
     private readonly ctx: AppContext,
     private readonly cfg: VoiceConfig,
     private readonly deps: VoiceDeps,
-    /** Local Silero VAD, or null: then the fixed silence window is used exactly as before. */
-    private readonly vad: VadModel | null = null,
   ) {}
 
   /** Throws if the voice packages aren't installed; the caller logs it and carries on without voice. */
   static async create(client: Client, ctx: AppContext, cfg: VoiceConfig): Promise<VoiceManager> {
-    const deps = await loadVoiceDeps();
-    let vad: VadModel | null = null;
-    if (cfg.vad) {
-      vad = await loadSileroVad({
-        modelPath: process.env.VOICE_VAD_MODEL?.trim() || undefined,
-        onError: (message) => ctx.logger.warn({ event: "voice.vad.unavailable", err: message }, "Local VAD unavailable — using the fixed silence window (install onnxruntime-web, or set VOICE_VAD=0 to silence this)"),
-      });
-      if (vad) ctx.logger.info({ event: "voice.vad.enabled" }, "Local VAD (Silero) loaded");
-    }
-    return new VoiceManager(client, ctx, cfg, deps, vad);
+    return new VoiceManager(client, ctx, cfg, await loadVoiceDeps());
   }
 
   /** Verbose stage logging, only with VOICE_DEBUG=1. */
@@ -494,16 +487,16 @@ export class VoiceManager {
 
   /** The env defaults; /mari-join choices are layered on top per session. */
   private defaultSettings(): VoiceSettings {
-    return { voice: this.cfg.voice, direction: this.cfg.direction, pitch: this.cfg.pitch };
+    return { voice: this.cfg.voice, direction: this.cfg.direction, pitch: this.cfg.pitch, listen: this.cfg.listen ?? "auto" };
   }
 
   /** Applies /mari-join choices to a live session (anything left unspecified is kept). Returns whether anything changed. */
   private applySettings(session: Session, overrides: VoiceOverrides): boolean {
     if (!hasOverrides(overrides)) return false;
     const next = applyOverrides(session.settings, overrides);
-    const changed = next.voice !== session.settings.voice || next.direction !== session.settings.direction || next.pitch !== session.settings.pitch;
+    const changed = next.voice !== session.settings.voice || next.direction !== session.settings.direction || next.pitch !== session.settings.pitch || next.listen !== session.settings.listen;
     session.settings = next;
-    this.ctx.logger.info({ event: "voice.settings.applied", changed, voice: next.voice, direction: next.direction, pitch: next.pitch }, "Voice settings updated from /mari-join");
+    this.ctx.logger.info({ event: "voice.settings.applied", changed, voice: next.voice, direction: next.direction, pitch: next.pitch, listen: next.listen }, "Voice settings updated from /mari-join");
     return changed;
   }
 
@@ -588,7 +581,7 @@ export class VoiceManager {
           continue;
         }
         if (!(await repo.claim(req.id))) continue;
-        const overrides: VoiceOverrides = { voice: req.voice, direction: req.direction, pitch: req.pitch };
+        const overrides: VoiceOverrides = { voice: req.voice, direction: req.direction, pitch: req.pitch, listen: req.listen };
         if (this.session?.channelId === channel.id) {
           this.applySettings(this.session, overrides); // already there: just retune her voice
           await repo.finish(req.id, "DONE");
@@ -696,7 +689,7 @@ export class VoiceManager {
       player.on("error", (err) => this.ctx.logger.warn({ event: "voice.player.error", err: err.message }, "Audio player error"));
       player.on("stateChange", (o, n) => this.dbg("voice.player.state", { from: o.status, to: n.status }));
       connection.subscribe(player);
-      const session: Session = { channelId: channel.id, connection, player, capturing: new Set(), busy: false, settings: applyOverrides(this.defaultSettings(), overrides) };
+      const session: Session = { channelId: channel.id, connection, player, capturing: new Set(), busy: false, turns: 0, settings: applyOverrides(this.defaultSettings(), overrides) };
       this.session = session;
 
       connection.on(dv.VoiceConnectionStatus.Disconnected, () => void this.recover(session, connection));
@@ -706,8 +699,7 @@ export class VoiceManager {
       });
 
       this.ctx.logger.info({ event: "voice.joined", channelId: channel.id }, "Mari joined the voice channel");
-
-      await this.announceJoin(channel);
+      if (this.cfg.warmup) void this.warmUp(channel, session.settings);
 
       if (this.cfg.debug) {
         // Plays the whole TTS path straight away, so "she never speaks" can be told apart from "she never hears".
@@ -801,38 +793,6 @@ export class VoiceManager {
     this.ctx.logger.info({ event: "voice.left" }, "Mari left the voice channel");
   }
 
-  /**
-   * The text message on entering (2026-10-01). It used to go only to the voice channel's own chat and
-   * every failure was swallowed, so when that chat wasn't writable she joined without a word and
-   * nothing said why. Now: try the voice channel's chat, then the server's match channel, and log
-   * what went wrong if both fail.
-   */
-  private async announceJoin(channel: VoiceBasedChannel): Promise<void> {
-    const text =
-      "🎙️ Hi! I'm in voice. If it's just you and me I'll answer whatever you say; with a few of you, say my name first. Only team members are transcribed (via Groq), and nothing is recorded or saved. ✨";
-    let firstError = "";
-    try {
-      await channel.send(text);
-      return;
-    } catch (err) {
-      firstError = err instanceof Error ? err.message : String(err);
-    }
-    try {
-      const config = await this.ctx.repositories.serverConfig.getByGuildId(this.cfg.guildId);
-      const textId = config?.matchChannelId;
-      if (textId) {
-        const target = await this.client.channels.fetch(textId);
-        if (target && target.isTextBased() && "send" in target) {
-          await target.send(`🎙️ Mari joined <#${channel.id}>. ${text}`);
-          return;
-        }
-      }
-      this.ctx.logger.warn({ event: "voice.announce.failed", channelId: channel.id, voiceChatError: firstError, matchChannelSet: Boolean(textId) }, "Mari joined but couldn't post her hello (give her Send Messages in the voice channel's chat, or set /setup match_channel)");
-    } catch (err) {
-      this.ctx.logger.warn({ event: "voice.announce.failed", channelId: channel.id, voiceChatError: firstError, err: err instanceof Error ? err.message : String(err) }, "Mari joined but couldn't post her hello");
-    }
-  }
-
   /** Humans (not bots) currently in her channel; null if the channel isn't cached, which callers treat as "several". */
   private humansInSession(session: Session): number | null {
     const ch = this.client.channels.cache.get(session.channelId);
@@ -847,12 +807,18 @@ export class VoiceManager {
     return player && player.active ? player : null;
   }
 
-  /** Cached roster check: "speaking start" fires constantly and shouldn't hit the database each time. */
+  /**
+   * Cached roster check: "speaking start" fires constantly and shouldn't hit the database each time.
+   * Both answers are cached (60 s). Before, only "not on the roster" was, so a real player's every utterance
+   * waited on a database round trip BEFORE recording started: after an idle spell (a scale-to-zero Postgres)
+   * that wait swallowed the first words of the first sentence — one cause of the cold start. A player removed
+   * with /remove-player can still be answered for up to a minute; their settings are re-read fresh each turn.
+   */
   private async rosterPlayer(userId: string) {
     const cached = this.rosterCache.get(userId);
-    if (cached && Date.now() - cached.at < ROSTER_CACHE_MS && !cached.active) return null;
-    const player = await this.isActivePlayer(userId);
-    this.rosterCache.set(userId, { active: Boolean(player), at: Date.now() });
+    if (cached && Date.now() - cached.at < ROSTER_CACHE_MS) return cached.player;
+    const player = (await this.isActivePlayer(userId)) ?? null;
+    this.rosterCache.set(userId, { player, at: Date.now() });
     return player;
   }
 
@@ -867,19 +833,17 @@ export class VoiceManager {
         return; // not on the roster: never captured, never transcribed
       }
 
-      const captured = await this.capture(session, userId);
+      const pcm = await this.capture(session, userId);
       session.capturing.delete(userId);
-      const ms = (captured.pcm.length / BYTES_PER_FRAME / DISCORD_RATE) * 1000;
-      // With VAD the question is "was there speech", not "how long was the clip" (a short "Mari." is a real utterance).
-      const tooShort = captured.speechMs !== null ? captured.speechMs < MIN_SPEECH_MS : ms < MIN_UTTERANCE_MS;
-      if (tooShort || session.busy || this.session !== session) {
-        this.dbg("voice.capture.dropped", { userId, ms: Math.round(ms), speechMs: captured.speechMs, busy: session.busy });
+      const ms = (pcm.length / BYTES_PER_FRAME / DISCORD_RATE) * 1000;
+      if (ms < MIN_UTTERANCE_MS || session.busy || this.session !== session) {
+        this.dbg("voice.capture.dropped", { userId, ms: Math.round(ms), busy: session.busy });
         return;
       }
 
       session.busy = true;
       try {
-        await this.handleUtterance(session, userId, player, captured);
+        await this.handleUtterance(session, userId, player, pcm);
       } finally {
         session.busy = false;
       }
@@ -890,47 +854,22 @@ export class VoiceManager {
     }
   }
 
-  /**
-   * Records one utterance. Without VAD this is Discord's own "end after N ms of silence". With VAD the
-   * stream is ended by our timer instead, re-armed after every packet: the full silence window while the
-   * last audio was speech, the shorter VAD window once the tail was not (worker/vad.ts `endDelayMs`).
-   * `speechMs` is null when no VAD ran (or it failed mid-way), so callers fall back to clip length.
-   */
-  private capture(session: Session, userId: string): Promise<{ pcm: Buffer; speechMs: number | null; endWaitMs: number }> {
+  private capture(session: Session, userId: string): Promise<Buffer> {
     return new Promise((resolve) => {
-      const silenceMs = this.cfg.silenceMs ?? DEFAULT_SILENCE_MS;
-      const vadEndMs = this.cfg.vadEndMs ?? DEFAULT_VAD_END_MS;
-      const vadStream = this.vad?.createStream() ?? null;
-      const { EndBehaviorType } = this.deps.dv;
       const opus = session.connection.receiver.subscribe(userId, {
-        end: vadStream ? { behavior: EndBehaviorType.Manual } : { behavior: EndBehaviorType.AfterSilence, duration: silenceMs },
+        end: { behavior: this.deps.dv.EndBehaviorType.AfterSilence, duration: this.cfg.silenceMs ?? DEFAULT_SILENCE_MS },
       });
       const decoder = new this.deps.Opus(DISCORD_RATE, 2, this.deps.Opus.Application.AUDIO);
-      const tracker = new SpeechTracker();
       const frames: Buffer[] = [];
       let bytes = 0;
       let packets = 0;
       let decodeErrors = 0;
       let firstDecodeError = "";
-      let vadBroken = false;
-      let chain: Promise<void> = Promise.resolve();
-      let timer: NodeJS.Timeout | null = null;
-      let lastPacketAt = Date.now();
       const maxBytes = (MAX_UTTERANCE_MS / 1000) * DISCORD_RATE * BYTES_PER_FRAME;
       let done = false;
-
-      const arm = (delay: number) => {
-        if (!vadStream || done) return;
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => opus.destroy(), delay);
-      };
-      arm(Math.max(silenceMs, 1_500)); // safety net if the stream never delivers a packet
-
       const finish = () => {
         if (done) return;
         done = true;
-        if (timer) clearTimeout(timer);
-        const endWaitMs = Date.now() - lastPacketAt;
         try {
           decoder.delete();
         } catch {
@@ -938,21 +877,14 @@ export class VoiceManager {
         }
         const level = decodeErrors > 0 ? "warn" : "info";
         if (this.cfg.debug || decodeErrors > 0) {
-          this.ctx.logger[level]({ event: "voice.capture.done", userId, packets, decodeErrors, firstDecodeError, ms: Math.round((bytes / BYTES_PER_FRAME / DISCORD_RATE) * 1000), speechMs: vadStream && !vadBroken ? tracker.speechMs : null, endWaitMs }, "voice.capture.done");
+          this.ctx.logger[level]({ event: "voice.capture.done", userId, packets, decodeErrors, firstDecodeError, ms: Math.round((bytes / BYTES_PER_FRAME / DISCORD_RATE) * 1000) }, "voice.capture.done");
         }
-        // The VAD may still be chewing the last packet; its result is part of the answer.
-        void chain.then(() => resolve({ pcm: Buffer.concat(frames), speechMs: vadStream && !vadBroken ? tracker.speechMs : null, endWaitMs }));
+        resolve(Buffer.concat(frames));
       };
-
       opus.on("data", (packet: Buffer) => {
         packets++;
-        lastPacketAt = Date.now();
-        if (vadStream) {
-          if (timer) clearTimeout(timer); // she is still hearing audio: hold the countdown until the VAD has looked at it
-        }
-        let pcm: Buffer | null = null;
         try {
-          pcm = decoder.decode(packet);
+          const pcm = decoder.decode(packet);
           frames.push(pcm);
           bytes += pcm.length;
           if (bytes >= maxBytes) opus.destroy();
@@ -961,20 +893,6 @@ export class VoiceManager {
           decodeErrors++;
           if (!firstDecodeError) firstDecodeError = err instanceof Error ? err.message : String(err);
         }
-        if (!vadStream) return;
-        const samples = pcm ? pcm48kStereoToMono16kFloat(pcm) : null;
-        chain = chain.then(async () => {
-          if (done) return;
-          if (samples && !vadBroken) {
-            try {
-              for (const prob of await vadStream.push(samples)) tracker.push(prob);
-            } catch (err) {
-              vadBroken = true;
-              this.ctx.logger.warn({ event: "voice.vad.failed", err: err instanceof Error ? err.message : String(err) }, "VAD failed mid-utterance; using the fixed silence window for it");
-            }
-          }
-          arm(vadBroken ? silenceMs : endDelayMs(tracker, silenceMs, vadEndMs));
-        });
       });
       opus.once("end", finish);
       opus.once("close", finish);
@@ -985,24 +903,19 @@ export class VoiceManager {
     });
   }
 
-  private async handleUtterance(
-    session: Session,
-    userId: string,
-    player: NonNullable<Awaited<ReturnType<VoiceManager["isActivePlayer"]>>>,
-    captured: { pcm: Buffer; speechMs: number | null; endWaitMs: number },
-  ): Promise<void> {
+  private async handleUtterance(session: Session, userId: string, player: NonNullable<Awaited<ReturnType<VoiceManager["isActivePlayer"]>>>, pcm: Buffer): Promise<void> {
     const sttStart = Date.now();
-    const transcript = await this.transcribe(captured.pcm);
+    const transcript = await this.transcribe(pcm);
     const timing: TurnTiming = { sttMs: Date.now() - sttStart, brainMs: null, firstAudioMs: null, chunks: 0 };
     if (!transcript) return;
 
     const humans = this.humansInSession(session);
-    const decision = decideAnswer({ transcript, humans });
+    const decision = decideAnswer({ transcript, humans, listen: session.settings.listen });
     if (!decision.answer) {
-      this.ctx.logger.debug({ event: "voice.ignored", reason: decision.reason, humans }, decision.reason === "noise" ? "Dropped a junk transcript" : "Heard speech without her name (others are in the channel)");
+      this.ctx.logger.debug({ event: "voice.ignored", reason: decision.reason, humans, listen: session.settings.listen }, decision.reason === "noise" ? "Dropped a junk transcript" : "Heard speech without her name");
       return;
     }
-    this.ctx.logger.info({ event: "voice.heard", userId, chars: transcript.length, reason: decision.reason, humans }, decision.reason === "alone" ? "Heard the only person with her (no name needed)" : "Heard Mari's name");
+    this.ctx.logger.info({ event: "voice.heard", userId, chars: transcript.length, reason: decision.reason, humans, listen: session.settings.listen }, decision.reason === "wakeWord" ? "Heard Mari's name" : "Answering without her name");
 
     const brainStart = Date.now();
     await runServerChatTurn(this.ctx, {
@@ -1018,23 +931,51 @@ export class VoiceManager {
       },
     });
 
-    // Where the delay goes, per stage, with no message content (plan sections 51 and 58). `endWaitMs` is the
-    // quiet time she actually waited after the last audio packet before sending (it depends on the VAD).
+    // Where the delay goes, per stage, with no message content (plan sections 51 and 58). The player
+    // also waited silenceMs before any of this started, which is why it is part of "perceivedMs".
+    const silenceMs = this.cfg.silenceMs ?? DEFAULT_SILENCE_MS;
     const afterSilenceMs = timing.sttMs + (timing.brainMs ?? 0) + (timing.firstAudioMs ?? 0);
     this.ctx.logger.info(
-      {
-        event: "voice.turn.timing",
-        endWaitMs: captured.endWaitMs,
-        vad: captured.speechMs !== null,
-        speechMs: captured.speechMs,
-        sttMs: timing.sttMs,
-        brainMs: timing.brainMs,
-        firstAudioMs: timing.firstAudioMs,
-        chunks: timing.chunks,
-        perceivedMs: captured.endWaitMs + afterSilenceMs,
-      },
+      { event: "voice.turn.timing", turn: ++session.turns, silenceMs, sttMs: timing.sttMs, brainMs: timing.brainMs, firstAudioMs: timing.firstAudioMs, chunks: timing.chunks, perceivedMs: silenceMs + afterSilenceMs },
       "Voice turn timing",
     );
+  }
+
+  /**
+   * Cold-start warm-up, run in the background right after she joins (VOICE_WARMUP=0 turns it off). The
+   * first answer of a session used to pay for everything at once: a cold database connection (a
+   * scale-to-zero Postgres can take seconds to wake), fresh TLS connections to Groq, and the first
+   * Orpheus request. So, before anyone speaks: look up the players already in the channel (wakes the
+   * database and fills the roster cache), open a connection to Groq with a free request, and synthesize one
+   * throw-away word (never played) so the first real sentence isn't the first one Orpheus has seen.
+   * Everything is best-effort: a failure is logged at debug level and changes nothing.
+   */
+  async warmUp(channel: VoiceBasedChannel, settings: VoiceSettings): Promise<void> {
+    const started = Date.now();
+    const steps: Record<string, number | string> = {};
+    const timed = async (name: string, job: () => Promise<unknown>) => {
+      const t = Date.now();
+      try {
+        await job();
+        steps[name] = Date.now() - t;
+      } catch (err) {
+        steps[name] = `failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    };
+    const groqHeaders = { Authorization: `Bearer ${this.cfg.groqApiKey}` };
+    await Promise.all([
+      timed("dbMs", async () => {
+        for (const m of channel.members.values()) if (!m.user.bot) await this.rosterPlayer(m.id);
+      }),
+      timed("groqMs", async () => {
+        const res = await fetch("https://api.groq.com/openai/v1/models", { headers: groqHeaders, signal: AbortSignal.timeout(8_000) });
+        await res.arrayBuffer();
+      }),
+      timed("ttsMs", async () => {
+        await this.synthesize("mm", settings);
+      }),
+    ]);
+    this.ctx.logger.info({ event: "voice.warmup", totalMs: Date.now() - started, ...steps }, "Voice warm-up done");
   }
 
   // -- speech to text (Groq Whisper, free plan) -------------------------------

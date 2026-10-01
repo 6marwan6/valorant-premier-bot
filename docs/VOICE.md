@@ -2,13 +2,14 @@
 
 ## Controlling her voice from `/mari-join`
 
-`/mari-join` (admin only) takes three optional options next to `channel` and `time` (there is no `date` any more: a clock time that already passed today means tomorrow):
+`/mari-join` (admin only) takes four optional options next to `channel` and `time` (there is no `date` any more: a clock time that already passed today means tomorrow):
 
 | Option | Values | Notes |
 |---|---|---|
 | `voice` | autumn, diana, hannah, austin, daniel, troy | picker in Discord |
 | `direction` | one delivery word, e.g. `cheerful`, `whisper`, `sad` | letters only; type `none` to clear |
 | `pitch` | 0.8 to 1.25 | 1 = unchanged; also shifts speed a little |
+| `listen` | group / just one person / auto | whether she needs to hear "Mari" (see below) |
 
 - Anything you leave out keeps the `VOICE_*` env default, or, if she is already in that
   channel, whatever she is using right now.
@@ -32,23 +33,16 @@ Each answered turn now logs one `voice.turn.timing` line (no message content):
 
 | Field | Meaning |
 |---|---|
-| `endWaitMs` | quiet time she actually waited after the last audio before sending the utterance: the full `VOICE_SILENCE_MS` (700), or the shorter `VOICE_VAD_END_MS` (450) when the VAD says the tail was not speech |
-| `vad`, `speechMs` | whether the local VAD ran, and how many ms of real speech it found (0 = noise, dropped before STT) |
+| `turn` | 1 for the first answer of a session: compare it with turn 2 and 3 to see a cold start |
+| `silenceMs` | quiet time she waits for before sending the utterance (`VOICE_SILENCE_MS`, 700) |
 | `sttMs` | Groq Whisper transcription |
 | `brainMs` | transcript in, reply text out: the language model plus database work |
 | `firstAudioMs` | reply text in, first sound playing: TTS of the first chunk plus joining the player |
-| `perceivedMs` | what the player actually waits: endWait + stt + brain + first audio |
+| `perceivedMs` | what the player actually waits: silence + stt + brain + first audio |
 
 Changes made for speed:
 
 - Playback starts when the **first** chunk is ready; later chunks follow in order. The first chunk is one sentence.
-- **Local VAD (Silero, `worker/vad.ts`).** Ends a turn after `VOICE_VAD_END_MS` instead of `VOICE_SILENCE_MS` when
-  the last audio was not speech, and drops utterances with no speech in them before they cost an STT call.
-  Honest limits: Discord clients stop sending audio when you stop talking, so the audio rarely contains the
-  trailing silence, and a VAD can't tell a pause between two sentences from the end of a turn. Expect a gain on
-  turns that end in breath/noise and a clear gain in *not answering noise*; read `endWaitMs` in the timing line
-  to see what you actually get. It costs about 140 MB of disk and 100 MB of RAM; `VOICE_VAD=0` turns it off, and
-  if it can't load she just uses the fixed window.
 - **Spoken replies are short.** Her prompt is told the reply will be spoken: one or two short sentences, plain
   words. That is the biggest `brainMs` lever, because output tokens are the latency.
 - **Optional faster model for voice only:** `VOICE_LLM_MODEL` (same provider as `LLM_MODEL`), and
@@ -67,12 +61,36 @@ Changes made for speed:
 
 ## When she answers, and joining
 
-- Two or more humans in the channel: only when she hears her name. Exactly one human with her: she answers
-  whatever they say (junk transcripts like "you" / "thank you" are dropped). Only roster players are listened to.
-- She joins by herself only for `VOICE_CHANNEL_ID`. **If that variable is empty she joins only through
-  `/mari-join`.** The worker re-checks every ~15 s, so a player already in the channel counts.
-- She posts a text hello when she joins (voice channel chat, else the match channel). If neither is writable the
-  log says `voice.announce.failed` with the reason (usually Send Messages missing in the voice channel's chat).
+`/mari-join listen:` sets it for the session (`VOICE_LISTEN` is the default):
+
+- **Group:** she answers only when she hears her name. Use it when several of you are in the channel.
+- **Just one person:** she answers whatever the roster player says, no name needed. Use it when it's you and her.
+- **Auto (default):** just-one-person while exactly one human is in the channel, group otherwise.
+
+In every mode only roster players are listened to, and junk transcripts ("you", "thank you") are dropped when she
+wasn't addressed. She posts **no** text message when she joins.
+
+She joins by herself only for `VOICE_CHANNEL_ID`. **If that variable is empty she joins only through
+`/mari-join`.** The worker re-checks every ~15 s, so a player already in the channel counts.
+
+## The cold start
+
+Two things made her first answer slow, and both are fixed (you can't see either from the player's side):
+
+1. A speaking player was looked up in the database **before** her recording started, every time. After the
+   database had been idle (Neon scales to zero) that wait ate the first words. Players are now cached for a minute.
+2. The first request of everything (database, Groq connection, first Orpheus request) all landed on the first
+   answer. On joining she now warms up in the background: one `voice.warmup` log line shows the time each step took
+   (`dbMs`, `groqMs`, `ttsMs`). It costs one tiny TTS request per join; `VOICE_WARMUP=0` disables it.
+
+Still possible, and not something code here can see: the LLM provider's own cold start. If `turn: 1` still has a
+much bigger `brainMs` than turn 2, that's the model, and a different `VOICE_LLM_MODEL` or provider setting is the lever.
+
+## `VOICE_LLM_MODEL`
+
+Your `LLM_MODEL` already answers everything, voice included. `VOICE_LLM_MODEL` is an *optional override for voice
+turns only*, so voice can use a smaller, faster model while typed chat, roasts and recaps keep the main one. Empty
+(the default) means voice uses `LLM_MODEL`. It goes to the same provider and key.
 
 ## Her voice
 

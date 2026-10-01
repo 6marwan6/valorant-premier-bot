@@ -35,6 +35,8 @@ export const voiceJoinRequests = pgTable(
     voice: text("voice"),
     direction: text("direction"),
     pitch: real("pitch"),
+    /** "auto" | "name" | "always" (2026-10-01 (b)): whether she needs to hear her name. NULL = keep what she has. */
+    listen: text("listen"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     handledAt: timestamp("handled_at", { withTimezone: true }),
   },

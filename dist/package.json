@@ -7,8 +7,5 @@
     "@snazzah/davey": "^0.1.12",
     "dotenv": "^16.4.7",
     "opusscript": "^0.0.8"
-  },
-  "optionalDependencies": {
-    "onnxruntime-web": "^1.30.0"
   }
 }

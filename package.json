@@ -49,8 +49,5 @@
     "typescript": "^5.7.2",
     "vite": "^8.3.1",
     "vitest": "^5.0.1"
-  },
-  "optionalDependencies": {
-    "onnxruntime-web": "^1.30.0"
   }
 }

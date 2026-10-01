@@ -1471,32 +1471,28 @@ have hit it, rather than being a theoretical gap in coverage.
 Each phase will be checked against `Full_Development_Plan.md` before
 implementation, per the ground rule for this project.
 
-## 2026-10-01 (b) — voice: listening rule, local VAD, delivery, joining
+## 2026-10-01 (b) — voice: listening mode, delivery, joining, cold start
 
 Requested by the product owner; each item checked against `Full_Development_Plan.md` first, and the plan was
 revised where it said otherwise (section 4 note "2026-10-01 (b)", section 41 note on `/mari-join`).
 
-- **Listening rule** (`decideAnswer`, `worker/voice.ts`): 2+ humans in her channel -> name required; exactly one
-  human -> no name needed; unknown headcount -> treated as several. Without the name, Whisper's silence
-  hallucinations are dropped (`isLikelyNoise`). Roster-only capture is unchanged.
-- **Local VAD** (`worker/vad.ts`): Silero v5 through `onnxruntime-web` (WASM). Chosen over `onnxruntime-node`
-  because that package downloads its binaries from NuGet at install time. Optional and lazy: no package, no model,
-  or a runtime failure -> the old fixed silence window. The model (`worker/models/silero_vad.onnx`, MIT) is copied
-  next to `dist/gateway.js` by `build:worker`. Measured here: ~2 ms per 32 ms window, +~100 MB RSS, 139 MB of
-  `node_modules`. The plan said "no local model", so this is a recorded revision, not a quiet change.
-- **`/mari-join`**: `date` removed. A past clock time rolls to tomorrow (`parseMatchDateTime("tomorrow", ...)`).
-- **Join message**: voice-channel chat first, match channel as fallback, logged (`voice.announce.failed`) instead
-  of swallowed.
+- **Listening mode** (`decideAnswer`, `worker/voice.ts`; `LISTEN_MODES`, `voiceSettings.ts`): `/mari-join listen:`
+  group / just one person / auto, per session, default `VOICE_LISTEN=auto`. Auto = no name needed while exactly one
+  human is in her channel. Without the name, Whisper's silence hallucinations are dropped (`isLikelyNoise`).
+  Stored on `voice_join_requests.listen` (migration `0014_add_voice_listen`, idempotent).
+- **`/mari-join`**: `date` removed. A past clock time rolls to tomorrow.
+- **No join message.** The announcement was removed again at the owner's request.
 - **Auto-join**: `autoJoinTick` every poll tick (already-present players, retry after a failed join, no instant
-  rejoin after a kick). Needs `VOICE_CHANNEL_ID`; the worker now logs `voice.autojoin.off` when it is empty.
-- **Delivery**: default direction `flirty`, pitch 1.08 (`voiceSettings.ts`). Spoken replies carry a
-  "REPLY MEDIUM" data line (short, plain) and may use `VOICE_LLM_MODEL` / `VOICE_LLM_MAX_TOKENS`
-  (`LlmRequest.model/maxTokens`, passed `runServerChatTurn -> handlePlayerReply -> respondInConversation`).
+  rejoin after a kick). Needs `VOICE_CHANNEL_ID`; the worker logs `voice.autojoin.off` when it is empty.
+- **Cold start**: `rosterPlayer` now caches the player row too (it used to cache only "not on the roster", so every
+  utterance waited on a DB round trip before recording started), and `warmUp` runs on join (DB lookup, Groq
+  connection, one throw-away TTS word; `VOICE_WARMUP=0` disables). `voice.turn.timing` now has a `turn` counter.
+- **Delivery**: default direction `flirty`, pitch 1.08. Spoken replies carry a "REPLY MEDIUM" data line (short,
+  plain) and may use `VOICE_LLM_MODEL` / `VOICE_LLM_MAX_TOKENS` (`LlmRequest.model/maxTokens`).
+- **Local VAD was built, then removed** (Silero via `onnxruntime-web`: ~140 MB disk, ~100 MB RAM for a gain that
+  could not be shown, because Discord clients stop sending audio when you stop talking).
 - **Deliberately not built**: sentence-by-sentence streaming of the model reply into TTS. The reply is JSON that
-  must pass `parseChatOutput` (protected topics, mentions, memory candidates) before use (plan sections 10/35/55);
-  speaking unvalidated text would break that. See `docs/VOICE.md`.
+  must pass `parseChatOutput` (protected topics, mentions, memory candidates) before use (plan sections 10/35/55).
 
-Verified here: unit suite (new: `vad`, `voiceCapture`, `voiceListening`, `spokenReply`; capture test drives real
-Opus packets built from a speech fixture through the real Silero model), typecheck, command validation, worker
-bundle. Not verifiable from this sandbox (no Discord/Groq route): how the voice sounds, the real-call
-`endWaitMs`, Groq accepting `[flirty]`, and the voice channel's chat permissions on your server.
+Not verifiable from this sandbox (no Discord/Groq route): how the voice sounds, the real cold-start timings,
+Groq accepting `[flirty]`, and the actual cause of any LLM-provider cold start.
