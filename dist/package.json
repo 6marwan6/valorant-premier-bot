@@ -1,0 +1,11 @@
+{
+  "name": "mari-worker",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "@snazzah/davey": "^0.1.12",
+    "dotenv": "^16.4.7",
+    "opusscript": "^0.0.8"
+  }
+}

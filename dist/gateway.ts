@@ -47,7 +47,7 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message],
 });
 
-// Voice is opt-in: off unless GROQ_API_KEY is set (see worker/voice.ts). Where/when she joins comes from /mari-join.
+// Voice is opt-in: off unless GROQ_API_KEY and VOICE_CHANNEL_ID are both set (see worker/voice.ts).
 // If the voice packages aren't installed the worker just runs without voice.
 let voice: VoiceManager | null = null;
 const voiceConfig = loadVoiceConfig(env.DISCORD_GUILD_ID);
@@ -55,7 +55,6 @@ if (voiceConfig) {
   try {
     const manager = await VoiceManager.create(client, ctx, voiceConfig);
     voice = manager;
-    manager.start(); // polls the database for /mari-join requests
     client.on(Events.VoiceStateUpdate, (oldState, newState) => manager.onVoiceStateUpdate(oldState, newState));
     logger.info({ event: "voice.enabled", channelId: voiceConfig.channelId }, "Voice feature enabled");
   } catch (err) {

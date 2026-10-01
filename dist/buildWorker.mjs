@@ -1,12 +1,9 @@
 /**
  * Bundles worker/gateway.ts and everything it imports into ONE file,
- * dist/gateway.js, so the host needs no TypeScript runtime and the worker's
- * resident memory stays small (Railway bills RAM by the second; Wispbyte's free
- * tier ran out of memory on a full install).
+ * dist/gateway.js, so the host (Wispbyte free tier) needs no `npm install`
+ * and no TypeScript runtime — which is what ran it out of memory.
  *
- * Railway: build command `npm run build:worker`, start command
- * `npm run start:worker` (docs/RAILWAY.md). Other hosts: upload
- * dist/gateway.js + dist/package.json after `npm run build:worker`.
+ * Run: npm run build:worker   (then upload dist/gateway.js + dist/package.json)
  */
 import { build } from "esbuild";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -26,7 +23,7 @@ await build({
     "zlib-sync", "bufferutil", "utf-8-validate", "pg-native",
     // Voice (worker/voice.ts): native add-ons / WASM that can't be inlined. They are
     // loaded with dynamic import() at runtime and installed from dist/package.json.
-    "@discordjs/voice", "@snazzah/davey", "opusscript",
+    "@discordjs/voice", "@snazzah/davey", "opusscript", "kokoro-js", "@huggingface/transformers", "onnxruntime-node", "sharp",
   ],
   // Inlined so src/config/logger.ts skips the pino-pretty transport (a
   // worker thread that can't be bundled). Production logging is plain JSON.
@@ -41,9 +38,8 @@ await build({
 // The host's start script runs `node <MAIN_FILE>` for *.js files. `"type": "module"`
 // makes Node treat gateway.js as ESM (it uses top-level await). No dependencies,
 // so the host's automatic `npm install` finishes instantly.
-// Only the runtime packages that can't be bundled (~14 MB in total). The host runs
-// `npm install` once. Text-to-speech is Groq's hosted Orpheus, so no local model or
-// ONNX runtime is installed.
+// Only the runtime packages that can't be bundled. The host must run `npm install` once
+// (with ONNXRUNTIME_NODE_INSTALL_CUDA=skip, so the ~340 MB GPU libraries aren't fetched).
 writeFileSync(
   "dist/package.json",
   JSON.stringify(
@@ -55,6 +51,7 @@ writeFileSync(
         "@discordjs/voice": "^0.19.2",
         "@snazzah/davey": "^0.1.12",
         dotenv: "^16.4.7",
+        "kokoro-js": "^1.2.1",
         opusscript: "^0.0.8",
       },
     },

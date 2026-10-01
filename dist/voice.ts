@@ -1,16 +1,10 @@
 /**
- * Voice — Mari joins a voice channel and talks with roster players.
+ * Voice — Mari joins ONE voice channel and talks with roster players.
  *
  * Runs inside the gateway worker only (a voice connection is a long-lived
  * socket, which the serverless app can't hold). The whole feature is OFF
- * unless GROQ_API_KEY is set, so the worker behaves exactly as before without it.
- *
- * Where and when she joins:
- *   - /mari-join (admin) stores a request in the database — a channel and a time;
- *     the worker polls for due requests (runScheduledJoins) and joins.
- *   - Optionally VOICE_CHANNEL_ID names a default channel she also joins on her own
- *     whenever a roster player walks into it.
- *   - She leaves when the channel has no humans left.
+ * unless GROQ_API_KEY and VOICE_CHANNEL_ID are both set, so the worker behaves
+ * exactly as before without them.
  *
  * The loop, per utterance:
  *   1. A roster player speaks. Anyone NOT on the active roster is never
@@ -22,23 +16,19 @@
  *   4. The transcript goes through the SAME runServerChatTurn the `@Mari`
  *      mention uses (same persona, same memory filtering for a public
  *      audience); only `deliver` differs — it speaks instead of posting.
- *   5. The reply is turned into speech by Groq's hosted Orpheus TTS (same API
- *      key as the transcription). Orpheus accepts at most 200 characters per
- *      request, so the reply is split into sentence-sized chunks, synthesized
- *      in parallel and played back as one clip.
+ *   5. The reply is turned into speech locally with Kokoro (free, no API),
+ *      pitched up a touch, and played into the channel.
  *
  * Nothing is recorded or stored: audio lives in memory for the length of one
- * turn.  No FFmpeg and no local model are needed — Orpheus returns WAV, which
- * is parsed and resampled in JS and fed to @discordjs/voice as raw PCM (Opus
- * encoding via `opusscript`, pure JS). The host installs only ~14 MB of packages.
+ * turn.  No FFmpeg is needed — Kokoro's samples are resampled in JS and fed to
+ * @discordjs/voice as raw PCM (Opus encoding via `opusscript`, pure JS).
  *
- * Env (all optional except the first):
+ * Env (all optional except the first two):
  *   GROQ_API_KEY        free key from console.groq.com
- *   VOICE_CHANNEL_ID    optional default channel she auto-joins when a roster player enters it
- *   VOICE_NAME          Orpheus voice: autumn, diana, hannah (default), austin, daniel, troy
- *   VOICE_TTS_MODEL     Groq TTS model (default canopylabs/orpheus-v1-english)
- *   VOICE_DIRECTION     optional delivery hint spoken-style, e.g. "cheerful" (sent as [cheerful])
- *   VOICE_PITCH         pitch multiplier, 1 = unchanged (default 1)
+ *   VOICE_CHANNEL_ID    the ONE voice channel Mari may join
+ *   VOICE_NAME          Kokoro voice preset (default af_heart; try af_bella, af_sky)
+ *   VOICE_SPEED         speaking speed (default 1.05)
+ *   VOICE_PITCH         pitch multiplier, 1 = unchanged (default 1.08 = cuter)
  *   VOICE_STT_LANGUAGE  ISO code for Whisper (default en; "auto" = detect)
  *   VOICE_DEBUG         1 = verbose logs at every stage, she greets out loud on join
  *                       (plays the TTS end to end) and transcripts are logged. Turn off after testing.
@@ -46,6 +36,7 @@
 import { Readable } from "node:stream";
 import type { AudioPlayer, VoiceConnection } from "@discordjs/voice";
 import type { Client, VoiceBasedChannel, VoiceState } from "discord.js";
+import type { KokoroTTS } from "kokoro-js";
 import type OpusScript from "opusscript";
 import type { AppContext } from "../src/appContext.js";
 import { runServerChatTurn } from "../src/discord/serverChat.js";
@@ -54,15 +45,7 @@ import { MAX_PLAYER_MESSAGE_CHARS } from "../src/modules/ai/conversationService.
 const DISCORD_RATE = 48_000;
 const BYTES_PER_FRAME = 4; // 16-bit stereo
 const STT_RATE = 16_000;
-const GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech";
-const DEFAULT_TTS_MODEL = "canopylabs/orpheus-v1-english";
-/** Orpheus voices on Groq (English model). */
-export const ORPHEUS_VOICES = ["autumn", "diana", "hannah", "austin", "daniel", "troy"] as const;
-const DEFAULT_VOICE = "hannah";
-/** Groq rejects TTS input longer than this (per request, directions included). */
-export const TTS_MAX_INPUT_CHARS = 200;
-/** Cap requests per reply so one long answer can't burn the free quota. */
-const MAX_TTS_CHUNKS = 3;
+const KOKORO_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GROQ_STT_MODEL = "whisper-large-v3-turbo";
 
@@ -71,16 +54,8 @@ const MIN_UTTERANCE_MS = 700;
 const MAX_UTTERANCE_MS = 20_000;
 /** Groq's free plan allows 20 requests/minute; stay under it. */
 const STT_MAX_PER_MINUTE = 15;
-const MAX_SPOKEN_CHARS = 400;
+const MAX_SPOKEN_CHARS = 350;
 const ROSTER_CACHE_MS = 60_000;
-/** How often the worker looks for due /mari-join requests. */
-const SCHEDULE_POLL_MS = 15_000;
-/** One 20 ms Opus frame of 48 kHz 16-bit stereo PCM. */
-const FRAME_BYTES = 960 * BYTES_PER_FRAME;
-/** Rejoin attempts after a dropped voice connection (network blip, gateway reconnect, host stall) before she gives up. */
-const RECOVER_ATTEMPTS = 4;
-/** A timer that fires this much late means the whole process was stalled (host CPU starvation / suspend). */
-const LOOP_LAG_WARN_MS = 1_500;
 
 /** Whisper spells a name however it likes; accept the usual suspects. */
 const WAKE_WORD = /\b(mari|marie|mary|maree|marry|maari|mahri)\b/i;
@@ -88,27 +63,18 @@ const WAKE_WORD = /\b(mari|marie|mary|maree|marry|maari|mahri)\b/i;
 export interface VoiceConfig {
   groqApiKey: string;
   guildId: string;
-  /** Optional default channel for auto-join; null = she only joins through /mari-join. */
-  channelId: string | null;
+  channelId: string;
   voice: string;
-  ttsModel: string;
-  /** Optional single vocal direction sent as "[direction]" before each chunk. */
-  direction: string;
+  speed: number;
   pitch: number;
   language: string;
   debug: boolean;
 }
 
-/** An unknown VOICE_NAME (e.g. an old Kokoro preset like af_heart) falls back to the default instead of failing every request. */
-export function pickVoice(name: string | undefined): string {
-  const v = (name ?? "").trim().toLowerCase();
-  return (ORPHEUS_VOICES as readonly string[]).includes(v) ? v : DEFAULT_VOICE;
-}
-
 export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.env): VoiceConfig | null {
   const groqApiKey = e.GROQ_API_KEY?.trim();
-  const channelId = e.VOICE_CHANNEL_ID?.trim() || null;
-  if (!groqApiKey) return null;
+  const channelId = e.VOICE_CHANNEL_ID?.trim();
+  if (!groqApiKey || !channelId) return null;
   const num = (v: string | undefined, fallback: number) => {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -117,10 +83,9 @@ export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.
     groqApiKey,
     guildId,
     channelId,
-    voice: pickVoice(e.VOICE_NAME),
-    ttsModel: e.VOICE_TTS_MODEL?.trim() || DEFAULT_TTS_MODEL,
-    direction: (e.VOICE_DIRECTION ?? "").replace(/[^\p{L} ]/gu, "").trim().slice(0, 30),
-    pitch: num(e.VOICE_PITCH, 1),
+    voice: e.VOICE_NAME?.trim() || "af_heart",
+    speed: num(e.VOICE_SPEED, 1.05),
+    pitch: num(e.VOICE_PITCH, 1.08),
     language: e.VOICE_STT_LANGUAGE?.trim() || "en",
     debug: ["1", "true", "yes"].includes((e.VOICE_DEBUG ?? "").trim().toLowerCase()),
   };
@@ -138,7 +103,6 @@ export function toSpeechText(input: string): string {
     .replace(/https?:\/\/\S+/g, " ")
     .replace(/<a?:\w+:\d+>/g, " ") // custom emoji
     .replace(/<[@#][!&]?\d+>/g, " ") // mentions / channel links
-    .replace(/\[[^\]]*\]/g, " ") // Orpheus reads [word] as a vocal direction; never let chat text do that
     .replace(/[*_~`|>#]/g, "")
     .replace(/[\p{Extended_Pictographic}\u200d\ufe0f]/gu, " ")
     // "Heeeeyyyy" -> "Heeyy": TTS reads long letter runs badly.
@@ -186,14 +150,14 @@ export function pcmToWav16kMono(pcm: Buffer): Buffer {
 }
 
 /**
- * Mono float samples -> 48 kHz stereo s16le for Discord. Reading the samples
- * as if they were recorded at `rate * pitch` shifts the pitch (and tempo) by
- * that factor — a cheap, FFmpeg-free way to tune the voice.
+ * Kokoro float samples -> 48 kHz stereo s16le for Discord. Reading the samples
+ * as if they were recorded at `rate * pitch` raises the pitch (and tempo) by
+ * that factor — a cheap, FFmpeg-free way to make the voice sweeter.
  */
-export function samplesToDiscordPcm(samples: Float32Array, rate: number, pitch: number, tailSeconds = 0.15): Buffer {
+export function samplesToDiscordPcm(samples: Float32Array, rate: number, pitch: number): Buffer {
   const ratio = (rate * pitch) / DISCORD_RATE;
   const outFrames = Math.floor(samples.length / ratio);
-  const tail = Math.floor(DISCORD_RATE * tailSeconds); // silence so the last word isn't clipped
+  const tail = Math.floor(DISCORD_RATE * 0.15); // silence so the last word isn't clipped
   const out = Buffer.alloc((outFrames + tail) * BYTES_PER_FRAME);
   for (let i = 0; i < outFrames; i++) {
     const pos = i * ratio;
@@ -206,113 +170,6 @@ export function samplesToDiscordPcm(samples: Float32Array, rate: number, pitch: 
     out.writeInt16LE(v, i * BYTES_PER_FRAME + 2);
   }
   return out;
-}
-
-/**
- * Splits text into pieces of at most `max` characters for Orpheus, preferring
- * sentence ends, then commas, then spaces, and only hard-cutting a single
- * unbroken run as a last resort. Every piece is non-empty and trimmed.
- */
-export function chunkForTts(text: string, max = TTS_MAX_INPUT_CHARS): string[] {
-  const clean = text.replace(/\s+/g, " ").trim();
-  if (!clean) return [];
-  const pieces: string[] = [];
-  for (const sentence of clean.split(/(?<=[.!?])\s+/)) {
-    let rest = sentence;
-    while (rest.length > max) {
-      const window = rest.slice(0, max + 1);
-      let cut = Math.max(window.lastIndexOf(", "), window.lastIndexOf("; "), window.lastIndexOf(": "));
-      if (cut < max * 0.4) cut = window.lastIndexOf(" ");
-      if (cut < max * 0.4) cut = max; // no usable break: hard cut
-      else cut += 1;
-      pieces.push(rest.slice(0, cut).trim());
-      rest = rest.slice(cut).trim();
-    }
-    if (rest) pieces.push(rest);
-  }
-  // Pack neighbouring short sentences together: fewer requests, smoother speech.
-  const out: string[] = [];
-  for (const p of pieces) {
-    const last = out[out.length - 1];
-    if (last !== undefined && last.length + 1 + p.length <= max) out[out.length - 1] = `${last} ${p}`;
-    else out.push(p);
-  }
-  return out.filter(Boolean);
-}
-
-/**
- * Parses a WAV file (16-bit PCM, 24-bit PCM or 32-bit float, any channel count)
- * into mono float samples. Walks the RIFF chunks instead of assuming a 44-byte
- * header, and tolerates a streamed file whose data length is 0 / 0xFFFFFFFF.
- */
-export function parseWav(buf: Buffer): { samples: Float32Array; sampleRate: number } {
-  if (buf.length < 12 || buf.toString("ascii", 0, 4) !== "RIFF" || buf.toString("ascii", 8, 12) !== "WAVE") {
-    throw new Error("TTS response is not a WAV file");
-  }
-  let fmt: { tag: number; channels: number; rate: number; bits: number } | null = null;
-  let offset = 12;
-  while (offset + 8 <= buf.length) {
-    const id = buf.toString("ascii", offset, offset + 4);
-    let size = buf.readUInt32LE(offset + 4);
-    const body = offset + 8;
-    if (id === "fmt ") {
-      let tag = buf.readUInt16LE(body);
-      const channels = buf.readUInt16LE(body + 2);
-      const rate = buf.readUInt32LE(body + 4);
-      const bits = buf.readUInt16LE(body + 14);
-      if (tag === 0xfffe && size >= 26) tag = buf.readUInt16LE(body + 24); // WAVE_FORMAT_EXTENSIBLE sub-format
-      fmt = { tag, channels, rate, bits };
-    } else if (id === "data") {
-      if (!fmt) throw new Error("WAV data chunk before fmt chunk");
-      if (size === 0 || size === 0xffffffff || body + size > buf.length) size = buf.length - body;
-      const bytes = fmt.bits / 8;
-      const frames = Math.floor(size / (bytes * fmt.channels));
-      const samples = new Float32Array(frames);
-      for (let i = 0; i < frames; i++) {
-        let sum = 0;
-        for (let c = 0; c < fmt.channels; c++) {
-          const at = body + (i * fmt.channels + c) * bytes;
-          if (fmt.tag === 1 && fmt.bits === 16) sum += buf.readInt16LE(at) / 32768;
-          else if (fmt.tag === 1 && fmt.bits === 24) sum += buf.readIntLE(at, 3) / 8388608;
-          else if (fmt.tag === 3 && fmt.bits === 32) sum += buf.readFloatLE(at);
-          else throw new Error(`Unsupported WAV format (tag ${fmt.tag}, ${fmt.bits}-bit)`);
-        }
-        samples[i] = sum / fmt.channels;
-      }
-      return { samples, sampleRate: fmt.rate };
-    }
-    offset = body + size + (size % 2); // chunks are word-aligned
-  }
-  throw new Error("WAV has no data chunk");
-}
-
-/**
- * Splits PCM into 20 ms frames (the last one zero-padded) so the Opus encoder is
- * fed on demand, one frame per pull, instead of encoding the entire clip in one
- * synchronous burst — on a CPU-starved host that burst blocks the event loop long
- * enough for Discord's heartbeats to time out.
- */
-export function* pcmFrames(pcm: Buffer): Generator<Buffer> {
-  for (let offset = 0; offset < pcm.length; offset += FRAME_BYTES) {
-    const frame = pcm.subarray(offset, offset + FRAME_BYTES);
-    yield frame.length === FRAME_BYTES ? frame : Buffer.concat([frame, Buffer.alloc(FRAME_BYTES - frame.length)]);
-  }
-}
-
-/** After its join time a /mari-join request keeps waiting this long for someone to show up. */
-export const JOIN_GRACE_MS = 30 * 60_000;
-
-/**
- * What to do with a /mari-join request whose join time has arrived:
- *   join   - someone is in the channel and we're inside the grace window
- *   wait   - the channel is still empty (she never sits alone in an empty channel)
- *   expire - the grace window passed (nobody came, or the worker was down that long)
- */
-export function decideJoin(p: { joinAt: Date; now: Date; humans: number }): "join" | "wait" | "expire" {
-  const late = p.now.getTime() - p.joinAt.getTime();
-  if (late < 0) return "wait";
-  if (late > JOIN_GRACE_MS) return "expire";
-  return p.humans > 0 ? "join" : "wait";
 }
 
 // ---------------------------------------------------------------------------
@@ -328,13 +185,15 @@ export function decideJoin(p: { joinAt: Date; now: Date; humans: number }): "joi
 interface VoiceDeps {
   dv: typeof import("@discordjs/voice");
   Opus: typeof OpusScript;
+  Kokoro: typeof KokoroTTS;
 }
 
 async function loadVoiceDeps(): Promise<VoiceDeps> {
   const dv = await import("@discordjs/voice");
   const opusMod = (await import("opusscript")) as unknown as { default?: typeof OpusScript };
   const Opus = opusMod.default ?? (opusMod as unknown as typeof OpusScript);
-  return { dv, Opus };
+  const { KokoroTTS: Kokoro } = await import("kokoro-js");
+  return { dv, Opus, Kokoro };
 }
 
 // ---------------------------------------------------------------------------
@@ -348,18 +207,12 @@ interface Session {
   capturing: Set<string>;
   /** True while a turn is being transcribed / answered / spoken; new speech is ignored. */
   busy: boolean;
-  /** True while a reconnect is being attempted, so a second 'disconnected' event doesn't start a second loop. */
-  recovering?: boolean;
 }
 
 export class VoiceManager {
   private session: Session | null = null;
   private joining = false;
-  private checkingJoins = false;
-  private joinTimer: NodeJS.Timeout | null = null;
-  private lagTimer: NodeJS.Timeout | null = null;
-  /** Pause between reconnect attempts; a field so tests can zero it. */
-  private recoverDelayMs = 2_000;
+  private tts: Promise<KokoroTTS> | null = null;
   private readonly sttTimes: number[] = [];
   private readonly rosterCache = new Map<string, { active: boolean; at: number }>();
 
@@ -386,87 +239,15 @@ export class VoiceManager {
     const member = newState.member ?? oldState.member;
     if (!member || member.user.bot) return;
 
-    const inDefault = this.cfg.channelId !== null && newState.channelId === this.cfg.channelId && oldState.channelId !== this.cfg.channelId;
-    const sessionChannel = this.session?.channelId;
-    if (inDefault) {
+    if (newState.channelId === this.cfg.channelId && oldState.channelId !== this.cfg.channelId) {
       void this.maybeJoin(newState.channel, member.id);
-    } else if (sessionChannel && oldState.channelId === sessionChannel && newState.channelId !== sessionChannel) {
+    } else if (oldState.channelId === this.cfg.channelId && newState.channelId !== this.cfg.channelId) {
       void this.maybeLeave(oldState.channel);
     }
   }
 
-  /** Starts polling for due /mari-join requests. Safe to call once after the client logs in. */
-  start(): void {
-    if (this.joinTimer) return;
-    this.joinTimer = setInterval(() => void this.runScheduledJoins(), SCHEDULE_POLL_MS);
-    void this.runScheduledJoins();
-
-    // Tells "the host froze the process" apart from "Discord closed the connection".
-    let last = Date.now();
-    this.lagTimer = setInterval(() => {
-      const now = Date.now();
-      const lag = now - last - 1_000;
-      last = now;
-      if (lag > LOOP_LAG_WARN_MS) {
-        this.ctx.logger.warn({ event: "voice.loop.lag", lagMs: lag }, "The worker was frozen for a while (host CPU starvation or suspend?) — Discord connections time out when this happens");
-      }
-    }, 1_000);
-    this.lagTimer.unref();
-  }
-
   destroy(): void {
-    if (this.joinTimer) clearInterval(this.joinTimer);
-    if (this.lagTimer) clearInterval(this.lagTimer);
-    this.joinTimer = null;
-    this.lagTimer = null;
     this.leave();
-  }
-
-  // -- /mari-join requests ----------------------------------------------------
-
-  private async fetchVoiceChannel(channelId: string): Promise<VoiceBasedChannel | null> {
-    const ch = await this.client.channels.fetch(channelId).catch(() => null);
-    if (!ch || ch.isDMBased() || !ch.isVoiceBased() || ch.guildId !== this.cfg.guildId) return null;
-    return ch;
-  }
-
-  /** One polling tick. Each request is claimed atomically first (plan section 50), so two ticks can never both act on it. */
-  async runScheduledJoins(): Promise<void> {
-    if (this.checkingJoins || this.joining || !this.client.isReady()) return;
-    this.checkingJoins = true;
-    const repo = this.ctx.repositories.voiceJoins;
-    try {
-      const now = new Date();
-      for (const req of await repo.listDue(this.cfg.guildId, now)) {
-        const channel = await this.fetchVoiceChannel(req.channelId);
-        if (!channel) {
-          if (await repo.claim(req.id)) await repo.finish(req.id, "FAILED");
-          this.ctx.logger.warn({ event: "voice.join.channelMissing", requestId: req.id, channelId: req.channelId }, "/mari-join channel not found, not a voice channel, or not visible to Mari");
-          continue;
-        }
-        const humans = channel.members.filter((m) => !m.user.bot).size;
-        const verdict = decideJoin({ joinAt: req.joinAt, now, humans });
-        if (verdict === "wait") continue;
-        if (verdict === "expire") {
-          await repo.finish(req.id, "EXPIRED");
-          this.ctx.logger.info({ event: "voice.join.expired", requestId: req.id, channelId: channel.id }, "/mari-join request expired: nobody came into the channel");
-          continue;
-        }
-        if (!(await repo.claim(req.id))) continue;
-        if (this.session?.channelId === channel.id) {
-          await repo.finish(req.id, "DONE");
-          continue;
-        }
-        if (this.session) this.leave(); // an explicit admin request moves her
-        const ok = await this.connect(channel);
-        await repo.finish(req.id, ok ? "DONE" : "FAILED");
-        this.ctx.logger.info({ event: "voice.join.requested", requestId: req.id, channelId: channel.id, ok }, "/mari-join request handled");
-      }
-    } catch (err) {
-      this.ctx.logger.error({ event: "voice.join.pollFailed", err: err instanceof Error ? err.message : String(err) }, "Checking /mari-join requests failed");
-    } finally {
-      this.checkingJoins = false;
-    }
   }
 
   // -- joining / leaving ----------------------------------------------------
@@ -475,14 +256,9 @@ export class VoiceManager {
     if (!channel || this.session || this.joining) return;
     // Only a roster player walking in summons her.
     if (!(await this.isActivePlayer(memberId))) return;
-    await this.connect(channel);
-  }
-
-  /** Joins `channel` and wires up listening. Returns false (and logs why) if she couldn't. */
-  private async connect(channel: VoiceBasedChannel): Promise<boolean> {
     if (!channel.joinable) {
       this.ctx.logger.warn({ event: "voice.join.notJoinable", channelId: channel.id }, "Mari can't join that voice channel (check Connect/Speak permissions)");
-      return false;
+      return;
     }
 
     const { dv } = this.deps;
@@ -494,17 +270,12 @@ export class VoiceManager {
         adapterCreator: channel.guild.voiceAdapterCreator,
         selfDeaf: false,
         selfMute: false,
-        // Without this the library never emits 'debug', so the WebSocket close code was invisible.
-        debug: this.cfg.debug,
       });
       await dv.entersState(connection, dv.VoiceConnectionStatus.Ready, 20_000);
 
       // An EventEmitter with no 'error' listener throws and would take the whole worker down.
       connection.on("error", (err) => this.ctx.logger.warn({ event: "voice.conn.error", err: err.message }, "Voice connection error"));
-      connection.on("stateChange", (o, n) => {
-        const detail = n.status === dv.VoiceConnectionStatus.Disconnected ? { reason: n.reason, closeCode: "closeCode" in n ? n.closeCode : undefined } : {};
-        this.dbg("voice.conn.state", { from: o.status, to: n.status, ...detail });
-      });
+      connection.on("stateChange", (o, n) => this.dbg("voice.conn.state", { from: o.status, to: n.status }));
       connection.on("debug", (m) => this.dbg("voice.conn.debug", { m }));
 
       const me = channel.guild.members.me;
@@ -521,12 +292,23 @@ export class VoiceManager {
       const session: Session = { channelId: channel.id, connection, player, capturing: new Set(), busy: false };
       this.session = session;
 
-      connection.on(dv.VoiceConnectionStatus.Disconnected, () => void this.recover(session, connection));
+      connection.on(dv.VoiceConnectionStatus.Disconnected, async () => {
+        try {
+          // Moved channels / brief network blip: give it a few seconds to reconnect.
+          await Promise.race([
+            dv.entersState(connection, dv.VoiceConnectionStatus.Signalling, 5_000),
+            dv.entersState(connection, dv.VoiceConnectionStatus.Connecting, 5_000),
+          ]);
+        } catch {
+          this.leave();
+        }
+      });
       connection.receiver.speaking.on("start", (userId) => {
         this.dbg("voice.speaking.start", { userId });
         void this.onSpeechStart(session, userId);
       });
 
+      void this.loadTts().catch((err) => this.ctx.logger.error({ event: "voice.tts.loadFailed", err: String(err) }, "Kokoro failed to load"));
       this.ctx.logger.info({ event: "voice.joined", channelId: channel.id }, "Mari joined the voice channel");
 
       if (channel.isTextBased()) {
@@ -542,68 +324,12 @@ export class VoiceManager {
           session.busy = false;
         });
       }
-      return true;
     } catch (err) {
       this.ctx.logger.error({ event: "voice.join.failed", err: err instanceof Error ? err.message : String(err) }, "Mari failed to join voice");
       this.leave();
-      return false;
     } finally {
       this.joining = false;
     }
-  }
-
-  /**
-   * The voice connection dropped. Two very different cases:
-   *   - close code 4014: she was moved or removed. Discord signals a move on its own
-   *     within seconds; if nothing happens she was kicked, so she leaves.
-   *   - anything else (a network blip, the main gateway reconnecting, the host freezing
-   *     the process for a while): wait for the main gateway, then rejoin, a few times.
-   * Before this, any drop longer than 5 seconds made her leave for good.
-   */
-  async recover(session: Session, connection: VoiceConnection): Promise<void> {
-    const { dv } = this.deps;
-    if (session.recovering || this.session !== session) return;
-    session.recovering = true;
-    try {
-      const state = connection.state as { status: string; reason?: number; closeCode?: number };
-      this.ctx.logger.warn({ event: "voice.conn.disconnected", reason: state.reason, closeCode: state.closeCode, gatewayReady: this.client.isReady() }, "Voice connection dropped");
-
-      if (state.closeCode === 4014) {
-        try {
-          await Promise.race([
-            dv.entersState(connection, dv.VoiceConnectionStatus.Signalling, 5_000),
-            dv.entersState(connection, dv.VoiceConnectionStatus.Connecting, 5_000),
-          ]);
-        } catch {
-          this.leave();
-        }
-        return;
-      }
-
-      for (let attempt = 1; attempt <= RECOVER_ATTEMPTS; attempt++) {
-        await this.waitForGateway(15_000);
-        if (this.session !== session || connection.state.status === dv.VoiceConnectionStatus.Destroyed) return;
-        // A failed attempt leaves the connection stuck in 'signalling' (nothing times it out), so ask again every time.
-        if (connection.state.status !== dv.VoiceConnectionStatus.Ready) connection.rejoin();
-        try {
-          await dv.entersState(connection, dv.VoiceConnectionStatus.Ready, 10_000);
-          this.ctx.logger.info({ event: "voice.conn.recovered", attempt }, "Voice connection recovered");
-          return;
-        } catch {
-          this.ctx.logger.warn({ event: "voice.conn.recoverFailed", attempt }, "Voice rejoin attempt failed");
-          await new Promise((r) => setTimeout(r, this.recoverDelayMs * attempt));
-        }
-      }
-      this.leave();
-    } finally {
-      session.recovering = false;
-    }
-  }
-
-  /** Waits (up to `timeoutMs`) until the main Discord gateway connection is ready again. */
-  private async waitForGateway(timeoutMs: number): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (!this.client.isReady() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
   }
 
   private async maybeLeave(channel: VoiceBasedChannel | null): Promise<void> {
@@ -776,23 +502,22 @@ export class VoiceManager {
     return text ? text : null;
   }
 
-  // -- text to speech (Groq Orpheus, hosted) ---------------------------------
+  // -- text to speech (Kokoro, local) -----------------------------------------
 
-  /** One request = one chunk of at most 200 characters; returns the WAV bytes. */
-  private async synthesize(text: string): Promise<Buffer> {
-    const input = this.cfg.direction ? `[${this.cfg.direction}] ${text}` : text;
-    const res = await fetch(GROQ_TTS_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.cfg.groqApiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: this.cfg.ttsModel, voice: this.cfg.voice, input, response_format: "wav" }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!res.ok) {
-      const body = (await res.text().catch(() => "")).slice(0, 300);
-      this.ctx.logger.warn({ event: "voice.tts.failed", status: res.status, body }, "Groq text-to-speech failed");
-      throw new Error(`Groq TTS HTTP ${res.status}`);
+  private loadTts(): Promise<KokoroTTS> {
+    if (!this.tts) {
+      const started = Date.now();
+      this.ctx.logger.info({ event: "voice.tts.loading" }, "Loading Kokoro (first run downloads ~86 MB from huggingface.co)");
+      this.tts = this.deps.Kokoro.from_pretrained(KOKORO_MODEL, { dtype: "q8", device: "cpu" });
+      this.tts.then(
+        () => this.ctx.logger.info({ event: "voice.tts.ready", seconds: Math.round((Date.now() - started) / 1000) }, "Kokoro ready"),
+        (err: unknown) => {
+          this.ctx.logger.error({ event: "voice.tts.loadFailed", err: err instanceof Error ? err.message : String(err) }, "Kokoro failed to load");
+          this.tts = null; // allow a retry next time
+        },
+      );
     }
-    return Buffer.from(await res.arrayBuffer());
+    return this.tts;
   }
 
   private async speak(session: Session, reply: string): Promise<void> {
@@ -801,30 +526,16 @@ export class VoiceManager {
 
     try {
       const started = Date.now();
-      // The direction prefix counts toward Groq's 200-character limit.
-      const room = TTS_MAX_INPUT_CHARS - (this.cfg.direction ? this.cfg.direction.length + 3 : 0);
-      const chunks = chunkForTts(text, room).slice(0, MAX_TTS_CHUNKS);
-      const wavs = await Promise.all(chunks.map((c) => this.synthesize(c)));
-      const pcm = Buffer.concat(
-        wavs.map((wav, i) => {
-          const { samples, sampleRate } = parseWav(wav);
-          return samplesToDiscordPcm(samples, sampleRate, this.cfg.pitch, i === wavs.length - 1 ? 0.15 : 0.05);
-        }),
-      );
-      this.dbg("voice.tts.generated", { chars: text.length, chunks: chunks.length, seconds: Math.round((Date.now() - started) / 100) / 10, audioSeconds: Math.round(pcm.length / BYTES_PER_FRAME / DISCORD_RATE) });
+      const tts = await this.loadTts();
+      const audio = await tts.generate(text, { voice: this.cfg.voice as never, speed: this.cfg.speed });
+      const pcm = samplesToDiscordPcm(audio.audio, audio.sampling_rate, this.cfg.pitch);
+      this.dbg("voice.tts.generated", { chars: text.length, seconds: Math.round((Date.now() - started) / 100) / 10, audioSeconds: Math.round(pcm.length / BYTES_PER_FRAME / DISCORD_RATE) });
 
       const { dv } = this.deps;
-      const resource = dv.createAudioResource(Readable.from(pcmFrames(pcm), { objectMode: false }), { inputType: dv.StreamType.Raw });
-      // A reconnect may be in progress: don't start talking into a dead connection.
-      if (session.connection.state.status !== dv.VoiceConnectionStatus.Ready) await dv.entersState(session.connection, dv.VoiceConnectionStatus.Ready, 20_000);
+      const resource = dv.createAudioResource(Readable.from([pcm]), { inputType: dv.StreamType.Raw });
       session.player.play(resource);
-      // 15 s, not 5: a starved host took 3.6 s just to leave "buffering".
-      await dv.entersState(session.player, dv.AudioPlayerStatus.Playing, 15_000);
+      await dv.entersState(session.player, dv.AudioPlayerStatus.Playing, 5_000);
       await dv.entersState(session.player, dv.AudioPlayerStatus.Idle, 90_000);
-      if (this.session !== session || session.connection.state.status !== dv.VoiceConnectionStatus.Ready) {
-        this.ctx.logger.warn({ event: "voice.speak.interrupted" }, "The voice connection dropped while Mari was speaking");
-        return;
-      }
       this.dbg("voice.speak.done");
     } catch (err) {
       this.ctx.logger.error({ event: "voice.speak.failed", err: err instanceof Error ? err.message : String(err) }, "Mari couldn't speak");
