@@ -19,9 +19,12 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "worker": "tsx worker/gateway.ts",
-    "build:worker": "node scripts/buildWorker.mjs"
+    "build:worker": "node scripts/buildWorker.mjs",
+    "start:worker": "node dist/gateway.js"
   },
   "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "@snazzah/davey": "^0.1.12",
     "@vercel/functions": "^3.9.9",
     "discord-api-types": "^0.38.55",
     "discord-interactions": "^4.4.0",
@@ -29,6 +32,7 @@
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.45.2",
     "luxon": "^3.7.2",
+    "opusscript": "^0.0.8",
     "pg": "^8.13.1",
     "pino": "^9.5.0",
     "pino-pretty": "^13.0.0",
