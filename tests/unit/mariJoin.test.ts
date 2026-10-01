@@ -16,6 +16,7 @@ function setup(opts: { time?: string; date?: string; admin?: boolean; channelTyp
     options: {
       getChannel: () => ({ id: "voice-9", type: opts.channelType ?? ChannelType.GuildVoice }),
       getString: (name: string) => strings[name] ?? null,
+      getNumber: () => null,
     },
     reply,
   } as unknown as ChatInputCommandInteraction;

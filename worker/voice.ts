@@ -40,6 +40,12 @@
  *   VOICE_DIRECTION     optional delivery hint spoken-style, e.g. "cheerful" (sent as [cheerful])
  *   VOICE_PITCH         pitch multiplier, 1 = unchanged (default 1)
  *   VOICE_STT_LANGUAGE  ISO code for Whisper (default en; "auto" = detect)
+ *   VOICE_SILENCE_MS    how long a player must be quiet before the utterance is sent (default 700,
+ *                       300-2000). Lower = she answers sooner but may cut people off mid-sentence.
+ *
+ * VOICE_NAME / VOICE_DIRECTION / VOICE_PITCH are only the DEFAULTS: /mari-join can override
+ * voice, direction and pitch per session (src/modules/voice/voiceSettings.ts), and re-running it
+ * for the channel she is already in changes them live.
  *   VOICE_DEBUG         1 = verbose logs at every stage, she greets out loud on join
  *                       (plays the TTS end to end) and transcripts are logged. Turn off after testing.
  */
@@ -50,15 +56,25 @@ import type OpusScript from "opusscript";
 import type { AppContext } from "../src/appContext.js";
 import { runServerChatTurn } from "../src/discord/serverChat.js";
 import { MAX_PLAYER_MESSAGE_CHARS } from "../src/modules/ai/conversationService.js";
+import {
+  ORPHEUS_VOICES,
+  applyOverrides,
+
+  hasOverrides,
+  pickVoice,
+  sanitizeDirection,
+  type VoiceOverrides,
+  type VoiceSettings,
+} from "../src/modules/voice/voiceSettings.js";
+
+// Kept exported from here: the unit tests (and anything else) import them from the worker module.
+export { ORPHEUS_VOICES, pickVoice };
 
 const DISCORD_RATE = 48_000;
 const BYTES_PER_FRAME = 4; // 16-bit stereo
 const STT_RATE = 16_000;
 const GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech";
 const DEFAULT_TTS_MODEL = "canopylabs/orpheus-v1-english";
-/** Orpheus voices on Groq (English model). */
-export const ORPHEUS_VOICES = ["autumn", "diana", "hannah", "austin", "daniel", "troy"] as const;
-const DEFAULT_VOICE = "hannah";
 /** Groq rejects TTS input longer than this (per request, directions included). */
 export const TTS_MAX_INPUT_CHARS = 200;
 /** Cap requests per reply so one long answer can't burn the free quota. */
@@ -66,7 +82,8 @@ const MAX_TTS_CHUNKS = 3;
 const GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GROQ_STT_MODEL = "whisper-large-v3-turbo";
 
-const SILENCE_MS = 900;
+/** Quiet time that ends an utterance. Was 900; 700 trims 0.2 s off every answer (VOICE_SILENCE_MS overrides). */
+const DEFAULT_SILENCE_MS = 700;
 const MIN_UTTERANCE_MS = 700;
 const MAX_UTTERANCE_MS = 20_000;
 /** Groq's free plan allows 20 requests/minute; stay under it. */
@@ -97,12 +114,8 @@ export interface VoiceConfig {
   pitch: number;
   language: string;
   debug: boolean;
-}
-
-/** An unknown VOICE_NAME (e.g. an old Kokoro preset like af_heart) falls back to the default instead of failing every request. */
-export function pickVoice(name: string | undefined): string {
-  const v = (name ?? "").trim().toLowerCase();
-  return (ORPHEUS_VOICES as readonly string[]).includes(v) ? v : DEFAULT_VOICE;
+  /** Silence that ends an utterance; omitted = DEFAULT_SILENCE_MS. */
+  silenceMs?: number;
 }
 
 export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.env): VoiceConfig | null {
@@ -119,10 +132,11 @@ export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.
     channelId,
     voice: pickVoice(e.VOICE_NAME),
     ttsModel: e.VOICE_TTS_MODEL?.trim() || DEFAULT_TTS_MODEL,
-    direction: (e.VOICE_DIRECTION ?? "").replace(/[^\p{L} ]/gu, "").trim().slice(0, 30),
+    direction: sanitizeDirection(e.VOICE_DIRECTION),
     pitch: num(e.VOICE_PITCH, 1),
     language: e.VOICE_STT_LANGUAGE?.trim() || "en",
     debug: ["1", "true", "yes"].includes((e.VOICE_DEBUG ?? "").trim().toLowerCase()),
+    silenceMs: Math.min(2_000, Math.max(300, Math.round(num(e.VOICE_SILENCE_MS, DEFAULT_SILENCE_MS)))),
   };
 }
 
@@ -241,6 +255,18 @@ export function chunkForTts(text: string, max = TTS_MAX_INPUT_CHARS): string[] {
 }
 
 /**
+ * Time-to-first-audio helper: the first chunk is what she waits for before speaking, and
+ * chunkForTts packs short neighbouring sentences into it. Split the first sentence off so
+ * the first request is as short (fast) as possible; the rest keeps its packing.
+ */
+export function firstSentenceFirst(chunks: string[]): string[] {
+  const [head, ...rest] = chunks;
+  if (head === undefined) return [];
+  const m = /^(.+?[.!?])\s+(\S.*)$/s.exec(head);
+  return m && m[1] && m[2] ? [m[1], m[2], ...rest] : chunks;
+}
+
+/**
  * Parses a WAV file (16-bit PCM, 24-bit PCM or 32-bit float, any channel count)
  * into mono float samples. Walks the RIFF chunks instead of assuming a 44-byte
  * header, and tolerates a streamed file whose data length is 0 / 0xFFFFFFFF.
@@ -350,6 +376,18 @@ interface Session {
   busy: boolean;
   /** True while a reconnect is being attempted, so a second 'disconnected' event doesn't start a second loop. */
   recovering?: boolean;
+  /** What she speaks with in this session: the VOICE_* defaults, then whatever /mari-join chose. */
+  settings: VoiceSettings;
+}
+
+/** Per-turn stage timings, logged without any message content (plan sections 51 and 58). */
+interface TurnTiming {
+  sttMs: number;
+  /** Transcript in, reply text out: the language-model call plus database work. */
+  brainMs: number | null;
+  /** Reply text in, first audio playing: TTS of the first chunk plus joining the player. */
+  firstAudioMs: number | null;
+  chunks: number;
 }
 
 export class VoiceManager {
@@ -378,6 +416,21 @@ export class VoiceManager {
   /** Verbose stage logging, only with VOICE_DEBUG=1. */
   private dbg(event: string, fields: Record<string, unknown> = {}): void {
     if (this.cfg.debug) this.ctx.logger.info({ event, ...fields }, event);
+  }
+
+  /** The env defaults; /mari-join choices are layered on top per session. */
+  private defaultSettings(): VoiceSettings {
+    return { voice: this.cfg.voice, direction: this.cfg.direction, pitch: this.cfg.pitch };
+  }
+
+  /** Applies /mari-join choices to a live session (anything left unspecified is kept). Returns whether anything changed. */
+  private applySettings(session: Session, overrides: VoiceOverrides): boolean {
+    if (!hasOverrides(overrides)) return false;
+    const next = applyOverrides(session.settings, overrides);
+    const changed = next.voice !== session.settings.voice || next.direction !== session.settings.direction || next.pitch !== session.settings.pitch;
+    session.settings = next;
+    this.ctx.logger.info({ event: "voice.settings.applied", changed, voice: next.voice, direction: next.direction, pitch: next.pitch }, "Voice settings updated from /mari-join");
+    return changed;
   }
 
   /** Wire to Events.VoiceStateUpdate. */
@@ -453,12 +506,14 @@ export class VoiceManager {
           continue;
         }
         if (!(await repo.claim(req.id))) continue;
+        const overrides: VoiceOverrides = { voice: req.voice, direction: req.direction, pitch: req.pitch };
         if (this.session?.channelId === channel.id) {
+          this.applySettings(this.session, overrides); // already there: just retune her voice
           await repo.finish(req.id, "DONE");
           continue;
         }
         if (this.session) this.leave(); // an explicit admin request moves her
-        const ok = await this.connect(channel);
+        const ok = await this.connect(channel, overrides);
         await repo.finish(req.id, ok ? "DONE" : "FAILED");
         this.ctx.logger.info({ event: "voice.join.requested", requestId: req.id, channelId: channel.id, ok }, "/mari-join request handled");
       }
@@ -479,7 +534,7 @@ export class VoiceManager {
   }
 
   /** Joins `channel` and wires up listening. Returns false (and logs why) if she couldn't. */
-  private async connect(channel: VoiceBasedChannel): Promise<boolean> {
+  private async connect(channel: VoiceBasedChannel, overrides: VoiceOverrides = {}): Promise<boolean> {
     if (!channel.joinable) {
       this.ctx.logger.warn({ event: "voice.join.notJoinable", channelId: channel.id }, "Mari can't join that voice channel (check Connect/Speak permissions)");
       return false;
@@ -518,7 +573,7 @@ export class VoiceManager {
       player.on("error", (err) => this.ctx.logger.warn({ event: "voice.player.error", err: err.message }, "Audio player error"));
       player.on("stateChange", (o, n) => this.dbg("voice.player.state", { from: o.status, to: n.status }));
       connection.subscribe(player);
-      const session: Session = { channelId: channel.id, connection, player, capturing: new Set(), busy: false };
+      const session: Session = { channelId: channel.id, connection, player, capturing: new Set(), busy: false, settings: applyOverrides(this.defaultSettings(), overrides) };
       this.session = session;
 
       connection.on(dv.VoiceConnectionStatus.Disconnected, () => void this.recover(session, connection));
@@ -676,7 +731,7 @@ export class VoiceManager {
   private capture(session: Session, userId: string): Promise<Buffer> {
     return new Promise((resolve) => {
       const opus = session.connection.receiver.subscribe(userId, {
-        end: { behavior: this.deps.dv.EndBehaviorType.AfterSilence, duration: SILENCE_MS },
+        end: { behavior: this.deps.dv.EndBehaviorType.AfterSilence, duration: this.cfg.silenceMs ?? DEFAULT_SILENCE_MS },
       });
       const decoder = new this.deps.Opus(DISCORD_RATE, 2, this.deps.Opus.Application.AUDIO);
       const frames: Buffer[] = [];
@@ -723,7 +778,9 @@ export class VoiceManager {
   }
 
   private async handleUtterance(session: Session, userId: string, player: NonNullable<Awaited<ReturnType<VoiceManager["isActivePlayer"]>>>, pcm: Buffer): Promise<void> {
+    const sttStart = Date.now();
     const transcript = await this.transcribe(pcm);
+    const timing: TurnTiming = { sttMs: Date.now() - sttStart, brainMs: null, firstAudioMs: null, chunks: 0 };
     if (!transcript) return;
     if (!WAKE_WORD.test(transcript)) {
       this.ctx.logger.debug({ event: "voice.ignored.noWakeWord" }, "Heard speech without her name");
@@ -731,13 +788,26 @@ export class VoiceManager {
     }
     this.ctx.logger.info({ event: "voice.heard", userId, chars: transcript.length }, "Heard Mari's name");
 
+    const brainStart = Date.now();
     await runServerChatTurn(this.ctx, {
       guildId: this.cfg.guildId,
       player,
       text: transcript.slice(0, MAX_PLAYER_MESSAGE_CHARS),
       sourceRef: `voice:${userId}:${Date.now()}`,
-      deliver: (reply) => this.speak(session, reply),
+      deliver: async (reply) => {
+        timing.brainMs = Date.now() - brainStart;
+        await this.speak(session, reply, timing);
+      },
     });
+
+    // Where the delay goes, per stage, with no message content (plan sections 51 and 58). The player
+    // also waited silenceMs before any of this started, which is why it is part of "perceivedMs".
+    const silenceMs = this.cfg.silenceMs ?? DEFAULT_SILENCE_MS;
+    const afterSilenceMs = timing.sttMs + (timing.brainMs ?? 0) + (timing.firstAudioMs ?? 0);
+    this.ctx.logger.info(
+      { event: "voice.turn.timing", silenceMs, sttMs: timing.sttMs, brainMs: timing.brainMs, firstAudioMs: timing.firstAudioMs, chunks: timing.chunks, perceivedMs: silenceMs + afterSilenceMs },
+      "Voice turn timing",
+    );
   }
 
   // -- speech to text (Groq Whisper, free plan) -------------------------------
@@ -779,12 +849,12 @@ export class VoiceManager {
   // -- text to speech (Groq Orpheus, hosted) ---------------------------------
 
   /** One request = one chunk of at most 200 characters; returns the WAV bytes. */
-  private async synthesize(text: string): Promise<Buffer> {
-    const input = this.cfg.direction ? `[${this.cfg.direction}] ${text}` : text;
+  private async synthesize(text: string, settings: VoiceSettings): Promise<Buffer> {
+    const input = settings.direction ? `[${settings.direction}] ${text}` : text;
     const res = await fetch(GROQ_TTS_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.cfg.groqApiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: this.cfg.ttsModel, voice: this.cfg.voice, input, response_format: "wav" }),
+      body: JSON.stringify({ model: this.cfg.ttsModel, voice: settings.voice, input, response_format: "wav" }),
       signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) {
@@ -795,37 +865,63 @@ export class VoiceManager {
     return Buffer.from(await res.arrayBuffer());
   }
 
-  private async speak(session: Session, reply: string): Promise<void> {
+  /**
+   * Speaks a reply. Every chunk is synthesized at once, but playback starts as soon as the FIRST
+   * chunk is ready and the rest follow in order, instead of waiting for the whole reply to be
+   * generated and resampled first. The first chunk is also kept to a single sentence, so what
+   * she waits for before opening her mouth is one short TTS request.
+   */
+  private async speak(session: Session, reply: string, timing?: TurnTiming): Promise<void> {
     const text = toSpeechText(reply);
     if (!text || this.session !== session) return;
 
+    const { dv } = this.deps;
+    const settings = session.settings;
     try {
       const started = Date.now();
       // The direction prefix counts toward Groq's 200-character limit.
-      const room = TTS_MAX_INPUT_CHARS - (this.cfg.direction ? this.cfg.direction.length + 3 : 0);
-      const chunks = chunkForTts(text, room).slice(0, MAX_TTS_CHUNKS);
-      const wavs = await Promise.all(chunks.map((c) => this.synthesize(c)));
-      const pcm = Buffer.concat(
-        wavs.map((wav, i) => {
-          const { samples, sampleRate } = parseWav(wav);
-          return samplesToDiscordPcm(samples, sampleRate, this.cfg.pitch, i === wavs.length - 1 ? 0.15 : 0.05);
-        }),
-      );
-      this.dbg("voice.tts.generated", { chars: text.length, chunks: chunks.length, seconds: Math.round((Date.now() - started) / 100) / 10, audioSeconds: Math.round(pcm.length / BYTES_PER_FRAME / DISCORD_RATE) });
+      const room = TTS_MAX_INPUT_CHARS - (settings.direction ? settings.direction.length + 3 : 0);
+      const chunks = firstSentenceFirst(chunkForTts(text, room)).slice(0, MAX_TTS_CHUNKS);
+      if (timing) timing.chunks = chunks.length;
 
-      const { dv } = this.deps;
-      const resource = dv.createAudioResource(Readable.from(pcmFrames(pcm), { objectMode: false }), { inputType: dv.StreamType.Raw });
-      // A reconnect may be in progress: don't start talking into a dead connection.
-      if (session.connection.state.status !== dv.VoiceConnectionStatus.Ready) await dv.entersState(session.connection, dv.VoiceConnectionStatus.Ready, 20_000);
-      session.player.play(resource);
-      // 15 s, not 5: a starved host took 3.6 s just to leave "buffering".
-      await dv.entersState(session.player, dv.AudioPlayerStatus.Playing, 15_000);
-      await dv.entersState(session.player, dv.AudioPlayerStatus.Idle, 90_000);
-      if (this.session !== session || session.connection.state.status !== dv.VoiceConnectionStatus.Ready) {
-        this.ctx.logger.warn({ event: "voice.speak.interrupted" }, "The voice connection dropped while Mari was speaking");
-        return;
+      // A failed chunk resolves to null (never rejects), so a chunk nobody is awaiting yet can't raise an unhandled rejection.
+      const jobs = chunks.map((chunk, i) =>
+        this.synthesize(chunk, settings)
+          .then((wav) => {
+            const { samples, sampleRate } = parseWav(wav);
+            return samplesToDiscordPcm(samples, sampleRate, settings.pitch, i === chunks.length - 1 ? 0.15 : 0.05);
+          })
+          .catch((err: unknown) => {
+            this.ctx.logger.warn({ event: "voice.tts.chunkFailed", chunk: i, err: err instanceof Error ? err.message : String(err) }, "A speech chunk failed");
+            return null;
+          }),
+      );
+
+      let audioSeconds = 0;
+      for (let i = 0; i < jobs.length; i++) {
+        const pcm = await jobs[i];
+        if (!pcm) break; // she says what she has; the failure is already logged
+        if (this.session !== session) return;
+        audioSeconds += pcm.length / BYTES_PER_FRAME / DISCORD_RATE;
+
+        const resource = dv.createAudioResource(Readable.from(pcmFrames(pcm), { objectMode: false }), { inputType: dv.StreamType.Raw });
+        // A reconnect may be in progress: don't start talking into a dead connection.
+        if (session.connection.state.status !== dv.VoiceConnectionStatus.Ready) await dv.entersState(session.connection, dv.VoiceConnectionStatus.Ready, 20_000);
+        session.player.play(resource);
+        // 15 s, not 5: a starved host took 3.6 s just to leave "buffering".
+        await dv.entersState(session.player, dv.AudioPlayerStatus.Playing, 15_000);
+        if (i === 0) {
+          const firstAudioMs = Date.now() - started;
+          if (timing) timing.firstAudioMs = firstAudioMs;
+          this.dbg("voice.tts.firstAudio", { ms: firstAudioMs, chunks: chunks.length });
+        }
+        await dv.entersState(session.player, dv.AudioPlayerStatus.Idle, 90_000);
+        if (this.session !== session || session.connection.state.status !== dv.VoiceConnectionStatus.Ready) {
+          this.ctx.logger.warn({ event: "voice.speak.interrupted" }, "The voice connection dropped while Mari was speaking");
+          return;
+        }
       }
-      this.dbg("voice.speak.done");
+      this.dbg("voice.speak.done", { chars: text.length, chunks: chunks.length, seconds: Math.round((Date.now() - started) / 100) / 10, audioSeconds: Math.round(audioSeconds) });
     } catch (err) {
       this.ctx.logger.error({ event: "voice.speak.failed", err: err instanceof Error ? err.message : String(err) }, "Mari couldn't speak");
     }

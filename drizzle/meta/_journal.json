@@ -92,6 +92,13 @@
       "when": 1790807451334,
       "tag": "0012_add_voice_join_requests",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790831039381,
+      "tag": "0013_add_voice_settings",
+      "breakpoints": true
     }
   ]
 }

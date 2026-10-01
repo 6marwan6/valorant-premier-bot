@@ -31,6 +31,22 @@ describeIfDb("VoiceJoinRepository (integration)", () => {
     expect((await repo.getPending(g))?.id).toBe(request.id);
   });
 
+  it("round-trips the /mari-join voice choices, and stores NULL when none were given", async () => {
+    const g = guild();
+    const withVoice = await repo.schedule({ guildId: g, channelId: "c1", joinAt: minutes(5), requestedBy: "admin", voice: "troy", direction: "cheerful", pitch: 1.1 });
+    expect(withVoice.request).toMatchObject({ voice: "troy", direction: "cheerful" });
+    expect(withVoice.request.pitch).toBeCloseTo(1.1, 5);
+    const stored = await repo.getPending(g);
+    expect(stored).toMatchObject({ voice: "troy", direction: "cheerful" });
+    expect(stored?.pitch).toBeCloseTo(1.1, 5);
+
+    const plain = await repo.schedule({ guildId: g, channelId: "c1", joinAt: minutes(6), requestedBy: "admin" });
+    expect(plain.request).toMatchObject({ voice: null, direction: null, pitch: null });
+
+    const cleared = await repo.schedule({ guildId: g, channelId: "c1", joinAt: minutes(7), requestedBy: "admin", direction: "" });
+    expect(cleared.request.direction).toBe(""); // "" = explicitly no direction, distinct from NULL
+  });
+
   it("a newer request replaces the pending one (only one PENDING per guild)", async () => {
     const g = guild();
     const first = await repo.schedule({ guildId: g, channelId: "c1", joinAt: minutes(10), requestedBy: "admin" });

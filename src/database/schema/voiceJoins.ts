@@ -1,4 +1,4 @@
-import { pgTable, pgEnum, serial, text, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, pgEnum, serial, text, real, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 /**
@@ -27,6 +27,14 @@ export const voiceJoinRequests = pgTable(
     status: voiceJoinStatusEnum("status").notNull().default("PENDING"),
     /** Discord user id of the admin who ran the command. */
     requestedBy: text("requested_by").notNull(),
+    /**
+     * Voice choices the admin made in /mari-join (2026-10-01). NULL = not specified: she keeps the
+     * VOICE_* env default (or, if she is already in the channel, whatever she is using now).
+     * direction "" = explicitly no direction.
+     */
+    voice: text("voice"),
+    direction: text("direction"),
+    pitch: real("pitch"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     handledAt: timestamp("handled_at", { withTimezone: true }),
   },

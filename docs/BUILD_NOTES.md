@@ -888,7 +888,7 @@ replaces the one-open-DIRECT_CHAT index with
 and a server chat can be open at once. Idempotent. Run `npm run db:migrate`,
 then **`npm run deploy-commands`** (the `/mari` definition changed).
 
-### Gateway worker (Wispbyte, or anything that runs Node)
+### Gateway worker (Railway — see docs/RAILWAY.md; or anything that runs Node)
 
 1. Upload the repo (or connect it) and set the start command to `npm run worker`
    (`tsx worker/gateway.ts`; `tsx` is now a runtime dependency). Node 24 per
@@ -1106,6 +1106,30 @@ upload the rebuilt `dist/gateway.js`.
 (worker polling with fakes), `decideJoin` cases in `tests/unit/voiceTts.test.ts`,
 `tests/integration/voiceJoinRepository.test.ts` (real Postgres: replace, atomic claim,
 due-ness, finish). Not verified: a real join in Discord (no route from this sandbox).
+
+### Voice troubleshooting: "she joins but doesn't speak" (2026-10-01)
+
+Read the worker log with `VOICE_DEBUG=1`. In order:
+
+1. `voice.tts.generated` present -> Groq works (text-to-speech is fine). `voice.tts.failed` -> Groq's status/body is logged.
+2. `voice.player.state ... buffering -> playing` -> audio was handed to Discord.
+3. `voice.conn.state ready -> signalling -> disconnected` within milliseconds means the voice
+   WebSocket closed AND the main gateway wasn't ready at that instant (discord.js'
+   `sendPayload` returns false -> `AdapterUnavailable`, `reason: 1`). Both Discord
+   connections dying together is the signature of the whole process being frozen or
+   starved by the host, not of a Groq or audio problem. Look for `voice.loop.lag`
+   (the worker detected it was stalled) and `worker.shard.disconnect` around the same time.
+4. `voice.conn.debug` lines (`[WS] ...`, `[NW] ...`, DAVE) only exist with `VOICE_DEBUG=1`:
+   `joinVoiceChannel` needs `debug: true` for the library to emit them — it was missing before,
+   which is why the close code was invisible.
+
+What the worker now does about a dropped connection: waits for the main gateway, then
+rejoins up to 4 times (`voice.conn.recovered` / `voice.conn.recoverFailed`) instead of leaving
+after 5 s. A close code 4014 (moved/kicked) is still treated as "she was removed".
+`voice.speak.interrupted` means the connection dropped mid-sentence (before: logged as done).
+Audio is fed to the Opus encoder one 20 ms frame at a time, so playback never encodes a whole
+clip in one synchronous burst. These make her tolerant of short stalls; they cannot make a
+host that freezes for a minute at a time reliable.
 
 **Env:** `VOICE_SPEED` no longer exists (Orpheus has no speed setting). An old
 `VOICE_NAME=af_heart` falls back to `hannah`. New optional: `VOICE_TTS_MODEL`,

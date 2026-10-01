@@ -1,6 +1,7 @@
 import { and, eq, lte } from "drizzle-orm";
 import type { Database } from "../client.js";
 import { voiceJoinRequests, type VoiceJoinRequestRow } from "../schema/voiceJoins.js";
+import type { VoiceOverrides } from "../../modules/voice/voiceSettings.js";
 
 /**
  * Repository for `voice_join_requests` (/mari-join). Thin and individually
@@ -15,7 +16,7 @@ export class VoiceJoinRepository {
    * guild, in one transaction, so there is never more than one PENDING row
    * (the partial unique index enforces it too). Returns the request it replaced.
    */
-  async schedule(params: { guildId: string; channelId: string; joinAt: Date; requestedBy: string }): Promise<{ request: VoiceJoinRequestRow; replaced: VoiceJoinRequestRow | null }> {
+  async schedule(params: { guildId: string; channelId: string; joinAt: Date; requestedBy: string } & VoiceOverrides): Promise<{ request: VoiceJoinRequestRow; replaced: VoiceJoinRequestRow | null }> {
     return this.db.transaction(async (tx) => {
       const [replaced] = await tx
         .update(voiceJoinRequests)
