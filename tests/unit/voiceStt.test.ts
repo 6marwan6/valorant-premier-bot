@@ -6,7 +6,7 @@ import { VoiceManager, loadVoiceConfig, pickSttProvider, type VoiceConfig } from
 afterEach(() => vi.restoreAllMocks());
 
 const cfgBase: VoiceConfig = {
-  groqApiKey: "g1", guildId: "g", channelId: null, voice: "hannah", ttsModel: "m", direction: "", pitch: 1, language: "auto", debug: false,
+  groqApiKey: "g1", guildId: "g", channelId: null, voice: "hannah", ttsModel: "m", direction: "", pitch: 1, language: "en", debug: false,
   sttModel: "whisper-large-v3", deepgramApiKey: "d1", sttProvider: "deepgram", deepgramModel: "nova-3",
 };
 async function manager(cfg: Partial<VoiceConfig> = {}) {
@@ -14,8 +14,8 @@ async function manager(cfg: Partial<VoiceConfig> = {}) {
   const m = await VoiceManager.create({} as Client, { logger, repositories: {} } as unknown as AppContext, { ...cfgBase, ...cfg });
   return { m, logger };
 }
-type Priv = { transcribe: (pcm: Buffer) => Promise<{ text: string | null; status: string; language?: string }> };
-const t = (m: VoiceManager) => (m as unknown as Priv).transcribe(Buffer.alloc(48_000 * 4));
+type Priv = { transcribe: (pcm: Buffer, language?: "en" | "ar-EG") => Promise<{ text: string | null; status: string; language?: string }> };
+const t = (m: VoiceManager, language?: "en" | "ar-EG") => (m as unknown as Priv).transcribe(Buffer.alloc(48_000 * 4), language);
 const json = (o: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json", ...headers } });
 const dg = (transcript: string, extra: { confidence?: number; detected_language?: string } = {}) =>
   json({ results: { channels: [{ detected_language: extra.detected_language, alternatives: [{ transcript, confidence: extra.confidence ?? 0.97 }] }] } });
@@ -37,58 +37,72 @@ describe("provider choice", () => {
 });
 
 describe("Deepgram Nova-3 speech-to-text", () => {
-  it("auto language: restricts detection to English + Arabic, sends keyterms and the Token header", async () => {
+  it("English (the default): one request with language=en, English keyterms and the Token header", async () => {
     const { m } = await manager();
-    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => dg("مرحبا يا ماري", { detected_language: "ar" }));
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => dg("hello mari"));
     const out = await t(m);
     const [url, init] = spy.mock.calls[0] as unknown as [string, RequestInit];
     const q = new URL(url).searchParams;
     expect(q.get("model")).toBe("nova-3");
-    expect(q.getAll("detect_language")).toEqual(["en", "ar"]);
-    expect(q.get("language")).toBeNull();
-    expect(q.getAll("keyterm")).toContain("ماري");
+    expect(q.get("language")).toBe("en");
+    expect(q.getAll("detect_language")).toEqual([]);
+    expect(q.getAll("keyterm")).toContain("Mari");
+    expect(q.getAll("keyterm")).not.toContain("ماري");
     expect((init.headers as Record<string, string>).Authorization).toBe("Token d1");
     expect((init.headers as Record<string, string>)["Content-Type"]).toBe("audio/wav");
-    expect(out).toEqual({ text: "مرحبا يا ماري", status: "ok", language: "ar" });
+    expect(out).toEqual({ text: "hello mari", status: "ok", language: "en" });
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it("a fixed language is sent as `language` (e.g. Egyptian Arabic)", async () => {
-    const { m } = await manager({ language: "ar-EG" });
-    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => dg("ازيك"));
-    const out = await t(m);
+  it("ar-EG: one request with language=ar-EG (Egyptian Arabic) and her name in Arabic script as a keyterm", async () => {
+    const { m } = await manager();
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => dg("ازيك يا ماري"));
+    const out = await t(m, "ar-EG");
     const q = new URL((spy.mock.calls[0] as unknown as [string])[0]).searchParams;
     expect(q.get("language")).toBe("ar-EG");
     expect(q.getAll("detect_language")).toEqual([]);
-    expect(out).toMatchObject({ text: "ازيك", language: "ar-EG" });
+    expect(q.getAll("keyterm")).toContain("ماري");
+    expect(out).toEqual({ text: "ازيك يا ماري", status: "ok", language: "ar-EG" });
   });
 
-  it("an empty result is final (no Groq call); low confidence is filtered like noise", async () => {
+  it("NO extra Deepgram requests: an empty result is final in either language (no detection, no second try, no Groq)", async () => {
+    for (const lang of ["en", "ar-EG"] as const) {
+      const { m } = await manager();
+      const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => dg(""));
+      expect(await t(m, lang)).toMatchObject({ text: null, status: "empty" });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(isDg(spy.mock.calls[0]![0])).toBe(true);
+      spy.mockRestore();
+    }
+  });
+
+  it("low confidence is filtered like noise, also with one request only", async () => {
     const { m } = await manager();
-    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => dg(""));
-    expect(await t(m)).toMatchObject({ text: null, status: "empty" });
-    expect(spy).toHaveBeenCalledTimes(1);
-    spy.mockImplementation(async () => dg("thank you", { confidence: 0.12 }));
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => dg("thank you", { confidence: 0.12 }));
     expect(await t(m)).toMatchObject({ text: null, status: "filtered" });
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it("when Deepgram answers 400 \"Failed to parse query string\" to the language list, it steps down to detect_language=true and REMEMBERS it", async () => {
+  it("a 400 steps down to a simpler query (no keyterms, then no smart_format) and REMEMBERS it per language", async () => {
     const { m } = await manager();
     const spy = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (url) => (new URL(String(url)).searchParams.getAll("detect_language").length === 2 ? json({ err_code: "Bad Request", err_msg: "Bad Request: Failed to parse query string" }, 400) : dg("hello mari", { detected_language: "en" })));
+      .mockImplementation(async (url) => (new URL(String(url)).searchParams.getAll("keyterm").length > 0 ? json({ err_code: "Bad Request", err_msg: "Bad Request: Failed to parse query string" }, 400) : dg("hello mari")));
     expect(await t(m)).toMatchObject({ text: "hello mari", status: "ok" });
-    expect(spy).toHaveBeenCalledTimes(3); // restricted+keyterms (400), restricted (400), detect_language=true (ok)
-    expect(new URL((spy.mock.calls[2] as unknown as [string])[0]).searchParams.get("detect_language")).toBe("true");
+    expect(spy).toHaveBeenCalledTimes(2);
     spy.mockClear();
-    expect(await t(m)).toMatchObject({ text: "hello mari", status: "ok" });
+    expect(await t(m)).toMatchObject({ status: "ok" });
     expect(spy).toHaveBeenCalledTimes(1); // the next utterance starts from the shape that works
+    spy.mockClear();
+    await t(m, "ar-EG");
+    expect(new URL((spy.mock.calls[0] as unknown as [string])[0]).searchParams.getAll("keyterm").length).toBeGreaterThan(0); // Arabic learns its own shape
   });
 
-  it("if every shape is refused it reports failed (so Whisper takes over) and starts from the top next time", async () => {
+  it("if every shape is refused it reports failed (so Whisper takes over)", async () => {
     const { m } = await manager();
     const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => json({ err: "bad" }, 400));
     expect(await t(m)).toMatchObject({ text: null, status: "failed" }); // (the mocked Whisper fallback is refused too)
-    expect(spy.mock.calls.filter((c) => isDg(c[0]))).toHaveLength(4);
+    expect(spy.mock.calls.filter((c) => isDg(c[0]))).toHaveLength(3);
   });
 
   it("a 400 is retried once without keyterms", async () => {

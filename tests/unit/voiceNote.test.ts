@@ -183,7 +183,7 @@ describe("loadVoiceNoteSettings", () => {
 });
 
 // -- the command ---------------------------------------------------------------------------------------------------
-function setup(opts: { admin?: boolean; message?: string; ai?: boolean; preview?: boolean; voiceMessageFails?: boolean; fileFails?: boolean; aiEnabled?: boolean; rewrite?: string | null }) {
+function setup(opts: { admin?: boolean; message?: string; ai?: boolean; preview?: boolean; voiceMessageFails?: boolean; fileFails?: boolean; aiEnabled?: boolean; rewrite?: string | null; mention?: { id: string }; pingFails?: boolean }) {
   const reply = vi.fn(async (_p?: unknown) => undefined);
   const flags: Record<string, boolean | undefined> = { ai_voice: opts.ai, preview: opts.preview };
   const interaction = {
@@ -197,6 +197,7 @@ function setup(opts: { admin?: boolean; message?: string; ai?: boolean; preview?
       getNumber: () => null,
       getBoolean: (n: string) => flags[n] ?? null,
       getChannel: () => ({ id: "chan-9", type: ChannelType.GuildText }),
+      getUser: () => opts.mention ?? null,
     },
     reply,
   } as unknown as ChatInputCommandInteraction;
@@ -208,14 +209,18 @@ function setup(opts: { admin?: boolean; message?: string; ai?: boolean; preview?
     if (opts.fileFails) throw new Error("nope");
     return { id: "m2" };
   });
+  const sendChannelMessage = vi.fn(async (..._a: unknown[]) => {
+    if (opts.pingFails) throw new Error("Missing Access");
+    return { id: "m3" };
+  });
   const rewriteAdminMessage = vi.fn(async () => (opts.rewrite === null ? { source: "fallback" } : { source: "ai", text: opts.rewrite ?? "okay team, we win tonight, lock in" }));
   const ctx = {
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    discord: { sendVoiceMessage, sendAudioFile },
+    discord: { sendVoiceMessage, sendAudioFile, sendChannelMessage },
     services: { ai: { enabled: opts.aiEnabled !== false, rewriteAdminMessage } },
     repositories: { serverConfig: { getByGuildId: vi.fn(async () => ({ adminRoleId: null, timezone: "Africa/Cairo" })) }, players: { listActiveByGuild: vi.fn(async () => []) } },
   } as unknown as AppContext;
-  return { interaction, ctx, reply, sendVoiceMessage, sendAudioFile, rewriteAdminMessage };
+  return { interaction, ctx, reply, sendVoiceMessage, sendAudioFile, sendChannelMessage, rewriteAdminMessage };
 }
 const said = (reply: ReturnType<typeof vi.fn>) => ((reply.mock.calls[0]?.[0] ?? {}) as { content?: string }).content ?? "";
 
@@ -225,6 +230,38 @@ describe("/mari-voice", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => wav());
   };
   afterEach(() => vi.unstubAllEnvs());
+
+  it("mention: the voice note goes first, then a tiny message pings ONLY that user", async () => {
+    withKey();
+    const t = setup({ mention: { id: "u42" } });
+    await mariVoiceCommand.execute(t.interaction, t.ctx);
+    expect(t.sendVoiceMessage).toHaveBeenCalledTimes(1);
+    expect(t.sendChannelMessage).toHaveBeenCalledWith("chan-9", { content: "<@u42> 🎙️", suppressMentions: true, mentionUserIds: ["u42"] });
+    expect(t.sendVoiceMessage.mock.invocationCallOrder[0]).toBeLessThan(t.sendChannelMessage.mock.invocationCallOrder[0]!);
+    expect(said(t.reply)).toContain("pinging <@u42>");
+  });
+
+  it("no mention, no ping message", async () => {
+    withKey();
+    const t = setup({});
+    await mariVoiceCommand.execute(t.interaction, t.ctx);
+    expect(t.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("a failed voice note never pings anyone", async () => {
+    withKey();
+    const t = setup({ mention: { id: "u42" }, voiceMessageFails: true, fileFails: true });
+    await mariVoiceCommand.execute(t.interaction, t.ctx);
+    expect(t.sendChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("if only the ping fails, the note is still sent and the admin is told", async () => {
+    withKey();
+    const t = setup({ mention: { id: "u42" }, pingFails: true });
+    await mariVoiceCommand.execute(t.interaction, t.ctx);
+    expect(t.sendVoiceMessage).toHaveBeenCalledTimes(1);
+    expect(said(t.reply)).toContain("ping for <@u42> failed");
+  });
 
   it("is admin only", async () => {
     withKey();

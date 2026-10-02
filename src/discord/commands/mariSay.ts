@@ -28,6 +28,9 @@ const MAX_AI_DRAFT_CHARS = 1000;
  * - Mentions are suppressed unless `allow_pings` is true (verbatim mode only;
  *   AI output never pings), so an accidental `@everyone` doesn't ping the
  *   whole server.
+ * - `mention` (2026-10-02): pings ONE server member alongside the message. Mari puts `@them` in front of the text
+ *   and tells Discord that user is the only one allowed to be pinged, so it works with `ai_voice` too (the
+ *   model's text itself still can't ping anyone) and a stray `@everyone` in the message stays inert.
  * - A literal `\n` in the text becomes a line break (slash-command text boxes
  *   are single-line).
  * - The admin gets an ephemeral confirmation; the message appears as Mari's own.
@@ -62,6 +65,9 @@ const data = new SlashCommandBuilder()
       .addChannelTypes(ChannelType.GuildText)
       .setRequired(false),
   )
+  .addUserOption((opt) =>
+    opt.setName("mention").setDescription("Ping this person with the message (only them; works with ai_voice too)").setRequired(false),
+  )
   .addBooleanOption((opt) =>
     opt
       .setName("allow_pings")
@@ -86,14 +92,16 @@ const mariSayCommand: Command = {
     const aiVoice = interaction.options.getBoolean("ai_voice") === true;
     const preview = interaction.options.getBoolean("preview") === true;
     const allowPings = interaction.options.getBoolean("allow_pings") === true;
+    const mentioned = interaction.options.getUser("mention");
+    const mentionPrefix = mentioned ? `<@${mentioned.id}> ` : "";
 
     if (content.length === 0) {
       await interaction.reply({ content: "❌ The message is empty.", ephemeral: true });
       return;
     }
-    if (content.length > MAX_SAY_CHARS) {
+    if (content.length + mentionPrefix.length > MAX_SAY_CHARS) {
       await interaction.reply({
-        content: `❌ That's ${content.length} characters — Discord's limit is ${MAX_SAY_CHARS}.`,
+        content: `❌ That's ${content.length + mentionPrefix.length} characters${mentioned ? " with the mention" : ""} — Discord's limit is ${MAX_SAY_CHARS}.`,
         ephemeral: true,
       });
       return;
@@ -134,13 +142,18 @@ const mariSayCommand: Command = {
       finalText = outcome.text;
 
       if (preview) {
-        await interaction.reply({ content: renderPreview(finalText), ephemeral: true });
+        await interaction.reply({ content: renderPreview(finalText) + (mentioned ? `\n(When posted it will ping <@${mentioned.id}>.)` : ""), ephemeral: true });
         return;
       }
     }
 
     try {
-      await ctx.discord.sendChannelMessage(channelId, { content: finalText, suppressMentions: !allowPings });
+      await ctx.discord.sendChannelMessage(channelId, {
+        content: mentionPrefix + finalText,
+        // allow_pings = "let everything in my text ping"; otherwise only the `mention` user (if any) can be pinged.
+        suppressMentions: !allowPings,
+        ...(mentioned && !allowPings ? { mentionUserIds: [mentioned.id] } : {}),
+      });
     } catch (err) {
       ctx.logger.error(
         { event: "mariSay.failed", guildId: guard.guildId, channelId, aiVoice, err: err instanceof Error ? err.message : String(err) },
@@ -155,7 +168,7 @@ const mariSayCommand: Command = {
 
     ctx.logger.info({ event: "mariSay.posted", guildId: guard.guildId, channelId, aiVoice }, "Admin message posted as Mari");
     await interaction.reply({
-      content: aiVoice ? `✅ Posted in <#${channelId}> — rewritten in Mari's voice.` : `✅ Posted in <#${channelId}>.`,
+      content: `✅ Posted in <#${channelId}>${aiVoice ? " — rewritten in Mari's voice" : ""}${mentioned ? `, pinging <@${mentioned.id}>` : ""}.`,
       ephemeral: true,
     });
   },

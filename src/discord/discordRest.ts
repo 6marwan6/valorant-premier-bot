@@ -23,6 +23,15 @@ export interface ReplyPayload {
   ephemeral?: boolean;
   /** Public replies that carry model-written text: `allowed_mentions: { parse: [] }` so nothing in it can ping anyone (2026-09-29 server chat). */
   suppressMentions?: boolean;
+  /** With `suppressMentions`: the only users allowed to be pinged (/mari-say `mention`, /mari-voice `mention`). Everything else in the text stays inert. */
+  mentionUserIds?: string[];
+}
+
+/** Discord's `allowed_mentions` for a channel message; undefined = Discord's default (mentions in the text ping). */
+export function allowedMentionsFor(payload: Pick<ReplyPayload, "suppressMentions" | "mentionUserIds">): { parse: []; users?: string[] } | undefined {
+  if (!payload.suppressMentions) return undefined;
+  const users = [...new Set(payload.mentionUserIds ?? [])];
+  return users.length > 0 ? { parse: [], users } : { parse: [] };
 }
 
 function serializeComponents(
@@ -52,7 +61,13 @@ export class DiscordRestClient {
   /** Posts a brand-new message to a channel — used by /post-match and the reminder cron job (plain-text roster announcement, or an embed nudge — reminderMessages.ts). */
   async sendChannelMessage(channelId: string, payload: ReplyPayload): Promise<{ id: string }> {
     return (await this.rest.post(Routes.channelMessages(channelId), {
-      body: { content: payload.content, embeds: serializeEmbeds(payload.embeds), components: serializeComponents(payload.components) },
+      body: {
+        content: payload.content,
+        embeds: serializeEmbeds(payload.embeds),
+        components: serializeComponents(payload.components),
+        // Until 2026-10-02 this was silently dropped: suppressMentions never reached Discord.
+        allowed_mentions: allowedMentionsFor(payload),
+      },
     })) as { id: string };
   }
 

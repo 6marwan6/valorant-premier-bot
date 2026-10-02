@@ -21,6 +21,11 @@ const MAX_AI_DRAFT_CHARS = 400;
  * carry text, so the words are not shown next to it. If Discord refuses the voice-message flow the same audio
  * is posted as a normal .ogg attachment and the admin is told.
  *
+ * `mention` (2026-10-02): pings one server member about the note. A voice message can't carry text, so the
+ * ping is a second, tiny message (`@them 🎙️`) posted right AFTER the note succeeded (never a ping for a note that
+ * failed). Only that user can be pinged. The audio itself is untouched: she does not speak their name unless
+ * the message says it.
+ *
  * It runs in the Vercel app, so GROQ_API_KEY (and optionally the VOICE_* variables) must be set there too.
  */
 const data = new SlashCommandBuilder()
@@ -53,6 +58,9 @@ const data = new SlashCommandBuilder()
   .addNumberOption((opt) =>
     opt.setName("pitch").setDescription(`Pitch multiplier, ${MIN_PITCH} to ${MAX_PITCH} (also changes speed a little)`).setRequired(false).setMinValue(MIN_PITCH).setMaxValue(MAX_PITCH),
   )
+  .addUserOption((opt) =>
+    opt.setName("mention").setDescription("Ping this person about the voice note (posted right after it)").setRequired(false),
+  )
   .addChannelOption((opt) =>
     opt.setName("channel").setDescription("Where to send it (default: this channel)").addChannelTypes(ChannelType.GuildText).setRequired(false),
   );
@@ -72,6 +80,7 @@ const mariVoiceCommand: Command = {
     const aiVoice = interaction.options.getBoolean("ai_voice") === true;
     const preview = interaction.options.getBoolean("preview") === true;
     const channelId = interaction.options.getChannel("channel")?.id ?? interaction.channelId;
+    const mentioned = interaction.options.getUser("mention");
 
     if (content.length === 0) {
       await interaction.reply({ content: "❌ The message is empty.", ephemeral: true });
@@ -159,9 +168,19 @@ const mariVoiceCommand: Command = {
       }
     }
 
+    let pinged = true;
+    if (mentioned) {
+      try {
+        await ctx.discord.sendChannelMessage(channelId, { content: `<@${mentioned.id}> 🎙️`, suppressMentions: true, mentionUserIds: [mentioned.id] });
+      } catch (err) {
+        pinged = false;
+        ctx.logger.warn({ event: "mariVoice.pingFailed", guildId: guard.guildId, channelId, err: err instanceof Error ? err.message : String(err) }, "Voice note sent but the ping message failed");
+      }
+    }
+
     ctx.logger.info({ event: "mariVoice.sent", guildId: guard.guildId, channelId, aiVoice, asVoiceMessage, language: note.language, chunks: note.chunks, seconds: note.durationSecs }, "Voice note sent as Mari");
     await interaction.reply({
-      content: `✅ Voice note sent in <#${channelId}>${aiVoice ? " — rewritten in Mari's voice" : ""}${note.language === "en" ? ` — voice **${settings!.voice}**, ${settings!.direction ? `direction **${settings!.direction}**` : "no direction"}, pitch **${settings!.pitch}**` : ` — Arabic voice (it takes no delivery direction, so the tone comes from the words), pitch **${settings!.pitch}**`}${asVoiceMessage ? "" : ". Discord refused the voice-message player, so it went as a normal audio file (give Mari **Send Voice Messages** in that channel)"}.`,
+      content: `✅ Voice note sent in <#${channelId}>${aiVoice ? " — rewritten in Mari's voice" : ""}${note.language === "en" ? ` — voice **${settings!.voice}**, ${settings!.direction ? `direction **${settings!.direction}**` : "no direction"}, pitch **${settings!.pitch}**` : ` — Arabic voice (it takes no delivery direction, so the tone comes from the words), pitch **${settings!.pitch}**`}${mentioned ? (pinged ? `, pinging <@${mentioned.id}>` : ` — but the ping for <@${mentioned.id}> failed (Mari needs **Send Messages** there)`) : ""}${asVoiceMessage ? "" : ". Discord refused the voice-message player, so it went as a normal audio file (give Mari **Send Voice Messages** in that channel)"}.`,
       ephemeral: true,
     });
   },

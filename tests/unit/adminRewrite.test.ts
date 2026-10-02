@@ -100,6 +100,7 @@ describe("/mari-say", () => {
     aiEnabled?: boolean;
     rewrite?: { source: "ai"; text: string } | { source: "fallback" };
     sendFails?: boolean;
+    mention?: { id: string };
   }) {
     const reply = vi.fn(async (_payload?: unknown) => undefined);
     const interaction = {
@@ -111,6 +112,7 @@ describe("/mari-say", () => {
         getString: () => opts.message,
         getBoolean: (name: string) => ({ ai_voice: opts.aiVoice, preview: opts.preview, allow_pings: opts.allowPings })[name] ?? null,
         getChannel: () => null,
+        getUser: () => opts.mention ?? null,
       },
       reply,
     } as unknown as ChatInputCommandInteraction;
@@ -139,6 +141,39 @@ describe("/mari-say", () => {
     await mariSayCommand.execute(t.interaction, t.ctx);
     expect(t.sendChannelMessage).toHaveBeenCalledWith("here", { content: "Heeeeeyy guys\nme again", suppressMentions: true });
     expect(t.rewriteAdminMessage).not.toHaveBeenCalled();
+  });
+
+  it("mention: puts @user in front and lets ONLY that user be pinged (a stray @everyone stays inert)", async () => {
+    const t = setup({ message: "@everyone get on", mention: { id: "u42" } });
+    await mariSayCommand.execute(t.interaction, t.ctx);
+    expect(t.sendChannelMessage).toHaveBeenCalledWith("here", { content: "<@u42> @everyone get on", suppressMentions: true, mentionUserIds: ["u42"] });
+    expect(replyText(t.reply)).toContain("<@u42>");
+  });
+
+  it("mention also works with ai_voice: the ping is added after the rewrite, around the model's text", async () => {
+    const t = setup({ message: "tell him to get on", aiVoice: true, mention: { id: "u42" } });
+    await mariSayCommand.execute(t.interaction, t.ctx);
+    expect(t.sendChannelMessage).toHaveBeenCalledWith("here", { content: "<@u42> rewritten hehe", suppressMentions: true, mentionUserIds: ["u42"] });
+  });
+
+  it("mention + preview: nothing is posted, the preview says who would be pinged", async () => {
+    const t = setup({ message: "x", aiVoice: true, preview: true, mention: { id: "u42" } });
+    await mariSayCommand.execute(t.interaction, t.ctx);
+    expect(t.sendChannelMessage).not.toHaveBeenCalled();
+    expect(replyText(t.reply)).toContain("<@u42>");
+  });
+
+  it("mention counts toward Discord's 2000-character limit", async () => {
+    const t = setup({ message: "a".repeat(1995), mention: { id: "123456789012345678" } });
+    await mariSayCommand.execute(t.interaction, t.ctx);
+    expect(t.sendChannelMessage).not.toHaveBeenCalled();
+    expect(replyText(t.reply)).toContain("with the mention");
+  });
+
+  it("allow_pings + mention: the mention is in the text and everything may ping, as the admin asked", async () => {
+    const t = setup({ message: "hi", allowPings: true, mention: { id: "u42" } });
+    await mariSayCommand.execute(t.interaction, t.ctx);
+    expect(t.sendChannelMessage).toHaveBeenCalledWith("here", { content: "<@u42> hi", suppressMentions: false });
   });
 
   it("lets pings through only when asked", async () => {
