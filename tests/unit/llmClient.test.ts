@@ -106,3 +106,36 @@ describe("createLlmClient", () => {
     expect(createLlmClient({ ...env, LLM_EXTRA_BODY: '{"reasoning_effort":"low"}' })).not.toBeNull();
   });
 });
+
+describe("OpenAiCompatibleLlmClient — several API keys", () => {
+  it("hands over to the next key when one is out of quota, and stays on it", async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const auth = (init?.headers as Record<string, string>).authorization!;
+      seen.push(auth);
+      return auth === "Bearer k1" ? new Response("{}", { status: 429 }) : okResponse("hi");
+    });
+    const client = new OpenAiCompatibleLlmClient({ ...baseConfig, timeoutMs: 1000, apiKey: "k1, k2", fetchImpl: fetchImpl as never });
+    expect((await client.complete({ system: "s", user: "u" })).text).toBe("hi");
+    await client.complete({ system: "s", user: "u" });
+    expect(seen).toEqual(["Bearer k1", "Bearer k2", "Bearer k2"]);
+  });
+
+  it("reports a normal http error when every key is refused", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 429 }));
+    const client = new OpenAiCompatibleLlmClient({ ...baseConfig, timeoutMs: 1000, apiKey: "k1,k2", fetchImpl: fetchImpl as never });
+    await expect(client.complete({ system: "s", user: "u" })).rejects.toMatchObject({ kind: "http", status: 429 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("a single key still works exactly as before", async () => {
+    const fetchImpl = vi.fn(async () => okResponse("one"));
+    const client = new OpenAiCompatibleLlmClient({ ...baseConfig, timeoutMs: 1000, fetchImpl: fetchImpl as never });
+    expect((await client.complete({ system: "s", user: "u" })).text).toBe("one");
+  });
+
+  it("createLlmClient accepts a key list in LLM_API_KEY", () => {
+    expect(createLlmClient({ LLM_API_KEY: "a,b", LLM_BASE_URL: "https://x/v1", LLM_MODEL: "m", LLM_EXTRA_BODY: undefined, LLM_TIMEOUT_MS: 1000, LLM_MAX_TOKENS: 100 })).not.toBeNull();
+    expect(createLlmClient({ LLM_API_KEY: " , ", LLM_BASE_URL: "https://x/v1", LLM_MODEL: "m", LLM_EXTRA_BODY: undefined, LLM_TIMEOUT_MS: 1000, LLM_MAX_TOKENS: 100 })).toBeNull();
+  });
+});

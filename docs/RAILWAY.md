@@ -55,6 +55,25 @@ The default is 0 seconds before SIGKILL.
 Do not set `PORT`; Railway provides it. Do not set `CRON_SECRET` here, the worker
 serves no cron routes.
 
+### Which variables go where (complete list, 2026-10-02)
+
+| Variable | Vercel | Railway | Why |
+|---|---|---|---|
+| `DISCORD_BOT_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_GUILD_ID` | yes | yes | both talk to Discord |
+| `DISCORD_PUBLIC_KEY` | yes | yes (unused, but the env schema requires it) | Vercel verifies interaction signatures |
+| `DATABASE_URL` | yes | yes | same Neon pooled string |
+| `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_EXTRA_BODY`, `LLM_TIMEOUT_MS`, `LLM_MAX_TOKENS` | yes | yes | buttons/cron/`/mari` (Vercel) and `@Mari`/DMs/voice replies (Railway) all call the LLM |
+| `CRON_SECRET` | yes | no | only the cron endpoints use it |
+| `DEFAULT_TIMEZONE`, `MATCH_CHANNEL_ID`, `ADMIN_ROLE_ID` | yes | optional | bootstrap defaults before `/setup`; the database wins afterwards |
+| `GATEWAY_WORKER` | unset / `false` | `true` | tells replies a worker exists (drops the Tap Reply button) |
+| `GROQ_API_KEY` | yes | yes | Vercel: `/mari-voice` voice notes. Railway: live voice |
+| `VOICE_NAME`, `VOICE_DIRECTION`, `VOICE_PITCH`, `VOICE_TTS_MODEL`, `VOICE_ARABIC`, `VOICE_TTS_ARABIC_MODEL`, `VOICE_NAME_AR` | yes | yes | keep identical so a voice note sounds like her live voice |
+| `DEEPGRAM_API_KEY`, `VOICE_STT_PROVIDER`, `VOICE_DEEPGRAM_MODEL`, `VOICE_STT_MODEL`, `VOICE_STT_LANGUAGE` | no | yes | speech-to-text only exists in the live worker |
+| `VOICE_CHANNEL_ID`, `VOICE_LISTEN`, `VOICE_SILENCE_MS`, `VOICE_MIN_LEVEL`, `VOICE_WARMUP`, `VOICE_DEBUG` | no | yes | live voice behaviour |
+| `VOICE_LLM_MODEL`, `VOICE_LLM_MAX_TOKENS` | no | yes | spoken replies only |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | no | yes (`10`) | graceful shutdown |
+| `NODE_ENV`, `LOG_LEVEL`, `PORT` | Vercel sets `NODE_ENV`; `LOG_LEVEL` optional | `LOG_LEVEL` optional; never set `PORT` | platform-provided |
+
 ## Cutover (order matters)
 
 Two gateway connections on one bot token will both answer, so the old one must be

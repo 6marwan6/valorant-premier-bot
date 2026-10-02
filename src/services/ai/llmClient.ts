@@ -1,5 +1,6 @@
 import type { Env } from "../../config/env.js";
 import type { Logger } from "../../config/logger.js";
+import { KeyPool, fetchWithKeys, parseKeyList, type FailoverLogger } from "../../modules/voice/keyPool.js";
 
 /**
  * Provider-agnostic LLM access — plan section 57 ("The exact models should
@@ -42,7 +43,10 @@ export class LlmError extends Error {
 }
 
 export interface OpenAiCompatibleConfig {
+  /** One key, or several separated by commas/spaces/new lines: a key refused for a key reason (429 limit, 402 credit, 401 bad key) hands over to the next (2026-10-01 (d)). */
   apiKey: string;
+  /** Used only to log a key switch (by position, never the key). */
+  logger?: FailoverLogger;
   /** e.g. https://dashscope-intl.aliyuncs.com/compatible-mode/v1 — `/chat/completions` is appended. */
   baseUrl: string;
   model: string;
@@ -62,10 +66,12 @@ interface ChatCompletionResponse {
 export class OpenAiCompatibleLlmClient implements LlmClient {
   readonly model: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly keys: KeyPool;
 
   constructor(private readonly config: OpenAiCompatibleConfig) {
     this.model = config.model;
     this.fetchImpl = config.fetchImpl ?? fetch;
+    this.keys = new KeyPool(parseKeyList(config.apiKey));
   }
 
   async complete(request: LlmRequest): Promise<LlmResult> {
@@ -75,24 +81,28 @@ export class OpenAiCompatibleLlmClient implements LlmClient {
     // class as the DB timeouts in database/client.ts).
     const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
     try {
-      const response = await this.fetchImpl(`${this.config.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.config.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: request.model ?? this.config.model,
-          messages: [
-            { role: "system", content: request.system },
-            { role: "user", content: request.user },
-          ],
-          max_tokens: request.maxTokens ?? this.config.maxTokens,
-          temperature: 0.9,
-          ...this.config.extraBody,
-        }),
-        signal: controller.signal,
+      const url = `${this.config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+      const body = JSON.stringify({
+        model: request.model ?? this.config.model,
+        messages: [
+          { role: "system", content: request.system },
+          { role: "user", content: request.user },
+        ],
+        max_tokens: request.maxTokens ?? this.config.maxTokens,
+        temperature: 0.9,
+        ...this.config.extraBody,
       });
+      const response = await fetchWithKeys(
+        this.keys,
+        (key) =>
+          this.fetchImpl(url, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+            body,
+            signal: controller.signal,
+          }),
+        { service: "llm", logger: this.config.logger },
+      );
 
       if (!response.ok) {
         throw new LlmError(`LLM request failed with HTTP ${response.status}`, "http", response.status);
@@ -136,7 +146,7 @@ type LlmEnv = Pick<
  * a bad AI env var must never take down the whole interaction handler.
  */
 export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "warn" | "info">): LlmClient | null {
-  if (!env.LLM_API_KEY || !env.LLM_BASE_URL || !env.LLM_MODEL) {
+  if (!env.LLM_API_KEY || parseKeyList(env.LLM_API_KEY).length === 0 || !env.LLM_BASE_URL || !env.LLM_MODEL) {
     const missing = [
       !env.LLM_API_KEY && "LLM_API_KEY",
       !env.LLM_BASE_URL && "LLM_BASE_URL",
@@ -192,5 +202,6 @@ export function createLlmClient(env: LlmEnv, logger?: Pick<Logger, "error" | "wa
     extraBody,
     timeoutMs: env.LLM_TIMEOUT_MS,
     maxTokens: env.LLM_MAX_TOKENS,
+    logger: logger as FailoverLogger | undefined,
   });
 }

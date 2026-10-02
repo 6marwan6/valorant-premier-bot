@@ -57,6 +57,36 @@ export class DiscordRestClient {
   }
 
   /**
+   * Sends a Discord *voice message* (the waveform player), 2026-10-01 (d). Discord's three steps: ask for an
+   * upload slot, PUT the Ogg/Opus bytes to it, then post a message with the voice-message flag (8192), the
+   * uploaded filename, the duration and a waveform. Such a message can't carry any text.
+   */
+  async sendVoiceMessage(channelId: string, note: { ogg: Buffer; durationSecs: number; waveform: string }): Promise<{ id: string }> {
+    const filename = "voice-message.ogg";
+    const slot = (await this.rest.post(`/channels/${channelId}/attachments` as `/${string}`, {
+      body: { files: [{ filename, file_size: note.ogg.length, id: "0" }] },
+    })) as { attachments?: Array<{ upload_url: string; upload_filename: string }> };
+    const target = slot.attachments?.[0];
+    if (!target) throw new Error("Discord gave no upload slot for the voice message");
+    const put = await fetch(target.upload_url, { method: "PUT", headers: { "Content-Type": "audio/ogg" }, body: new Uint8Array(note.ogg), signal: AbortSignal.timeout(15_000) });
+    if (!put.ok) throw new Error(`Voice message upload failed with HTTP ${put.status}`);
+    return (await this.rest.post(Routes.channelMessages(channelId), {
+      body: {
+        flags: 8192, // IS_VOICE_MESSAGE
+        attachments: [{ id: "0", filename, uploaded_filename: target.upload_filename, duration_secs: note.durationSecs, waveform: note.waveform }],
+      },
+    })) as { id: string };
+  }
+
+  /** Fallback when the voice-message flow is refused: the same audio as an ordinary .ogg attachment (still playable, just not the voice-message UI). */
+  async sendAudioFile(channelId: string, ogg: Buffer, filename = "mari.ogg"): Promise<{ id: string }> {
+    return (await this.rest.post(Routes.channelMessages(channelId), {
+      body: { attachments: [{ id: 0, filename }] },
+      files: [{ name: filename, data: ogg, contentType: "audio/ogg" }],
+    })) as { id: string };
+  }
+
+  /**
    * Opens (or fetches — Discord returns the existing one) the DM channel
    * between the bot and a user. Phase 7: private conversations (plan
    * section 59). Fails with Discord error 50007 when the user doesn't

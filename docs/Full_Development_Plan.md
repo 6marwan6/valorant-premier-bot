@@ -212,6 +212,32 @@ Store:
 >    of it (busy, too short, STT failed/empty/filtered, no name, noise,
 >    answered) without its content (section 51).
 
+> **Revision, 2026-10-01 (d) (Marwan, product owner):** three changes.
+>
+> 1. **Deepgram Nova-3 hears the players.** With a Deepgram key set,
+>    speech-to-text is Deepgram Nova-3 (English and Arabic; with
+>    `VOICE_STT_LANGUAGE=auto` detection is restricted to those two, or a
+>    fixed code such as `ar-EG` can be set). Groq Whisper stays as the
+>    automatic fallback for any utterance Deepgram fails on, and is the
+>    engine when no Deepgram key is set. This adds a **second vendor that
+>    receives the roster players' voice audio** (still only roster players,
+>    still one utterance at a time, nothing stored by us, section 44 rule 6
+>    unchanged); the player-facing privacy note should name Deepgram.
+> 2. **Several API keys per service.** `GROQ_API_KEY`, `DEEPGRAM_API_KEY` and
+>    `LLM_API_KEY` each accept a comma-separated list. A key refused for a
+>    key reason (429 limit, 402 out of credit, 401 bad key) goes on a
+>    cooldown and the same request is retried on the next key; other errors
+>    don't switch keys. Keys are never logged. (Principle #8: a spent free
+>    quota must not take the feature down.)
+> 3. **Voice notes: `/mari-voice` (admin only).** The spoken sibling of
+>    `/mari-say`: the text is spoken as written, or rewritten in her voice
+>    with `ai_voice` (with `preview`; nothing is sent if the AI is off or its
+>    output is rejected), in English or Arabic by script, and sent as a
+>    Discord voice message to a text channel. The words are not shown next to
+>    it (Discord voice messages carry no text). It runs in the app, so the
+>    app needs `GROQ_API_KEY` too. Section 41's command list gains
+>    `/mari-voice`.
+
 Do not build:
 
 - Web dashboard.

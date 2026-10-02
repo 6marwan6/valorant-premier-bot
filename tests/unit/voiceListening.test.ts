@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Client } from "discord.js";
 import type { AppContext } from "../../src/appContext.js";
-import { VoiceManager, decideAnswer, isLikelyNoise, loadVoiceConfig, type VoiceConfig } from "../../worker/voice.js";
+import { VoiceManager, decideAnswer, isLikelyNoise, loadVoiceConfig, peakLevel, type VoiceConfig } from "../../worker/voice.js";
 import { DEFAULT_DIRECTION, DEFAULT_PITCH, directionFromEnv } from "../../src/modules/voice/voiceSettings.js";
 
 describe("decideAnswer (2026-10-01: name needed only when others are around)", () => {
@@ -42,7 +42,7 @@ describe("voice defaults: a young, playful, flirty gamer girl", () => {
 
   it("defaults to the flirty direction and a slightly raised pitch", () => {
     const cfg = loadVoiceConfig("g", env({}));
-    expect(cfg).toMatchObject({ direction: DEFAULT_DIRECTION, pitch: DEFAULT_PITCH, voice: "hannah", listen: "auto", warmup: true });
+    expect(cfg).toMatchObject({ direction: DEFAULT_DIRECTION, pitch: DEFAULT_PITCH, voice: "hannah", listen: "auto", warmup: true, warmupGroq: false, minLevel: 250 });
     expect(DEFAULT_DIRECTION).toBe("flirty");
     expect(DEFAULT_PITCH).toBeGreaterThan(1);
   });
@@ -53,6 +53,13 @@ describe("voice defaults: a young, playful, flirty gamer girl", () => {
     expect(directionFromEnv("none")).toBe("");
     expect(directionFromEnv("whisper")).toBe("whisper");
     expect(loadVoiceConfig("g", env({ VOICE_DIRECTION: "none" }))?.direction).toBe("");
+  });
+
+  it("VOICE_WARMUP=full turns on the Groq warm-up; VOICE_MIN_LEVEL tunes (or, at 0, disables) the quiet-noise gate", () => {
+    expect(loadVoiceConfig("g", env({ VOICE_WARMUP: "full" }))).toMatchObject({ warmup: true, warmupGroq: true });
+    expect(loadVoiceConfig("g", env({ VOICE_MIN_LEVEL: "400" }))?.minLevel).toBe(400);
+    expect(loadVoiceConfig("g", env({ VOICE_MIN_LEVEL: "0" }))?.minLevel).toBe(0);
+    expect(loadVoiceConfig("g", env({ VOICE_MIN_LEVEL: "junk" }))?.minLevel).toBe(250);
   });
 
   it("reads the listen mode, warm-up switch and spoken-reply LLM settings", () => {
@@ -203,21 +210,34 @@ describe("cold start", () => {
     expect((t.ctx.repositories.players.getByDiscordUserId as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
   });
 
-  it("the warm-up looks up the players already there, opens a Groq connection, synthesizes one throw-away word, and logs timings", async () => {
+  it("the default warm-up only looks up the players already there: it sends NO request to Groq or Deepgram", async () => {
     const t = await setup({ members: [human("p1"), bot("b")], roster: ["p1"] });
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
+    const synth = vi.fn(async () => Buffer.alloc(0));
+    (t.manager as unknown as { synthesize: typeof synth }).synthesize = synth;
+    await t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "flirty", pitch: 1.08, listen: "auto" });
+    expect(synth).not.toHaveBeenCalled();
+    expect(spy).not.toHaveBeenCalled();
+    expect((t.ctx.repositories.players.getByDiscordUserId as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1); // the human, not the bot
+    expect(t.logger.info.mock.calls.some((c) => (c[0] as { event: string }).event === "voice.warmup")).toBe(true);
+    spy.mockRestore();
+  });
+
+  it("VOICE_WARMUP=full also opens a Groq connection and synthesizes one throw-away word", async () => {
+    const t = await setup({ members: [human("p1"), bot("b")], roster: ["p1"] });
+    (t.manager as unknown as { cfg: { warmupGroq?: boolean } }).cfg.warmupGroq = true;
     const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
     const synth = vi.fn(async () => Buffer.alloc(0));
     (t.manager as unknown as { synthesize: typeof synth }).synthesize = synth;
     await t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "flirty", pitch: 1.08, listen: "auto" });
     expect(synth).toHaveBeenCalledTimes(1);
     expect(String(spy.mock.calls[0]![0])).toContain("api.groq.com");
-    expect((t.ctx.repositories.players.getByDiscordUserId as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1); // the human, not the bot
-    expect(t.logger.info.mock.calls.some((c) => (c[0] as { event: string }).event === "voice.warmup")).toBe(true);
     spy.mockRestore();
   });
 
   it("a failing warm-up step is reported, never thrown", async () => {
     const t = await setup({ members: [human("p1")], roster: ["p1"] });
+    (t.manager as unknown as { cfg: { warmupGroq?: boolean } }).cfg.warmupGroq = true;
     const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Promise.reject(new Error("offline")));
     (t.manager as unknown as { synthesize: () => Promise<never> }).synthesize = async () => Promise.reject(new Error("tts down"));
     await expect(t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "", pitch: 1, listen: "auto" })).resolves.toBeUndefined();
@@ -236,5 +256,30 @@ describe("headcount used for the name rule", () => {
   it("is null (treated as several people) when the channel isn't cached", async () => {
     const t = await setup({ members: [human("a")] });
     expect(humans(t.manager, { channelId: "elsewhere" })).toBeNull();
+  });
+});
+
+describe("peakLevel (the quiet-noise gate before speech-to-text)", () => {
+  const pcmOf = (amplitude: number, frames: number) => {
+    const b = Buffer.alloc(frames * 4);
+    for (let i = 0; i < frames; i++) {
+      const v = i % 2 === 0 ? amplitude : -amplitude;
+      b.writeInt16LE(v, i * 4);
+      b.writeInt16LE(v, i * 4 + 2);
+    }
+    return b;
+  };
+
+  it("is ~0 for silence, small for room noise and large for speech", () => {
+    expect(peakLevel(Buffer.alloc(0))).toBe(0);
+    expect(peakLevel(pcmOf(0, 48_000))).toBe(0);
+    expect(peakLevel(pcmOf(100, 48_000))).toBeLessThan(250);
+    expect(peakLevel(pcmOf(3000, 48_000))).toBeGreaterThan(250);
+  });
+
+  it("uses the loudest 100 ms, so a short word after a quiet lead-in still passes", () => {
+    const quiet = pcmOf(50, 24_000);
+    const loud = pcmOf(4000, 4_800);
+    expect(peakLevel(Buffer.concat([quiet, loud]))).toBeGreaterThan(250);
   });
 });

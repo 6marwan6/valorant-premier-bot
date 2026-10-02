@@ -15,17 +15,17 @@ import {
 import { VoiceManager, firstSentenceFirst, loadVoiceConfig, type VoiceConfig } from "../../worker/voice.js";
 import mariJoinCommand from "../../src/discord/commands/mariJoin.js";
 
-const base = { voice: "hannah", direction: "", pitch: 1 };
+const base = { voice: "hannah", direction: "", pitch: 1, listen: "auto" as const };
 
 describe("voice settings helpers", () => {
   it("keeps everything an admin left out", () => {
     expect(applyOverrides(base, {})).toEqual(base);
-    expect(applyOverrides(base, { voice: "troy" })).toEqual({ voice: "troy", direction: "", pitch: 1 });
-    expect(applyOverrides({ voice: "troy", direction: "cheerful", pitch: 1.1 }, { pitch: 0.9 })).toEqual({ voice: "troy", direction: "cheerful", pitch: 0.9 });
+    expect(applyOverrides(base, { voice: "troy" })).toEqual({ voice: "troy", direction: "", pitch: 1, listen: "auto" });
+    expect(applyOverrides({ voice: "troy", direction: "cheerful", pitch: 1.1, listen: "auto" }, { pitch: 0.9 })).toEqual({ voice: "troy", direction: "cheerful", pitch: 0.9, listen: "auto" });
   });
 
   it("an explicit empty direction clears it; null means unspecified", () => {
-    const withDirection = { voice: "hannah", direction: "cheerful", pitch: 1 };
+    const withDirection = { voice: "hannah", direction: "cheerful", pitch: 1, listen: "auto" as const };
     expect(applyOverrides(withDirection, { direction: "" }).direction).toBe("");
     expect(applyOverrides(withDirection, { direction: null }).direction).toBe("cheerful");
   });
@@ -106,11 +106,11 @@ describe("/mari-join voice options reach the worker", () => {
 
   it("if she is already in that channel the settings change live and she does not reconnect", async () => {
     const t = await managerWith({ channelId: "voice-9", voice: "diana", pitch: 0.9 });
-    const session = { channelId: "voice-9", settings: { voice: "hannah", direction: "sad", pitch: 1 } };
+    const session = { channelId: "voice-9", settings: { voice: "hannah", direction: "sad", pitch: 1, listen: "auto" } };
     (t.manager as unknown as { session: unknown }).session = session;
     await t.manager.runScheduledJoins();
     expect(t.connect).not.toHaveBeenCalled();
-    expect(session.settings).toEqual({ voice: "diana", direction: "sad", pitch: 0.9 }); // direction was not specified: kept
+    expect(session.settings).toEqual({ voice: "diana", direction: "sad", pitch: 0.9, listen: "auto" }); // direction was not specified: kept
     expect(t.repo.finish).toHaveBeenCalledWith(1, "DONE");
   });
 });
@@ -176,5 +176,23 @@ describe("/mari-join command", () => {
     await mariJoinCommand.execute(junk.interaction as never, junk.ctx);
     expect(junk.schedule).not.toHaveBeenCalled();
     expect((junk.reply.mock.calls[0] as unknown as [{ content: string }])[0].content).toContain("plain words");
+  });
+});
+
+describe("listen mode (2026-10-01 (b))", () => {
+  it("/mari-join offers listen with three choices: group, just one person, auto", () => {
+    const opt = mariJoinCommand.data.toJSON().options?.find((o) => o.name === "listen") as { choices?: Array<{ value: string }>; required?: boolean } | undefined;
+    expect(opt?.required).toBeFalsy();
+    expect(opt?.choices?.map((c) => c.value).sort()).toEqual(["always", "auto", "name"]);
+  });
+
+  it("applies per session, keeps the old value when unspecified, and ignores junk", () => {
+    const base = { voice: "hannah", direction: "", pitch: 1, listen: "auto" as const };
+    expect(applyOverrides(base, { listen: "name" }).listen).toBe("name");
+    expect(applyOverrides({ ...base, listen: "always" }, { pitch: 1.1 }).listen).toBe("always");
+    expect(applyOverrides(base, { listen: "nonsense" }).listen).toBe("auto");
+    expect(hasOverrides({ listen: "always" })).toBe(true);
+    expect(describeOverrides({ listen: "always" })).toContain("no name needed");
+    expect(describeOverrides({ listen: "name" })).toContain("needs her name");
   });
 });

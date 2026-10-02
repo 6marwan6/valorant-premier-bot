@@ -137,7 +137,7 @@ describe("speech-to-text request and robustness", () => {
     expect(await (m as unknown as Priv).transcribe(pcm)).toMatchObject({ text: null, status: "filtered" });
   });
 
-  it("retries once after a 429/5xx and then succeeds", async () => {
+  it("retries once after a 5xx and then succeeds", async () => {
     const { m, logger } = await manager();
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementationOnce(async () => json({ error: "busy" }, 503)).mockImplementation(async () => json({ text: "ok then", segments: [] }));
     expect(await (m as unknown as Priv).transcribe(pcm)).toMatchObject({ text: "ok then", status: "ok" });
@@ -150,6 +150,13 @@ describe("speech-to-text request and robustness", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Promise.reject(new Error("socket hang up")));
     expect(await (m as unknown as Priv).transcribe(pcm)).toMatchObject({ text: null, status: "failed" });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a 429: every key was already tried, a second pass only burns requests", async () => {
+    const { m } = await manager();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => json({ error: "rate limited" }, 429));
+    expect(await (m as unknown as Priv).transcribe(pcm)).toMatchObject({ text: null, status: "failed" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("does not retry a 400 (a bad request won't get better)", async () => {

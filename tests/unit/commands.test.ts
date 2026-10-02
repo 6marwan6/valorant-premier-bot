@@ -53,6 +53,7 @@ describe("command registry", () => {
         "add-memory",
         "mari-say",
         "mari-join",
+        "mari-voice",
       ].sort(),
     );
   });

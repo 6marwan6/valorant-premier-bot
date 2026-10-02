@@ -1509,3 +1509,18 @@ Groq accepting `[flirty]`, and the actual cause of any LLM-provider cold start.
 - **`getNumber` was missing from the HTTP adapter** (found when `/mari-join` threw); a test now checks every
   option type used by any command has a getter.
 - **Not built**: other STT provider (needs a plan decision), voice notes (needs trigger/language decisions).
+
+## 2026-10-01 (d) — Deepgram Nova-3, API key lists, `/mari-voice`
+
+- **`src/modules/voice/keyPool.ts`**: `parseKeyList`, `KeyPool`, `fetchWithKeys` (401/402/429 = key problem, cooldown
+  by retry-after, never logs a key). Used by the worker (Groq STT/TTS/warm-up, Deepgram), the shared TTS, and
+  `OpenAiCompatibleLlmClient` (`LLM_API_KEY` list).
+- **STT chain** (`worker/voice.ts`): `transcribe` = Deepgram Nova-3 first (if keyed), Groq Whisper on `failed` only.
+  Auto language = `detect_language=en&detect_language=ar`; a 400 is retried once without keyterms.
+- **Shared modules** moved out of the worker so the app can use them: `speech.ts` (text prep, chunking, WAV/PCM),
+  `tts.ts` (`synthesizeSpeech`, `TtsError`). `worker/voice.ts` re-exports the old names.
+- **Voice notes**: `oggOpus.ts` (own Ogg/Opus muxer on `opusscript`, lazy-loaded; waveform), `voiceNote.ts`,
+  `DiscordRestClient.sendVoiceMessage` (attachments slot -> PUT -> message with flag 8192) and `sendAudioFile`
+  fallback, `/mari-voice`. Container verified with ffmpeg here; Discord's side is not verifiable from this sandbox.
+- **Not verifiable here**: live Deepgram (language-detection request shape), live Discord voice-message upload,
+  opusscript's WASM being traced into the Vercel bundle (it falls back to its asm.js build if not).

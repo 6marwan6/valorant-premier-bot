@@ -43,12 +43,18 @@
  *   VOICE_DIRECTION     delivery hint sent as [word] (default "flirty": a young, playful gamer girl);
  *                       "none" sends no direction
  *   VOICE_PITCH         pitch multiplier, 1 = unchanged (default 1.08; also a little faster)
+ *   GROQ_API_KEY / DEEPGRAM_API_KEY / LLM_API_KEY   one key, or several separated by commas: when a key
+ *                       hits its limit (429), runs out of credit (402) or is refused (401), the next one is used
+ *   DEEPGRAM_API_KEY    Deepgram Nova-3 does the speech-to-text; Groq Whisper is the automatic fallback
+ *   VOICE_STT_PROVIDER  auto (default: deepgram if a key is set) | deepgram | groq
+ *   VOICE_DEEPGRAM_MODEL  default nova-3
  *   VOICE_STT_MODEL     Groq Whisper model (default whisper-large-v3; whisper-large-v3-turbo is a little faster)
  *   VOICE_STT_LANGUAGE  auto (default: English + Arabic) or a fixed code such as en / ar
  *   VOICE_ARABIC        0 = never speak Arabic (replies still come out in English-voice only)
  *   VOICE_TTS_ARABIC_MODEL / VOICE_NAME_AR   Arabic model and voice (default orpheus-arabic-saudi / noura)
  *   VOICE_LISTEN        auto (default) | name | always: whether she needs her name (see 3 above)
- *   VOICE_WARMUP        0 = skip the warm-up she does on joining (default on)
+ *   VOICE_WARMUP        0 = skip the warm-up she does on joining; full = also warm Groq/Deepgram (costs requests every join; default: database only)
+ *   VOICE_MIN_LEVEL     utterances quieter than this (RMS 0..32768, default 250) are dropped before speech-to-text; 0 = off
  *   VOICE_LLM_MODEL     optional faster model just for spoken replies (same provider as LLM_MODEL)
  *   VOICE_LLM_MAX_TOKENS optional output cap for spoken replies; leave unset unless replies get cut off
  *   VOICE_STT_LANGUAGE  ISO code for Whisper (default en; "auto" = detect)
@@ -69,6 +75,23 @@ import type { AppContext } from "../src/appContext.js";
 import { runServerChatTurn } from "../src/discord/serverChat.js";
 import { MAX_PLAYER_MESSAGE_CHARS } from "../src/modules/ai/conversationService.js";
 import { normalizeText } from "../src/modules/ai/topicMatch.js";
+import { KeyPool, fetchWithKeys, parseKeyList } from "../src/modules/voice/keyPool.js";
+import { DEFAULT_ARABIC_TTS_MODEL, DEFAULT_ARABIC_VOICE, DEFAULT_TTS_MODEL, TtsError, synthesizeSpeech } from "../src/modules/voice/tts.js";
+import {
+  BYTES_PER_FRAME,
+  DISCORD_RATE,
+  MAX_SPOKEN_CHARS,
+  TTS_MAX_INPUT_CHARS,
+  arabicRatio,
+  chunkForTts,
+  firstSentenceFirst,
+  languageOf,
+  parseWav,
+  samplesToDiscordPcm,
+  toSpeechText,
+  type SpokenLanguage,
+} from "../src/modules/voice/speech.js";
+export { TTS_MAX_INPUT_CHARS, arabicRatio, chunkForTts, firstSentenceFirst, languageOf, parseWav, samplesToDiscordPcm, toSpeechText, type SpokenLanguage };
 import {
   DEFAULT_PITCH,
   ORPHEUS_VOICES,
@@ -85,20 +108,17 @@ import {
 // Kept exported from here: the unit tests (and anything else) import them from the worker module.
 export { ORPHEUS_VOICES, pickVoice };
 
-const DISCORD_RATE = 48_000;
-const BYTES_PER_FRAME = 4; // 16-bit stereo
 const STT_RATE = 16_000;
-const GROQ_TTS_URL = "https://api.groq.com/openai/v1/audio/speech";
-const DEFAULT_TTS_MODEL = "canopylabs/orpheus-v1-english";
 /** Groq rejects TTS input longer than this (per request, directions included). */
-export const TTS_MAX_INPUT_CHARS = 200;
 /** Cap requests per reply so one long answer can't burn the free quota. */
 const MAX_TTS_CHUNKS = 3;
+const DEEPGRAM_URL = "https://api.deepgram.com/v1/listen";
+/** Names and game words, in both scripts, that Nova-3 should lean toward. */
+const DEEPGRAM_KEYTERMS = ["Mari", "ماري", "Valorant", "Premier", "Jett", "Sage", "Omen"];
+/** Below this Deepgram is guessing (noise, a cough): treated like Whisper's no-speech case. */
+const DEEPGRAM_MIN_CONFIDENCE = 0.35;
 const GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 const DEFAULT_STT_MODEL = "whisper-large-v3";
-const DEFAULT_ARABIC_TTS_MODEL = "canopylabs/orpheus-arabic-saudi";
-/** Orpheus Arabic voices: fahad, sultan (male); lulwa, noura (female). */
-const DEFAULT_ARABIC_VOICE = "noura";
 
 /** Quiet time that ends an utterance. Was 900; 700 trims 0.2 s off every answer (VOICE_SILENCE_MS overrides). */
 const DEFAULT_SILENCE_MS = 700;
@@ -109,7 +129,13 @@ const FOLLOWUP_MS = 12_000;
 const MAX_UTTERANCE_MS = 20_000;
 /** Groq's free plan allows 20 requests/minute; stay under it. */
 const STT_MAX_PER_MINUTE = 15;
-const MAX_SPOKEN_CHARS = 400;
+/**
+ * An utterance whose loudest 100 ms is quieter than this (RMS, 0..32768) is a breath, a key click or room noise:
+ * it is dropped locally instead of costing a speech-to-text request. VOICE_MIN_LEVEL overrides it, 0 = off.
+ */
+const DEFAULT_MIN_LEVEL = 250;
+/** Only a first chunk longer than this is split after its first sentence (faster first audio); shorter replies stay ONE TTS request. */
+const SPLIT_FIRST_SENTENCE_OVER = 120;
 const ROSTER_CACHE_MS = 60_000;
 /** How often the worker looks for due /mari-join requests. */
 const SCHEDULE_POLL_MS = 15_000;
@@ -132,18 +158,7 @@ export function hasWakeWord(transcript: string): boolean {
     .some((token) => ARABIC_WAKE_WORDS.has(token));
 }
 
-/** Share of letters that are Arabic script: decides which TTS model speaks a chunk. */
-export function arabicRatio(text: string): number {
-  const letters = text.match(/\p{L}/gu) ?? [];
-  if (letters.length === 0) return 0;
-  const arabic = text.match(/[\u0600-\u06FF\u0750-\u077F]/g) ?? [];
-  return arabic.length / letters.length;
-}
 
-export type SpokenLanguage = "ar" | "en";
-export function languageOf(text: string): SpokenLanguage {
-  return arabicRatio(text) >= 0.4 ? "ar" : "en";
-}
 
 /** Whisper's well-known Arabic hallucinations on silence ("subtitles by...", "subscribe to the channel"). */
 const ARABIC_HALLUCINATION_PARTS = ["ترجمه نانسي", "قنقر", "اشترك في القناه", "اشتركوا في القناه", "شكرا على المشاهده", "شكرا للمشاهده"].map(normalizeText);
@@ -169,6 +184,12 @@ export function isLikelyNoise(transcript: string): boolean {
   if (ARABIC_HALLUCINATION_PARTS.some((part) => arabic.includes(part))) return true;
   const t = transcript.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, " ").replace(/\s+/g, " ").trim();
   return t.length < 2 || WHISPER_HALLUCINATIONS.has(t);
+}
+
+export interface SttResult {
+  text: string | null;
+  status: "ok" | "empty" | "filtered" | "failed" | "rateLimited";
+  language?: string;
 }
 
 export interface SttSegment {
@@ -207,6 +228,23 @@ export function decideAnswer(p: { transcript: string; humans: number | null; lis
   return { answer: true, reason: listen === "always" ? "listenAll" : "alone" };
 }
 
+/** Loudest 100 ms stretch of a captured utterance (48 kHz stereo s16le), as RMS on the 0..32768 scale. */
+export function peakLevel(pcm: Buffer): number {
+  const window = DISCORD_RATE / 10;
+  const frames = Math.floor(pcm.length / BYTES_PER_FRAME);
+  let best = 0;
+  for (let start = 0; start < frames; start += window) {
+    const end = Math.min(frames, start + window);
+    let sum = 0;
+    for (let i = start; i < end; i++) {
+      const v = pcm.readInt16LE(i * BYTES_PER_FRAME);
+      sum += v * v;
+    }
+    best = Math.max(best, Math.sqrt(sum / (end - start)));
+  }
+  return best;
+}
+
 export interface VoiceConfig {
   groqApiKey: string;
   guildId: string;
@@ -216,6 +254,11 @@ export interface VoiceConfig {
   ttsModel: string;
   /** Groq Whisper model (VOICE_STT_MODEL). */
   sttModel?: string;
+  /** Deepgram key(s) (DEEPGRAM_API_KEY, comma-separated for several). With one set, Deepgram Nova-3 does the speech-to-text and Groq Whisper is the fallback. */
+  deepgramApiKey?: string;
+  /** "deepgram" | "groq": who transcribes first. Default: deepgram when a key is set, else groq. */
+  sttProvider?: "deepgram" | "groq";
+  deepgramModel?: string;
   /** Arabic speech (2026-10-01 (c)): a chunk that is mostly Arabic script is spoken by this model and voice instead. */
   arabic?: { enabled: boolean; model: string; voice: string };
   /** Optional single vocal direction sent as "[direction]" before each chunk. */
@@ -227,11 +270,22 @@ export interface VoiceConfig {
   silenceMs?: number;
   /** Default listening mode for a session; /mari-join can override it. Omitted = "auto". */
   listen?: ListenMode;
-  /** Warm connections and the database when she joins. Omitted = off (tests); loadVoiceConfig turns it on. */
+  /** Warm the database (roster) when she joins. Omitted = off (tests); loadVoiceConfig turns it on. */
   warmup?: boolean;
+  /** Also warm Groq/Deepgram (a /models call, a throw-away TTS word): costs requests on EVERY join, so only with VOICE_WARMUP=full. */
+  warmupGroq?: boolean;
+  /** Utterances quieter than this are dropped before speech-to-text. Omitted = off (tests); loadVoiceConfig defaults it to DEFAULT_MIN_LEVEL. */
+  minLevel?: number;
   /** Optional model/output cap for spoken replies only (everything else keeps LLM_MODEL / LLM_MAX_TOKENS). */
   llmModel?: string;
   llmMaxTokens?: number;
+}
+
+export function pickSttProvider(raw: string | undefined, deepgramKey: string | undefined): "deepgram" | "groq" {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "groq") return "groq";
+  if (v === "deepgram") return parseKeyList(deepgramKey).length > 0 ? "deepgram" : "groq";
+  return parseKeyList(deepgramKey).length > 0 ? "deepgram" : "groq"; // auto
 }
 
 export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.env): VoiceConfig | null {
@@ -249,6 +303,9 @@ export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.
     voice: pickVoice(e.VOICE_NAME),
     ttsModel: e.VOICE_TTS_MODEL?.trim() || DEFAULT_TTS_MODEL,
     sttModel: e.VOICE_STT_MODEL?.trim() || DEFAULT_STT_MODEL,
+    deepgramApiKey: e.DEEPGRAM_API_KEY?.trim() || undefined,
+    sttProvider: pickSttProvider(e.VOICE_STT_PROVIDER, e.DEEPGRAM_API_KEY),
+    deepgramModel: e.VOICE_DEEPGRAM_MODEL?.trim() || "nova-3",
     arabic: {
       enabled: !["0", "false", "no", "off"].includes((e.VOICE_ARABIC ?? "").trim().toLowerCase()),
       model: e.VOICE_TTS_ARABIC_MODEL?.trim() || DEFAULT_ARABIC_TTS_MODEL,
@@ -262,6 +319,8 @@ export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.
     silenceMs: Math.min(2_000, Math.max(300, Math.round(num(e.VOICE_SILENCE_MS, DEFAULT_SILENCE_MS)))),
     listen: pickListen(e.VOICE_LISTEN),
     warmup: !["0", "false", "no", "off"].includes((e.VOICE_WARMUP ?? "").trim().toLowerCase()),
+    warmupGroq: (e.VOICE_WARMUP ?? "").trim().toLowerCase() === "full",
+    minLevel: Number.isFinite(Number(e.VOICE_MIN_LEVEL)) && (e.VOICE_MIN_LEVEL ?? "").trim() !== "" && Number(e.VOICE_MIN_LEVEL) >= 0 ? Number(e.VOICE_MIN_LEVEL) : DEFAULT_MIN_LEVEL,
     llmModel: e.VOICE_LLM_MODEL?.trim() || undefined,
     llmMaxTokens: e.VOICE_LLM_MAX_TOKENS ? Math.round(num(e.VOICE_LLM_MAX_TOKENS, 0)) || undefined : undefined,
   };
@@ -271,29 +330,6 @@ export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.
 // Pure helpers (exported so they can be unit-tested)
 // ---------------------------------------------------------------------------
 
-/** Makes a chat reply safe and pleasant to read aloud. */
-export function toSpeechText(input: string): string {
-  let t = input
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/^-#.*$/gm, " ") // Discord subtext lines ("-# ...")
-    .replace(/https?:\/\/\S+/g, " ")
-    .replace(/<a?:\w+:\d+>/g, " ") // custom emoji
-    .replace(/<[@#][!&]?\d+>/g, " ") // mentions / channel links
-    .replace(/\[[^\]]*\]/g, " ") // Orpheus reads [word] as a vocal direction; never let chat text do that
-    .replace(/[*_~`|>#]/g, "")
-    .replace(/[\p{Extended_Pictographic}\u200d\ufe0f]/gu, " ")
-    // "Heeeeyyyy" -> "Heeyy": TTS reads long letter runs badly.
-    .replace(/(\p{L})\1{2,}/gu, "$1$1")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (t.length > MAX_SPOKEN_CHARS) {
-    const cut = t.slice(0, MAX_SPOKEN_CHARS);
-    const lastStop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "), cut.lastIndexOf("؟ "));
-    t = lastStop > 80 ? cut.slice(0, lastStop + 1) : cut;
-  }
-  return t;
-}
 
 /** 48 kHz stereo s16le -> 16 kHz mono WAV (small upload, all Whisper needs). */
 export function pcmToWav16kMono(pcm: Buffer): Buffer {
@@ -326,118 +362,9 @@ export function pcmToWav16kMono(pcm: Buffer): Buffer {
   return Buffer.concat([header, data]);
 }
 
-/**
- * Mono float samples -> 48 kHz stereo s16le for Discord. Reading the samples
- * as if they were recorded at `rate * pitch` shifts the pitch (and tempo) by
- * that factor — a cheap, FFmpeg-free way to tune the voice.
- */
-export function samplesToDiscordPcm(samples: Float32Array, rate: number, pitch: number, tailSeconds = 0.15): Buffer {
-  const ratio = (rate * pitch) / DISCORD_RATE;
-  const outFrames = Math.floor(samples.length / ratio);
-  const tail = Math.floor(DISCORD_RATE * tailSeconds); // silence so the last word isn't clipped
-  const out = Buffer.alloc((outFrames + tail) * BYTES_PER_FRAME);
-  for (let i = 0; i < outFrames; i++) {
-    const pos = i * ratio;
-    const i0 = Math.floor(pos);
-    const a = samples[i0] ?? 0;
-    const b = samples[i0 + 1] ?? a;
-    const s = a + (b - a) * (pos - i0);
-    const v = Math.max(-32768, Math.min(32767, Math.round(s * 32767)));
-    out.writeInt16LE(v, i * BYTES_PER_FRAME);
-    out.writeInt16LE(v, i * BYTES_PER_FRAME + 2);
-  }
-  return out;
-}
 
-/**
- * Splits text into pieces of at most `max` characters for Orpheus, preferring
- * sentence ends, then commas, then spaces, and only hard-cutting a single
- * unbroken run as a last resort. Every piece is non-empty and trimmed.
- */
-export function chunkForTts(text: string, max = TTS_MAX_INPUT_CHARS): string[] {
-  const clean = text.replace(/\s+/g, " ").trim();
-  if (!clean) return [];
-  const pieces: string[] = [];
-  for (const sentence of clean.split(/(?<=[.!?؟])\s+/)) {
-    let rest = sentence;
-    while (rest.length > max) {
-      const window = rest.slice(0, max + 1);
-      let cut = Math.max(window.lastIndexOf(", "), window.lastIndexOf("، "), window.lastIndexOf("; "), window.lastIndexOf(": "));
-      if (cut < max * 0.4) cut = window.lastIndexOf(" ");
-      if (cut < max * 0.4) cut = max; // no usable break: hard cut
-      else cut += 1;
-      pieces.push(rest.slice(0, cut).trim());
-      rest = rest.slice(cut).trim();
-    }
-    if (rest) pieces.push(rest);
-  }
-  // Pack neighbouring short sentences together: fewer requests, smoother speech.
-  const out: string[] = [];
-  for (const p of pieces) {
-    const last = out[out.length - 1];
-    if (last !== undefined && last.length + 1 + p.length <= max) out[out.length - 1] = `${last} ${p}`;
-    else out.push(p);
-  }
-  return out.filter(Boolean);
-}
 
-/**
- * Time-to-first-audio helper: the first chunk is what she waits for before speaking, and
- * chunkForTts packs short neighbouring sentences into it. Split the first sentence off so
- * the first request is as short (fast) as possible; the rest keeps its packing.
- */
-export function firstSentenceFirst(chunks: string[]): string[] {
-  const [head, ...rest] = chunks;
-  if (head === undefined) return [];
-  const m = /^(.+?[.!?؟])\s+(\S.*)$/s.exec(head);
-  return m && m[1] && m[2] ? [m[1], m[2], ...rest] : chunks;
-}
 
-/**
- * Parses a WAV file (16-bit PCM, 24-bit PCM or 32-bit float, any channel count)
- * into mono float samples. Walks the RIFF chunks instead of assuming a 44-byte
- * header, and tolerates a streamed file whose data length is 0 / 0xFFFFFFFF.
- */
-export function parseWav(buf: Buffer): { samples: Float32Array; sampleRate: number } {
-  if (buf.length < 12 || buf.toString("ascii", 0, 4) !== "RIFF" || buf.toString("ascii", 8, 12) !== "WAVE") {
-    throw new Error("TTS response is not a WAV file");
-  }
-  let fmt: { tag: number; channels: number; rate: number; bits: number } | null = null;
-  let offset = 12;
-  while (offset + 8 <= buf.length) {
-    const id = buf.toString("ascii", offset, offset + 4);
-    let size = buf.readUInt32LE(offset + 4);
-    const body = offset + 8;
-    if (id === "fmt ") {
-      let tag = buf.readUInt16LE(body);
-      const channels = buf.readUInt16LE(body + 2);
-      const rate = buf.readUInt32LE(body + 4);
-      const bits = buf.readUInt16LE(body + 14);
-      if (tag === 0xfffe && size >= 26) tag = buf.readUInt16LE(body + 24); // WAVE_FORMAT_EXTENSIBLE sub-format
-      fmt = { tag, channels, rate, bits };
-    } else if (id === "data") {
-      if (!fmt) throw new Error("WAV data chunk before fmt chunk");
-      if (size === 0 || size === 0xffffffff || body + size > buf.length) size = buf.length - body;
-      const bytes = fmt.bits / 8;
-      const frames = Math.floor(size / (bytes * fmt.channels));
-      const samples = new Float32Array(frames);
-      for (let i = 0; i < frames; i++) {
-        let sum = 0;
-        for (let c = 0; c < fmt.channels; c++) {
-          const at = body + (i * fmt.channels + c) * bytes;
-          if (fmt.tag === 1 && fmt.bits === 16) sum += buf.readInt16LE(at) / 32768;
-          else if (fmt.tag === 1 && fmt.bits === 24) sum += buf.readIntLE(at, 3) / 8388608;
-          else if (fmt.tag === 3 && fmt.bits === 32) sum += buf.readFloatLE(at);
-          else throw new Error(`Unsupported WAV format (tag ${fmt.tag}, ${fmt.bits}-bit)`);
-        }
-        samples[i] = sum / fmt.channels;
-      }
-      return { samples, sampleRate: fmt.rate };
-    }
-    offset = body + size + (size % 2); // chunks are word-aligned
-  }
-  throw new Error("WAV has no data chunk");
-}
 
 /**
  * Splits PCM into 20 ms frames (the last one zero-padded) so the Opus encoder is
@@ -535,6 +462,9 @@ export class VoiceManager {
   private warnedChannelMissing = false;
   private readonly sttTimes: number[] = [];
   private warnedArabicTerms = false;
+  private warnedDeepgramRejected = false;
+  private readonly groqPool: KeyPool;
+  private readonly deepgramPool: KeyPool;
   private readonly rosterCache = new Map<string, { player: Awaited<ReturnType<VoiceManager["isActivePlayer"]>>; at: number }>();
 
   private constructor(
@@ -542,7 +472,10 @@ export class VoiceManager {
     private readonly ctx: AppContext,
     private readonly cfg: VoiceConfig,
     private readonly deps: VoiceDeps,
-  ) {}
+  ) {
+    this.groqPool = new KeyPool(parseKeyList(cfg.groqApiKey));
+    this.deepgramPool = new KeyPool(parseKeyList(cfg.deepgramApiKey));
+  }
 
   /** Throws if the voice packages aren't installed; the caller logs it and carries on without voice. */
   static async create(client: Client, ctx: AppContext, cfg: VoiceConfig): Promise<VoiceManager> {
@@ -915,6 +848,15 @@ export class VoiceManager {
         this.outcome("tooShort", { userId, ms: Math.round(ms) });
         return;
       }
+      const minLevel = this.cfg.minLevel ?? 0;
+      if (minLevel > 0) {
+        const level = peakLevel(pcm);
+        if (level < minLevel) {
+          // Breath / key click / room noise: not worth a speech-to-text request.
+          this.outcome("tooQuiet", { userId, level: Math.round(level), min: minLevel });
+          return;
+        }
+      }
 
       session.busy = true;
       try {
@@ -1053,18 +995,31 @@ export class VoiceManager {
         steps[name] = `failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     };
-    const groqHeaders = { Authorization: `Bearer ${this.cfg.groqApiKey}` };
+    const wantProviders = this.cfg.warmupGroq === true;
+    const groqKey = this.groqPool.key(this.groqPool.order()[0] ?? 0);
     await Promise.all([
       timed("dbMs", async () => {
         for (const m of channel.members.values()) if (!m.user.bot) await this.rosterPlayer(m.id);
       }),
-      timed("groqMs", async () => {
-        const res = await fetch("https://api.groq.com/openai/v1/models", { headers: groqHeaders, signal: AbortSignal.timeout(8_000) });
-        await res.arrayBuffer();
-      }),
-      timed("ttsMs", async () => {
-        await this.synthesize("mm", settings);
-      }),
+      ...(wantProviders
+        ? [
+            timed("groqMs", async () => {
+              const res = await fetch("https://api.groq.com/openai/v1/models", { headers: { Authorization: `Bearer ${groqKey}` }, signal: AbortSignal.timeout(8_000) });
+              await res.arrayBuffer();
+            }),
+            timed("ttsMs", async () => {
+              await this.synthesize("mm", settings);
+            }),
+          ]
+        : []),
+      ...(wantProviders && this.cfg.sttProvider === "deepgram" && this.deepgramPool.size > 0
+        ? [
+            timed("deepgramMs", async () => {
+              const res = await fetch("https://api.deepgram.com/v1/projects", { headers: { Authorization: `Token ${this.deepgramPool.key(this.deepgramPool.order()[0] ?? 0)}` }, signal: AbortSignal.timeout(8_000) });
+              await res.arrayBuffer();
+            }),
+          ]
+        : []),
     ]);
     this.ctx.logger.info({ event: "voice.warmup", totalMs: Date.now() - started, ...steps }, "Voice warm-up done");
   }
@@ -1072,14 +1027,88 @@ export class VoiceManager {
   // -- speech to text (Groq Whisper, free plan) -------------------------------
 
   /**
-   * Groq Whisper. `verbose_json` returns per-segment confidence, which is a far better test for "this was
+   * Which engine hears the player: Deepgram Nova-3 first when a key is set, Groq Whisper as the automatic
+   * fallback if Deepgram fails for any reason (a refused request, an outage, every key exhausted). A fallback
+   * only happens on "failed"; an empty or filtered result is a real answer from Deepgram and is final.
+   */
+  private async transcribe(pcm: Buffer): Promise<SttResult> {
+    if (this.cfg.sttProvider === "deepgram" && this.deepgramPool.size > 0) {
+      const result = await this.transcribeDeepgram(pcm);
+      if (result.status !== "failed") return result;
+      this.ctx.logger.warn({ event: "voice.stt.fallback", from: "deepgram", to: "groq" }, "Deepgram failed for this utterance; using Groq Whisper");
+    }
+    return this.transcribeGroq(pcm);
+  }
+
+  /**
+   * Deepgram Nova-3, pre-recorded endpoint (one request per utterance). Language: `VOICE_STT_LANGUAGE=auto`
+   * restricts detection to English and Arabic (detect_language=en&detect_language=ar); a fixed code (en, ar,
+   * ar-EG ...) is sent as `language`. Keyterms bias it toward her name in both scripts and the game words.
+   */
+  private async transcribeDeepgram(pcm: Buffer): Promise<SttResult> {
+    const wav = new Uint8Array(pcmToWav16kMono(pcm));
+    const build = (withKeyterms: boolean) => {
+      const q = new URLSearchParams({ model: this.cfg.deepgramModel ?? "nova-3", smart_format: "true" });
+      if (this.cfg.language === "auto") {
+        q.append("detect_language", "en");
+        q.append("detect_language", "ar");
+      } else {
+        q.set("language", this.cfg.language);
+      }
+      if (withKeyterms) for (const term of DEEPGRAM_KEYTERMS) q.append("keyterm", term);
+      return `${DEEPGRAM_URL}?${q.toString()}`;
+    };
+    const send = (url: string) =>
+      fetchWithKeys(
+        this.deepgramPool,
+        (key) =>
+          fetch(url, {
+            method: "POST",
+            headers: { Authorization: `Token ${key}`, "Content-Type": "audio/wav" },
+            body: wav,
+            signal: AbortSignal.timeout(12_000),
+          }),
+        { service: "deepgram", logger: this.ctx.logger },
+      );
+
+    let res: Response;
+    try {
+      res = await send(build(true));
+      // A 400 usually means a parameter combination it doesn't accept (keyterms with a detected language, say): once without keyterms.
+      if (res.status === 400) res = await send(build(false));
+    } catch (err) {
+      this.ctx.logger.warn({ event: "voice.stt.failed", engine: "deepgram", err: err instanceof Error ? err.message : String(err) }, "Deepgram request failed");
+      return { text: null, status: "failed" };
+    }
+    if (!res.ok) {
+      const body = (await res.text().catch(() => "")).slice(0, 300);
+      this.ctx.logger.warn({ event: "voice.stt.failed", engine: "deepgram", status: res.status, body }, "Deepgram transcription failed");
+      if (res.status === 400 && !this.warnedDeepgramRejected) {
+        this.warnedDeepgramRejected = true;
+        this.ctx.logger.error({ event: "voice.stt.deepgramRejected", language: this.cfg.language, body }, "Deepgram rejected the request. If this is about language detection, set VOICE_STT_LANGUAGE=ar (or en) instead of auto. Groq Whisper is used meanwhile");
+      }
+      return { text: null, status: "failed" };
+    }
+    const json = (await res.json()) as { results?: { channels?: Array<{ detected_language?: string; alternatives?: Array<{ transcript?: string; confidence?: number }> }> } };
+    const channel = json.results?.channels?.[0];
+    const alt = channel?.alternatives?.[0];
+    const text = alt?.transcript?.trim();
+    const language = channel?.detected_language ?? (this.cfg.language === "auto" ? undefined : this.cfg.language);
+    this.dbg("voice.stt.result", { engine: "deepgram", transcript: text ?? "", language, confidence: alt?.confidence });
+    if (!text) return { text: null, status: "empty", language };
+    if (typeof alt?.confidence === "number" && alt.confidence < DEEPGRAM_MIN_CONFIDENCE) return { text: null, status: "filtered", language };
+    return { text, status: "ok", language };
+  }
+
+  /**
+   * Groq Whisper (the fallback, or the only engine without a Deepgram key). `verbose_json` returns per-segment confidence, which is a far better test for "this was
    * silence/noise, not speech" than a list of known hallucination strings (see isSilenceTranscript). One retry
    * on a timeout, 429 or 5xx: a single hiccup used to mean she silently never answered.
    */
-  private async transcribe(pcm: Buffer): Promise<{ text: string | null; status: "ok" | "empty" | "filtered" | "failed" | "rateLimited"; language?: string }> {
+  private async transcribeGroq(pcm: Buffer): Promise<SttResult> {
     const now = Date.now();
     while (this.sttTimes.length > 0 && now - (this.sttTimes[0] ?? now) > 60_000) this.sttTimes.shift();
-    if (this.sttTimes.length >= STT_MAX_PER_MINUTE) {
+    if (this.sttTimes.length >= STT_MAX_PER_MINUTE * Math.max(1, this.groqPool.size)) {
       this.ctx.logger.warn({ event: "voice.stt.rateLimited" }, "Skipping an utterance to stay inside Groq's free limit");
       return { text: null, status: "rateLimited" };
     }
@@ -1101,13 +1130,19 @@ export class VoiceManager {
     let res: Response | null = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        res = await fetch(GROQ_STT_URL, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${this.cfg.groqApiKey}` },
-          body: build(),
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (res.ok || (res.status !== 429 && res.status < 500) || attempt === 2) break;
+        res = await fetchWithKeys(
+          this.groqPool,
+          (key) =>
+            fetch(GROQ_STT_URL, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${key}` },
+              body: build(),
+              signal: AbortSignal.timeout(15_000),
+            }),
+          { service: "groq-stt", logger: this.ctx.logger },
+        );
+        // 429 is NOT retried: fetchWithKeys already tried every key, so a second pass would only burn more requests.
+        if (res.ok || res.status < 500 || attempt === 2) break;
         const wait = Math.min(1_500, Number(res.headers.get("retry-after") ?? 0) * 1000 || 400);
         this.ctx.logger.warn({ event: "voice.stt.retry", status: res.status, waitMs: wait }, "Groq transcription hiccup, retrying once");
         await new Promise((r) => setTimeout(r, wait));
@@ -1134,27 +1169,25 @@ export class VoiceManager {
   }
 
   private async synthesize(text: string, settings: VoiceSettings): Promise<Buffer> {
-    // A chunk that is mostly Arabic script goes to the Arabic model (its own voice; it takes no [direction]).
-    const arabic = this.cfg.arabic?.enabled !== false && this.cfg.arabic !== undefined && languageOf(text) === "ar";
-    const model = arabic ? this.cfg.arabic!.model : this.cfg.ttsModel;
-    const voice = arabic ? this.cfg.arabic!.voice : settings.voice;
-    const input = !arabic && settings.direction ? `[${settings.direction}] ${text}` : text;
-    const res = await fetch(GROQ_TTS_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.cfg.groqApiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, voice, input, response_format: "wav" }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!res.ok) {
-      const body = (await res.text().catch(() => "")).slice(0, 300);
-      this.ctx.logger.warn({ event: "voice.tts.failed", status: res.status, model, body }, "Groq text-to-speech failed");
-      if (arabic && (res.status === 400 || res.status === 403) && !this.warnedArabicTerms) {
-        this.warnedArabicTerms = true;
-        this.ctx.logger.error({ event: "voice.tts.arabicTerms", model }, "Arabic speech was refused. Accept the model's terms once in the Groq console (Playground > text-to-speech > the Arabic model), then it works");
+    try {
+      return await synthesizeSpeech({
+        pool: this.groqPool,
+        text,
+        voice: settings.voice,
+        direction: settings.direction,
+        tts: { model: this.cfg.ttsModel, arabic: this.cfg.arabic },
+        logger: this.ctx.logger,
+      });
+    } catch (err) {
+      if (err instanceof TtsError) {
+        this.ctx.logger.warn({ event: "voice.tts.failed", status: err.status, model: err.model, body: err.body }, "Groq text-to-speech failed");
+        if (err.arabic && (err.status === 400 || err.status === 403) && !this.warnedArabicTerms) {
+          this.warnedArabicTerms = true;
+          this.ctx.logger.error({ event: "voice.tts.arabicTerms", model: err.model }, "Arabic speech was refused. Accept the model's terms once in the Groq console (Playground > text-to-speech > the Arabic model), then it works");
+        }
       }
-      throw new Error(`Groq TTS HTTP ${res.status}`);
+      throw err;
     }
-    return Buffer.from(await res.arrayBuffer());
   }
 
   /**
@@ -1173,7 +1206,9 @@ export class VoiceManager {
       const started = Date.now();
       // The direction prefix counts toward Groq's 200-character limit.
       const room = TTS_MAX_INPUT_CHARS - (settings.direction ? settings.direction.length + 3 : 0);
-      const chunks = firstSentenceFirst(chunkForTts(text, room)).slice(0, MAX_TTS_CHUNKS);
+      const packed = chunkForTts(text, room);
+      // One request for a short reply; only a long first chunk is split so she can start talking sooner.
+      const chunks = ((packed[0]?.length ?? 0) > SPLIT_FIRST_SENTENCE_OVER ? firstSentenceFirst(packed) : packed).slice(0, MAX_TTS_CHUNKS);
       if (timing) timing.chunks = chunks.length;
 
       // A failed chunk resolves to null (never rejects), so a chunk nobody is awaiting yet can't raise an unhandled rejection.

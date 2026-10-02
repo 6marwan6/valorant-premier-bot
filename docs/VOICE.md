@@ -81,7 +81,7 @@ Two things made her first answer slow, and both are fixed (you can't see either 
    database had been idle (Neon scales to zero) that wait ate the first words. Players are now cached for a minute.
 2. The first request of everything (database, Groq connection, first Orpheus request) all landed on the first
    answer. On joining she now warms up in the background: one `voice.warmup` log line shows the time each step took
-   (`dbMs`, `groqMs`, `ttsMs`). It costs one tiny TTS request per join; `VOICE_WARMUP=0` disables it.
+   (`dbMs`, `groqMs`, `ttsMs`). By default it only looks up the players in the channel (no Groq/Deepgram request). `VOICE_WARMUP=full` also sends a `/models` call and one tiny TTS request on every join; `VOICE_WARMUP=0` disables the warm-up.
 
 Still possible, and not something code here can see: the LLM provider's own cold start. If `turn: 1` still has a
 much bigger `brainMs` than turn 2, that's the model, and a different `VOICE_LLM_MODEL` or provider setting is the lever.
@@ -141,3 +141,30 @@ on *your* voices. Streaming STT is also the only real lever on speed (she could 
 instead of waiting 0.7 s of silence and then uploading the clip). It needs a new API key, a plan revision (a
 second vendor hears the team's voices), and a switch like `VOICE_STT_PROVIDER=groq|deepgram`. Libraries don't
 help here: the hosted APIs are the model.
+
+## Deepgram Nova-3, API key lists, voice notes (2026-10-01 (d))
+
+**Speech-to-text engine.** Set `DEEPGRAM_API_KEY` and Deepgram Nova-3 transcribes (English and Arabic; with
+`VOICE_STT_LANGUAGE=auto` it only chooses between the two). Anything Deepgram fails on (an outage, a rejected
+request, every key spent) is retried on Groq Whisper for that utterance, and the log says
+`voice.stt.fallback`. `VOICE_STT_PROVIDER=groq` goes back to Groq only. A fixed language is also allowed
+(`VOICE_STT_LANGUAGE=ar-EG` for Egyptian Arabic): if you mostly speak Arabic, try that, it should beat auto-detection.
+If Deepgram rejects the auto-detect request, the log says `voice.stt.deepgramRejected` and Groq covers meanwhile:
+that's the cue to set `VOICE_STT_LANGUAGE` explicitly. (I couldn't reach Deepgram from where this was built, so
+the request shape follows its documentation and is covered by tests against a fake, not a live call.)
+
+**Several keys.** `GROQ_API_KEY=gsk_a,gsk_b` (also `DEEPGRAM_API_KEY`, `LLM_API_KEY`). She stays on the first key
+until it is refused for a key reason (429 limit, 402 credit, 401 bad key), then moves to the next for that same
+request, and comes back to the first after its cooldown (the provider's retry-after, else 1 minute; 1 h for a bad
+key, 6 h out of credit). Other errors (400, 403, 5xx) don't switch keys. The log line is `apikey.failover` with the
+key's *position* only. Groq Whisper's own self-limit (15 requests/min) scales with the number of Groq keys.
+Caveat: keys from the *same* Groq organisation usually share one limit, so use keys from separate accounts.
+
+**Voice notes: `/mari-voice`** (admin only; the spoken twin of `/mari-say`):
+- `message` (up to 400 characters), optional `ai_voice` (rewrite in her voice) + `preview`, optional `channel`.
+- Spoken with her live voice settings, English or Arabic by script, sent as a Discord voice message.
+- Discord voice messages can't carry text; if Discord refuses the voice-message flow, the same audio is posted as an
+  ordinary `.ogg` attachment and the reply tells you (give her **Send Voice Messages** in that channel).
+- It runs in the Vercel app: set `GROQ_API_KEY` (and any `VOICE_NAME` / `VOICE_DIRECTION` / `VOICE_PITCH` /
+  `VOICE_NAME_AR` you changed) in the Vercel environment too, then `npm run deploy-commands`.
+- Encoding is done in-house (no ffmpeg): the Ogg/Opus output was checked by decoding it with ffmpeg.
