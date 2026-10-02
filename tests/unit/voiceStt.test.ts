@@ -71,6 +71,26 @@ describe("Deepgram Nova-3 speech-to-text", () => {
     expect(await t(m)).toMatchObject({ text: null, status: "filtered" });
   });
 
+  it("when Deepgram answers 400 \"Failed to parse query string\" to the language list, it steps down to detect_language=true and REMEMBERS it", async () => {
+    const { m } = await manager();
+    const spy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url) => (new URL(String(url)).searchParams.getAll("detect_language").length === 2 ? json({ err_code: "Bad Request", err_msg: "Bad Request: Failed to parse query string" }, 400) : dg("hello mari", { detected_language: "en" })));
+    expect(await t(m)).toMatchObject({ text: "hello mari", status: "ok" });
+    expect(spy).toHaveBeenCalledTimes(3); // restricted+keyterms (400), restricted (400), detect_language=true (ok)
+    expect(new URL((spy.mock.calls[2] as unknown as [string])[0]).searchParams.get("detect_language")).toBe("true");
+    spy.mockClear();
+    expect(await t(m)).toMatchObject({ text: "hello mari", status: "ok" });
+    expect(spy).toHaveBeenCalledTimes(1); // the next utterance starts from the shape that works
+  });
+
+  it("if every shape is refused it reports failed (so Whisper takes over) and starts from the top next time", async () => {
+    const { m } = await manager();
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => json({ err: "bad" }, 400));
+    expect(await t(m)).toMatchObject({ text: null, status: "failed" }); // (the mocked Whisper fallback is refused too)
+    expect(spy.mock.calls.filter((c) => isDg(c[0]))).toHaveLength(4);
+  });
+
   it("a 400 is retried once without keyterms", async () => {
     const { m } = await manager();
     const spy = vi.spyOn(globalThis, "fetch").mockImplementationOnce(async () => json({ err: "keyterm" }, 400)).mockImplementation(async () => dg("hello there"));

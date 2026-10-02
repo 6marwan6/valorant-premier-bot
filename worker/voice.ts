@@ -463,6 +463,8 @@ export class VoiceManager {
   private readonly sttTimes: number[] = [];
   private warnedArabicTerms = false;
   private warnedDeepgramRejected = false;
+  /** Index into the Deepgram query ladder that last worked; later utterances start there instead of re-learning a 400 every time. */
+  private deepgramVariant = 0;
   private readonly groqPool: KeyPool;
   private readonly deepgramPool: KeyPool;
   private readonly rosterCache = new Map<string, { player: Awaited<ReturnType<VoiceManager["isActivePlayer"]>>; at: number }>();
@@ -1047,15 +1049,34 @@ export class VoiceManager {
    */
   private async transcribeDeepgram(pcm: Buffer): Promise<SttResult> {
     const wav = new Uint8Array(pcmToWav16kMono(pcm));
-    const build = (withKeyterms: boolean) => {
-      const q = new URLSearchParams({ model: this.cfg.deepgramModel ?? "nova-3", smart_format: "true" });
-      if (this.cfg.language === "auto") {
+    // The query ladder, most featureful first. A 400 ("Failed to parse query string") means Deepgram doesn't accept
+    // that parameter combination for this model, so the next, simpler shape is tried; the first one that isn't a 400
+    // is remembered (deepgramVariant) so the next utterance doesn't pay for the failures again.
+    const auto = this.cfg.language === "auto";
+    const ladder: Array<{ detect: "restricted" | "any" | "none"; keyterms: boolean; smartFormat: boolean }> = auto
+      ? [
+          { detect: "restricted", keyterms: true, smartFormat: true },
+          { detect: "restricted", keyterms: false, smartFormat: true },
+          { detect: "any", keyterms: false, smartFormat: true },
+          { detect: "any", keyterms: false, smartFormat: false },
+        ]
+      : [
+          { detect: "none", keyterms: true, smartFormat: true },
+          { detect: "none", keyterms: false, smartFormat: true },
+          { detect: "none", keyterms: false, smartFormat: false },
+        ];
+    const build = (v: (typeof ladder)[number]) => {
+      const q = new URLSearchParams({ model: this.cfg.deepgramModel ?? "nova-3" });
+      if (v.smartFormat) q.set("smart_format", "true");
+      if (v.detect === "restricted") {
         q.append("detect_language", "en");
         q.append("detect_language", "ar");
+      } else if (v.detect === "any") {
+        q.set("detect_language", "true");
       } else {
         q.set("language", this.cfg.language);
       }
-      if (withKeyterms) for (const term of DEEPGRAM_KEYTERMS) q.append("keyterm", term);
+      if (v.keyterms) for (const term of DEEPGRAM_KEYTERMS) q.append("keyterm", term);
       return `${DEEPGRAM_URL}?${q.toString()}`;
     };
     const send = (url: string) =>
@@ -1071,15 +1092,25 @@ export class VoiceManager {
         { service: "deepgram", logger: this.ctx.logger },
       );
 
-    let res: Response;
+    let res: Response | undefined;
     try {
-      res = await send(build(true));
-      // A 400 usually means a parameter combination it doesn't accept (keyterms with a detected language, say): once without keyterms.
-      if (res.status === 400) res = await send(build(false));
+      const first = this.deepgramVariant < ladder.length ? this.deepgramVariant : 0;
+      for (let i = first; i < ladder.length; i++) {
+        res = await send(build(ladder[i]!));
+        if (res.status !== 400) {
+          if (res.ok && i !== this.deepgramVariant) {
+            this.deepgramVariant = i;
+            if (i > 0) this.ctx.logger.warn({ event: "voice.stt.deepgramVariant", variant: i, ...ladder[i] }, "Deepgram refused the richer query; using a simpler one from now on");
+          }
+          break;
+        }
+      }
     } catch (err) {
       this.ctx.logger.warn({ event: "voice.stt.failed", engine: "deepgram", err: err instanceof Error ? err.message : String(err) }, "Deepgram request failed");
       return { text: null, status: "failed" };
     }
+    if (!res) return { text: null, status: "failed" };
+    if (res.status === 400) this.deepgramVariant = 0; // every shape was refused: start from the top next time
     if (!res.ok) {
       const body = (await res.text().catch(() => "")).slice(0, 300);
       this.ctx.logger.warn({ event: "voice.stt.failed", engine: "deepgram", status: res.status, body }, "Deepgram transcription failed");
