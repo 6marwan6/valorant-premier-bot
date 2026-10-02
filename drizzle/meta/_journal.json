@@ -106,6 +106,13 @@
       "when": 1790917439381,
       "tag": "0014_add_voice_listen",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1791003839381,
+      "tag": "0015_add_voice_language",
+      "breakpoints": true
     }
   ]
 }

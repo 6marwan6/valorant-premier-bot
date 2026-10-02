@@ -193,7 +193,8 @@ function setup(opts: { admin?: boolean; message?: string; ai?: boolean; preview?
     memberPermissions: { has: () => opts.admin !== false },
     member: { roles: [] },
     options: {
-      getString: () => opts.message ?? "we are going to win tonight",
+      getString: (n: string) => (n === "message" ? (opts.message ?? "we are going to win tonight") : null),
+      getNumber: () => null,
       getBoolean: (n: string) => flags[n] ?? null,
       getChannel: () => ({ id: "chan-9", type: ChannelType.GuildText }),
     },

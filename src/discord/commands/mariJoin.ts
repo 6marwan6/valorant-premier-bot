@@ -1,8 +1,9 @@
 import { ChannelType, SlashCommandBuilder } from "discord.js";
 import type { Command } from "./types.js";
-import { requireAdminWithConfig } from "../commandGuards.js";
+import { requireMemberWithConfig } from "../commandGuards.js";
 import { parseMatchDateTime } from "../../modules/matches/dateTime.js";
 import {
+  LANGUAGE_CHOICES,
   LISTEN_CHOICES,
   MAX_PITCH,
   MIN_PITCH,
@@ -17,7 +18,7 @@ import {
 const PAST_GRACE_MS = 5 * 60_000;
 
 /**
- * /mari-join — an admin tells Mari which voice channel to join, and when
+ * /mari-join — a member (any member, 2026-10-02) tells Mari which voice channel to join, and when
  * (2026-10-01; plan section 41 revision, admin commands).
  *
  * The command itself only WRITES A REQUEST to the database; the voice
@@ -44,11 +45,16 @@ const PAST_GRACE_MS = 5 * 60_000;
  *   "Mari"; "Just one person" = she answers everything the roster player says; "Auto" (the default)
  *   = no name needed only while exactly one human is with her. Same rules as the other choices:
  *   left out keeps what she has, applies to this session, changes a live session without moving her.
- * - Admin only, like every command that changes how the bot behaves.
+ * - Open to every server member (2026-10-02). Only the style options above (voice, direction, pitch, listen)
+ *   stay admin-only; a non-admin who sets one is refused and nothing is scheduled.
+ * - `language` (optional, 2026-10-02): "en" (default) or "ar-EG". The language of the whole session, fixed:
+ *   it is what Deepgram is told she is hearing and whether she speaks with the Arabic voice. She speaks Arabic
+ *   ONLY when this is ar-EG; there is no auto-detection and no second speech-to-text request. Open to every
+ *   member, like the command itself. Left out, a fresh join is English; a live session keeps its language.
  */
 const data = new SlashCommandBuilder()
   .setName("mari-join")
-  .setDescription("Tell Mari which voice channel to join, and when. Admin only.")
+  .setDescription("Tell Mari which voice channel to join, and when.")
   .setDMPermission(false)
   .addChannelOption((opt) =>
     opt
@@ -85,6 +91,13 @@ const data = new SlashCommandBuilder()
       .setRequired(false)
       .addChoices(...LISTEN_CHOICES),
   )
+  .addStringOption((opt) =>
+    opt
+      .setName("language")
+      .setDescription("The language she hears and speaks this session (default: English). Arabic only if you pick ar-EG")
+      .setRequired(false)
+      .addChoices(...LANGUAGE_CHOICES),
+  )
   .addNumberOption((opt) =>
     opt
       .setName("pitch")
@@ -97,7 +110,7 @@ const data = new SlashCommandBuilder()
 const mariJoinCommand: Command = {
   data,
   async execute(interaction, ctx) {
-    const guard = await requireAdminWithConfig(interaction, ctx);
+    const guard = await requireMemberWithConfig(interaction, ctx);
     if (!guard) return;
 
     const channel = interaction.options.getChannel("channel", true);
@@ -108,7 +121,14 @@ const mariJoinCommand: Command = {
       direction: rawDirection === null ? null : sanitizeDirection(rawDirection),
       pitch: interaction.options.getNumber("pitch"),
       listen: interaction.options.getString("listen"),
+      language: interaction.options.getString("language"),
     };
+    // Anyone may call her; changing how she sounds or listens stays an admin decision.
+    // `language` is open to everyone: the person who is going to speak Arabic has to be able to say so.
+    if (!guard.isAdmin && hasOverrides({ ...overrides, language: null })) {
+      await interaction.reply({ content: "❌ Anyone can ask Mari to join (and pick her `language`), but only admins can change her `voice`, `direction`, `pitch` or `listen`. Run it again with just the channel (and time).", ephemeral: true });
+      return;
+    }
     if (rawDirection !== null && rawDirection.trim() !== "" && overrides.direction === "" && !/^(none|off|default|clear)$/i.test(rawDirection.trim())) {
       await interaction.reply({ content: "❌ `direction` must be plain words (letters only), e.g. `cheerful`. Type `none` to clear it.", ephemeral: true });
       return;

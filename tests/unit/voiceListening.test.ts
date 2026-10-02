@@ -215,7 +215,7 @@ describe("cold start", () => {
     const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
     const synth = vi.fn(async () => Buffer.alloc(0));
     (t.manager as unknown as { synthesize: typeof synth }).synthesize = synth;
-    await t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "flirty", pitch: 1.08, listen: "auto" });
+    await t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "flirty", pitch: 1.08, listen: "auto", language: "en" });
     expect(synth).not.toHaveBeenCalled();
     expect(spy).not.toHaveBeenCalled();
     expect((t.ctx.repositories.players.getByDiscordUserId as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1); // the human, not the bot
@@ -229,7 +229,7 @@ describe("cold start", () => {
     const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
     const synth = vi.fn(async () => Buffer.alloc(0));
     (t.manager as unknown as { synthesize: typeof synth }).synthesize = synth;
-    await t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "flirty", pitch: 1.08, listen: "auto" });
+    await t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "flirty", pitch: 1.08, listen: "auto", language: "en" });
     expect(synth).toHaveBeenCalledTimes(1);
     expect(String(spy.mock.calls[0]![0])).toContain("api.groq.com");
     spy.mockRestore();
@@ -240,7 +240,7 @@ describe("cold start", () => {
     (t.manager as unknown as { cfg: { warmupGroq?: boolean } }).cfg.warmupGroq = true;
     const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Promise.reject(new Error("offline")));
     (t.manager as unknown as { synthesize: () => Promise<never> }).synthesize = async () => Promise.reject(new Error("tts down"));
-    await expect(t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "", pitch: 1, listen: "auto" })).resolves.toBeUndefined();
+    await expect(t.manager.warmUp(t.channel as never, { voice: "hannah", direction: "", pitch: 1, listen: "auto", language: "en" })).resolves.toBeUndefined();
     spy.mockRestore();
   });
 });

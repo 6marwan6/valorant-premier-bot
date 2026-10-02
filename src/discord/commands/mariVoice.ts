@@ -2,6 +2,7 @@ import { ChannelType, SlashCommandBuilder } from "discord.js";
 import type { Command } from "./types.js";
 import { requireAdminWithConfig } from "../commandGuards.js";
 import { VoiceNoteError, buildVoiceNote, loadVoiceNoteSettings } from "../../modules/voice/voiceNote.js";
+import { MAX_PITCH, MIN_PITCH, ORPHEUS_VOICES, clampPitch, pickVoice, sanitizeDirection } from "../../modules/voice/voiceSettings.js";
 
 /** A voice note is spoken text, and speech is cut at ~400 characters (about 25 seconds); the model's draft cap is the same as /mari-say. */
 const MAX_VOICE_CHARS = 400;
@@ -38,6 +39,19 @@ const data = new SlashCommandBuilder()
   )
   .addBooleanOption((opt) =>
     opt.setName("preview").setDescription("With ai_voice: show me the rewrite privately instead of sending the voice note").setRequired(false),
+  )
+  .addStringOption((opt) =>
+    opt
+      .setName("voice")
+      .setDescription("English voice (default: the same one she uses in voice chat)")
+      .setRequired(false)
+      .addChoices(...ORPHEUS_VOICES.map((v) => ({ name: v, value: v }))),
+  )
+  .addStringOption((opt) =>
+    opt.setName("direction").setDescription("One delivery word, e.g. flirty, cheerful, whisper. Type none to clear it. English only").setRequired(false).setMaxLength(30),
+  )
+  .addNumberOption((opt) =>
+    opt.setName("pitch").setDescription(`Pitch multiplier, ${MIN_PITCH} to ${MAX_PITCH} (also changes speed a little)`).setRequired(false).setMinValue(MIN_PITCH).setMaxValue(MAX_PITCH),
   )
   .addChannelOption((opt) =>
     opt.setName("channel").setDescription("Where to send it (default: this channel)").addChannelTypes(ChannelType.GuildText).setRequired(false),
@@ -76,6 +90,23 @@ const mariVoiceCommand: Command = {
     if (!settings && !(aiVoice && preview)) {
       await interaction.reply({ content: "❌ Voice isn't configured in the app: `GROQ_API_KEY` is missing from the Vercel environment (the voice worker's own settings aren't shared with it).", ephemeral: true });
       return;
+    }
+
+    // Same defaults as her live voice (voiceSettings.ts: hannah / flirty / 1.08, or the VOICE_* env); the options only override this one note.
+    const rawVoice = interaction.options.getString("voice");
+    const rawDirection = interaction.options.getString("direction");
+    const rawPitch = interaction.options.getNumber("pitch");
+    if (settings) {
+      if (rawVoice !== null) settings.voice = pickVoice(rawVoice);
+      if (rawDirection !== null) {
+        const direction = sanitizeDirection(rawDirection);
+        if (direction === "" && rawDirection.trim() !== "" && !/^(none|off|default|clear)$/i.test(rawDirection.trim())) {
+          await interaction.reply({ content: "❌ `direction` must be plain words (letters only), e.g. `flirty`. Type `none` to clear it.", ephemeral: true });
+          return;
+        }
+        settings.direction = direction;
+      }
+      if (rawPitch !== null) settings.pitch = clampPitch(rawPitch, settings.pitch);
     }
 
     let finalText = content;
@@ -130,7 +161,7 @@ const mariVoiceCommand: Command = {
 
     ctx.logger.info({ event: "mariVoice.sent", guildId: guard.guildId, channelId, aiVoice, asVoiceMessage, language: note.language, chunks: note.chunks, seconds: note.durationSecs }, "Voice note sent as Mari");
     await interaction.reply({
-      content: `✅ Voice note sent in <#${channelId}>${aiVoice ? " — rewritten in Mari's voice" : ""}${asVoiceMessage ? "" : ". Discord refused the voice-message player, so it went as a normal audio file (give Mari **Send Voice Messages** in that channel)"}.`,
+      content: `✅ Voice note sent in <#${channelId}>${aiVoice ? " — rewritten in Mari's voice" : ""}${note.language === "en" ? ` — voice **${settings!.voice}**, ${settings!.direction ? `direction **${settings!.direction}**` : "no direction"}, pitch **${settings!.pitch}**` : ` — Arabic voice (it takes no delivery direction, so the tone comes from the words), pitch **${settings!.pitch}**`}${asVoiceMessage ? "" : ". Discord refused the voice-message player, so it went as a normal audio file (give Mari **Send Voice Messages** in that channel)"}.`,
       ephemeral: true,
     });
   },

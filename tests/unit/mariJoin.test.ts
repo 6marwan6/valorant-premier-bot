@@ -5,9 +5,9 @@ import mariJoinCommand from "../../src/discord/commands/mariJoin.js";
 
 const fakeLogger = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
 
-function setup(opts: { time?: string; admin?: boolean; channelType?: ChannelType; timezone?: string; replaced?: boolean; saveFails?: boolean }) {
+function setup(opts: { time?: string; voice?: string; language?: string; admin?: boolean; channelType?: ChannelType; timezone?: string; replaced?: boolean; saveFails?: boolean }) {
   const reply = vi.fn(async (_payload?: unknown) => undefined);
-  const strings: Record<string, string | undefined> = { time: opts.time };
+  const strings: Record<string, string | undefined> = { time: opts.time, voice: opts.voice, language: opts.language };
   const interaction = {
     guildId: "guild-1",
     user: { id: "admin-1" },
@@ -21,7 +21,7 @@ function setup(opts: { time?: string; admin?: boolean; channelType?: ChannelType
     reply,
   } as unknown as ChatInputCommandInteraction;
 
-  const schedule = vi.fn(async (p: { channelId: string; joinAt: Date }) => {
+  const schedule = vi.fn(async (p: { channelId: string; joinAt: Date; language?: string | null }) => {
     if (opts.saveFails) throw new Error("db down");
     return { request: { id: 7, ...p }, replaced: opts.replaced ? { id: 6, channelId: "voice-old" } : null };
   });
@@ -38,10 +38,52 @@ function setup(opts: { time?: string; admin?: boolean; channelType?: ChannelType
 const text = (reply: ReturnType<typeof vi.fn>) => ((reply.mock.calls[0]?.[0] ?? {}) as { content?: string }).content ?? "";
 
 describe("/mari-join", () => {
-  it("is admin-only", async () => {
+  it("is open to every member: a non-admin can ask her to join", async () => {
     const t = setup({ admin: false });
     await mariJoinCommand.execute(t.interaction, t.ctx);
+    expect(t.schedule).toHaveBeenCalledTimes(1);
+    expect(t.schedule.mock.calls[0]![0]).toMatchObject({ channelId: "voice-9", requestedBy: "admin-1" });
+  });
+
+  it("a non-admin cannot change how she sounds (voice/direction/pitch/listen are admin-only)", async () => {
+    const t = setup({ admin: false, voice: "troy" });
+    await mariJoinCommand.execute(t.interaction, t.ctx);
     expect(t.schedule).not.toHaveBeenCalled();
+    expect(text(t.reply)).toContain("only admins");
+  });
+
+  it("language is open to everyone: a non-admin can pick ar-EG, and it is stored on the request", async () => {
+    const t = setup({ admin: false, language: "ar-EG" });
+    await mariJoinCommand.execute(t.interaction, t.ctx);
+    expect(t.schedule).toHaveBeenCalledTimes(1);
+    expect(t.schedule.mock.calls[0]![0]).toMatchObject({ language: "ar-EG", voice: null });
+    expect(text(t.reply)).toContain("Egyptian Arabic");
+  });
+
+  it("language left out is stored as null (English on a fresh join, a live session keeps its language)", async () => {
+    const t = setup({ admin: false });
+    await mariJoinCommand.execute(t.interaction, t.ctx);
+    expect(t.schedule.mock.calls[0]![0].language).toBeNull();
+  });
+
+  it("a non-admin who sets language AND a style option is still refused", async () => {
+    const t = setup({ admin: false, language: "ar-EG", voice: "troy" });
+    await mariJoinCommand.execute(t.interaction, t.ctx);
+    expect(t.schedule).not.toHaveBeenCalled();
+  });
+
+  it("an admin can still set the style options", async () => {
+    const t = setup({ admin: true, voice: "troy" });
+    await mariJoinCommand.execute(t.interaction, t.ctx);
+    expect(t.schedule.mock.calls[0]![0]).toMatchObject({ voice: "troy" });
+  });
+
+  it("still needs /setup to have run", async () => {
+    const t = setup({ admin: false });
+    (t.ctx.repositories.serverConfig.getByGuildId as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    await mariJoinCommand.execute(t.interaction, t.ctx);
+    expect(t.schedule).not.toHaveBeenCalled();
+    expect(text(t.reply)).toContain("/setup");
   });
 
   it("with no time, schedules a join right now", async () => {

@@ -6,7 +6,7 @@ import { VoiceManager, type VoiceConfig } from "../../worker/voice.js";
 const cfg: VoiceConfig = { groqApiKey: "k", guildId: "g1", channelId: null, voice: "hannah", ttsModel: "m", direction: "", pitch: 1, language: "en", debug: false };
 const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
 
-type Req = { id: number; channelId: string; joinAt: Date };
+type Req = { id: number; channelId: string; joinAt: Date; language?: string | null };
 
 async function setup(opts: { requests: Req[]; humans?: number; channelMissing?: boolean; claimWins?: boolean; connectOk?: boolean }) {
   const repo = {
@@ -41,6 +41,15 @@ describe("VoiceManager.runScheduledJoins (/mari-join)", () => {
     expect(t.repo.claim).toHaveBeenCalledWith(1);
     expect(t.connect).toHaveBeenCalledTimes(1);
     expect(t.repo.finish).toHaveBeenCalledWith(1, "DONE");
+  });
+
+  it("hands the request's language to the session (ar-EG), and a request without one leaves it unset", async () => {
+    const ar = await setup({ requests: [{ id: 1, channelId: "voice-9", joinAt: minutesAgo(1), language: "ar-EG" }], humans: 1 });
+    await ar.manager.runScheduledJoins();
+    expect((ar.connect.mock.calls[0] as unknown as [unknown, { language?: string | null }])[1]).toMatchObject({ language: "ar-EG" });
+    const plain = await setup({ requests: [{ id: 2, channelId: "voice-9", joinAt: minutesAgo(1) }], humans: 1 });
+    await plain.manager.runScheduledJoins();
+    expect((plain.connect.mock.calls[0] as unknown as [unknown, { language?: string | null }])[1].language ?? null).toBeNull();
   });
 
   it("marks FAILED when she couldn't connect (so the admin can see it in the logs)", async () => {

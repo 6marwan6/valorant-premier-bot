@@ -37,6 +37,8 @@ export const voiceJoinRequests = pgTable(
     pitch: real("pitch"),
     /** "auto" | "name" | "always" (2026-10-01 (b)): whether she needs to hear her name. NULL = keep what she has. */
     listen: text("listen"),
+    /** "en" | "ar-EG" (2026-10-02): the language of the session. NULL = keep what she has (English on a fresh join). */
+    language: text("language"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     handledAt: timestamp("handled_at", { withTimezone: true }),
   },

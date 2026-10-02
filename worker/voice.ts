@@ -49,15 +49,15 @@
  *   VOICE_STT_PROVIDER  auto (default: deepgram if a key is set) | deepgram | groq
  *   VOICE_DEEPGRAM_MODEL  default nova-3
  *   VOICE_STT_MODEL     Groq Whisper model (default whisper-large-v3; whisper-large-v3-turbo is a little faster)
- *   VOICE_STT_LANGUAGE  auto (default: English + Arabic) or a fixed code such as en / ar
- *   VOICE_ARABIC        0 = never speak Arabic (replies still come out in English-voice only)
+ *   (language)          not an env var: /mari-join `language` (en default | ar-EG) picks it per session. One fixed
+ *                       language per session: no auto-detection, one STT request per utterance.
+ *   VOICE_ARABIC        0 = never speak Arabic, even in an ar-EG session
  *   VOICE_TTS_ARABIC_MODEL / VOICE_NAME_AR   Arabic model and voice (default orpheus-arabic-saudi / noura)
  *   VOICE_LISTEN        auto (default) | name | always: whether she needs her name (see 3 above)
  *   VOICE_WARMUP        0 = skip the warm-up she does on joining; full = also warm Groq/Deepgram (costs requests every join; default: database only)
  *   VOICE_MIN_LEVEL     utterances quieter than this (RMS 0..32768, default 250) are dropped before speech-to-text; 0 = off
  *   VOICE_LLM_MODEL     optional faster model just for spoken replies (same provider as LLM_MODEL)
  *   VOICE_LLM_MAX_TOKENS optional output cap for spoken replies; leave unset unless replies get cut off
- *   VOICE_STT_LANGUAGE  ISO code for Whisper (default en; "auto" = detect)
  *   VOICE_SILENCE_MS    how long a player must be quiet before the utterance is sent (default 700,
  *                       300-2000). Lower = she answers sooner but may cut people off mid-sentence.
  *
@@ -96,7 +96,10 @@ import {
   DEFAULT_PITCH,
   ORPHEUS_VOICES,
   pickListen,
+  pickLanguage,
+  DEFAULT_LANGUAGE,
   type ListenMode,
+  type SessionLanguage,
   applyOverrides,
   directionFromEnv,
   hasOverrides,
@@ -114,7 +117,9 @@ const STT_RATE = 16_000;
 const MAX_TTS_CHUNKS = 3;
 const DEEPGRAM_URL = "https://api.deepgram.com/v1/listen";
 /** Names and game words, in both scripts, that Nova-3 should lean toward. */
-const DEEPGRAM_KEYTERMS = ["Mari", "ماري", "Valorant", "Premier", "Jett", "Sage", "Omen"];
+const DEEPGRAM_KEYTERMS_EN = ["Mari", "Valorant", "Premier", "Jett", "Sage", "Omen"];
+/** The Arabic session also leans toward her name in Arabic script. */
+const DEEPGRAM_KEYTERMS_AR = [...DEEPGRAM_KEYTERMS_EN, "ماري"];
 /** Below this Deepgram is guessing (noise, a cough): treated like Whisper's no-speech case. */
 const DEEPGRAM_MIN_CONFIDENCE = 0.35;
 const GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -264,6 +269,7 @@ export interface VoiceConfig {
   /** Optional single vocal direction sent as "[direction]" before each chunk. */
   direction: string;
   pitch: number;
+  /** Default session language ("en" | "ar-EG"); /mari-join picks it per session. Anything else is read as "en". */
   language: string;
   debug: boolean;
   /** Silence that ends an utterance; omitted = DEFAULT_SILENCE_MS. */
@@ -313,8 +319,7 @@ export function loadVoiceConfig(guildId: string, e: NodeJS.ProcessEnv = process.
     },
     direction: directionFromEnv(e.VOICE_DIRECTION),
     pitch: num(e.VOICE_PITCH, DEFAULT_PITCH),
-    // "auto": she hears English and Arabic (a fixed "en" would turn Arabic speech into garbage).
-    language: e.VOICE_STT_LANGUAGE?.trim() || "auto",
+    language: DEFAULT_LANGUAGE, // always English: she speaks Arabic only when /mari-join says language:ar-EG
     debug: ["1", "true", "yes"].includes((e.VOICE_DEBUG ?? "").trim().toLowerCase()),
     silenceMs: Math.min(2_000, Math.max(300, Math.round(num(e.VOICE_SILENCE_MS, DEFAULT_SILENCE_MS)))),
     listen: pickListen(e.VOICE_LISTEN),
@@ -463,8 +468,8 @@ export class VoiceManager {
   private readonly sttTimes: number[] = [];
   private warnedArabicTerms = false;
   private warnedDeepgramRejected = false;
-  /** Index into the Deepgram query ladder that last worked; later utterances start there instead of re-learning a 400 every time. */
-  private deepgramVariant = 0;
+  /** Per session language: index into the Deepgram query ladder that last worked; later utterances start there instead of re-learning a 400 every time. */
+  private readonly deepgramVariant: Record<string, number> = {};
   private readonly groqPool: KeyPool;
   private readonly deepgramPool: KeyPool;
   private readonly rosterCache = new Map<string, { player: Awaited<ReturnType<VoiceManager["isActivePlayer"]>>; at: number }>();
@@ -491,16 +496,16 @@ export class VoiceManager {
 
   /** The env defaults; /mari-join choices are layered on top per session. */
   private defaultSettings(): VoiceSettings {
-    return { voice: this.cfg.voice, direction: this.cfg.direction, pitch: this.cfg.pitch, listen: this.cfg.listen ?? "auto" };
+    return { voice: this.cfg.voice, direction: this.cfg.direction, pitch: this.cfg.pitch, listen: this.cfg.listen ?? "auto", language: pickLanguage(this.cfg.language) };
   }
 
   /** Applies /mari-join choices to a live session (anything left unspecified is kept). Returns whether anything changed. */
   private applySettings(session: Session, overrides: VoiceOverrides): boolean {
     if (!hasOverrides(overrides)) return false;
     const next = applyOverrides(session.settings, overrides);
-    const changed = next.voice !== session.settings.voice || next.direction !== session.settings.direction || next.pitch !== session.settings.pitch || next.listen !== session.settings.listen;
+    const changed = next.voice !== session.settings.voice || next.direction !== session.settings.direction || next.pitch !== session.settings.pitch || next.listen !== session.settings.listen || next.language !== session.settings.language;
     session.settings = next;
-    this.ctx.logger.info({ event: "voice.settings.applied", changed, voice: next.voice, direction: next.direction, pitch: next.pitch, listen: next.listen }, "Voice settings updated from /mari-join");
+    this.ctx.logger.info({ event: "voice.settings.applied", changed, voice: next.voice, direction: next.direction, pitch: next.pitch, listen: next.listen, language: next.language }, "Voice settings updated from /mari-join");
     return changed;
   }
 
@@ -585,7 +590,7 @@ export class VoiceManager {
           continue;
         }
         if (!(await repo.claim(req.id))) continue;
-        const overrides: VoiceOverrides = { voice: req.voice, direction: req.direction, pitch: req.pitch, listen: req.listen };
+        const overrides: VoiceOverrides = { voice: req.voice, direction: req.direction, pitch: req.pitch, listen: req.listen, language: req.language };
         if (this.session?.channelId === channel.id) {
           this.applySettings(this.session, overrides); // already there: just retune her voice
           await repo.finish(req.id, "DONE");
@@ -924,7 +929,7 @@ export class VoiceManager {
 
   private async handleUtterance(session: Session, userId: string, player: NonNullable<Awaited<ReturnType<VoiceManager["isActivePlayer"]>>>, pcm: Buffer): Promise<void> {
     const sttStart = Date.now();
-    const stt = await this.transcribe(pcm);
+    const stt = await this.transcribe(pcm, session.settings.language);
     const timing: TurnTiming = { sttMs: Date.now() - sttStart, brainMs: null, firstAudioMs: null, chunks: 0 };
     if (!stt.text) {
       this.outcome(`stt_${stt.status}`, { userId, sttMs: timing.sttMs, language: stt.language });
@@ -1033,50 +1038,35 @@ export class VoiceManager {
    * fallback if Deepgram fails for any reason (a refused request, an outage, every key exhausted). A fallback
    * only happens on "failed"; an empty or filtered result is a real answer from Deepgram and is final.
    */
-  private async transcribe(pcm: Buffer): Promise<SttResult> {
+  private async transcribe(pcm: Buffer, language: SessionLanguage = "en"): Promise<SttResult> {
     if (this.cfg.sttProvider === "deepgram" && this.deepgramPool.size > 0) {
-      const result = await this.transcribeDeepgram(pcm);
+      const result = await this.transcribeDeepgram(pcm, language);
       if (result.status !== "failed") return result;
       this.ctx.logger.warn({ event: "voice.stt.fallback", from: "deepgram", to: "groq" }, "Deepgram failed for this utterance; using Groq Whisper");
     }
-    return this.transcribeGroq(pcm);
+    return this.transcribeGroq(pcm, language);
   }
 
   /**
-   * Deepgram Nova-3, pre-recorded endpoint (one request per utterance). Language: `VOICE_STT_LANGUAGE=auto`
-   * restricts detection to English and Arabic (detect_language=en&detect_language=ar); a fixed code (en, ar,
-   * ar-EG ...) is sent as `language`. Keyterms bias it toward her name in both scripts and the game words.
+   * Deepgram Nova-3, pre-recorded endpoint (one request per utterance). The session's language is sent as
+   * `language` (en or ar-EG): there is no detection and no retry in another language. Keyterms bias it toward
+   * her name (in Arabic script too for ar-EG) and the game words.
    */
-  private async transcribeDeepgram(pcm: Buffer): Promise<SttResult> {
+  private async transcribeDeepgram(pcm: Buffer, language: SessionLanguage): Promise<SttResult> {
     const wav = new Uint8Array(pcmToWav16kMono(pcm));
     // The query ladder, most featureful first. A 400 ("Failed to parse query string") means Deepgram doesn't accept
     // that parameter combination for this model, so the next, simpler shape is tried; the first one that isn't a 400
     // is remembered (deepgramVariant) so the next utterance doesn't pay for the failures again.
-    const auto = this.cfg.language === "auto";
-    const ladder: Array<{ detect: "restricted" | "any" | "none"; keyterms: boolean; smartFormat: boolean }> = auto
-      ? [
-          { detect: "restricted", keyterms: true, smartFormat: true },
-          { detect: "restricted", keyterms: false, smartFormat: true },
-          { detect: "any", keyterms: false, smartFormat: true },
-          { detect: "any", keyterms: false, smartFormat: false },
-        ]
-      : [
-          { detect: "none", keyterms: true, smartFormat: true },
-          { detect: "none", keyterms: false, smartFormat: true },
-          { detect: "none", keyterms: false, smartFormat: false },
-        ];
+    const ladder: Array<{ keyterms: boolean; smartFormat: boolean }> = [
+      { keyterms: true, smartFormat: true },
+      { keyterms: false, smartFormat: true },
+      { keyterms: false, smartFormat: false },
+    ];
+    const keyterms = language === "ar-EG" ? DEEPGRAM_KEYTERMS_AR : DEEPGRAM_KEYTERMS_EN;
     const build = (v: (typeof ladder)[number]) => {
-      const q = new URLSearchParams({ model: this.cfg.deepgramModel ?? "nova-3" });
+      const q = new URLSearchParams({ model: this.cfg.deepgramModel ?? "nova-3", language });
       if (v.smartFormat) q.set("smart_format", "true");
-      if (v.detect === "restricted") {
-        q.append("detect_language", "en");
-        q.append("detect_language", "ar");
-      } else if (v.detect === "any") {
-        q.set("detect_language", "true");
-      } else {
-        q.set("language", this.cfg.language);
-      }
-      if (v.keyterms) for (const term of DEEPGRAM_KEYTERMS) q.append("keyterm", term);
+      if (v.keyterms) for (const term of keyterms) q.append("keyterm", term);
       return `${DEEPGRAM_URL}?${q.toString()}`;
     };
     const send = (url: string) =>
@@ -1094,13 +1084,13 @@ export class VoiceManager {
 
     let res: Response | undefined;
     try {
-      const first = this.deepgramVariant < ladder.length ? this.deepgramVariant : 0;
+      const first = (this.deepgramVariant[language] ?? 0) < ladder.length ? (this.deepgramVariant[language] ?? 0) : 0;
       for (let i = first; i < ladder.length; i++) {
         res = await send(build(ladder[i]!));
         if (res.status !== 400) {
-          if (res.ok && i !== this.deepgramVariant) {
-            this.deepgramVariant = i;
-            if (i > 0) this.ctx.logger.warn({ event: "voice.stt.deepgramVariant", variant: i, ...ladder[i] }, "Deepgram refused the richer query; using a simpler one from now on");
+          if (res.ok && i !== (this.deepgramVariant[language] ?? 0)) {
+            this.deepgramVariant[language] = i;
+            if (i > 0) this.ctx.logger.warn({ event: "voice.stt.deepgramVariant", variant: i, language, ...ladder[i] }, "Deepgram refused the richer query; using a simpler one from now on");
           }
           break;
         }
@@ -1110,21 +1100,20 @@ export class VoiceManager {
       return { text: null, status: "failed" };
     }
     if (!res) return { text: null, status: "failed" };
-    if (res.status === 400) this.deepgramVariant = 0; // every shape was refused: start from the top next time
+    if (res.status === 400) this.deepgramVariant[language] = 0; // every shape was refused: start from the top next time
     if (!res.ok) {
       const body = (await res.text().catch(() => "")).slice(0, 300);
       this.ctx.logger.warn({ event: "voice.stt.failed", engine: "deepgram", status: res.status, body }, "Deepgram transcription failed");
       if (res.status === 400 && !this.warnedDeepgramRejected) {
         this.warnedDeepgramRejected = true;
-        this.ctx.logger.error({ event: "voice.stt.deepgramRejected", language: this.cfg.language, body }, "Deepgram rejected the request. If this is about language detection, set VOICE_STT_LANGUAGE=ar (or en) instead of auto. Groq Whisper is used meanwhile");
+        this.ctx.logger.error({ event: "voice.stt.deepgramRejected", language, body }, "Deepgram rejected the request. Groq Whisper is used meanwhile");
       }
       return { text: null, status: "failed" };
     }
-    const json = (await res.json()) as { results?: { channels?: Array<{ detected_language?: string; alternatives?: Array<{ transcript?: string; confidence?: number }> }> } };
+    const json = (await res.json()) as { results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string; confidence?: number }> }> } };
     const channel = json.results?.channels?.[0];
     const alt = channel?.alternatives?.[0];
     const text = alt?.transcript?.trim();
-    const language = channel?.detected_language ?? (this.cfg.language === "auto" ? undefined : this.cfg.language);
     this.dbg("voice.stt.result", { engine: "deepgram", transcript: text ?? "", language, confidence: alt?.confidence });
     if (!text) return { text: null, status: "empty", language };
     if (typeof alt?.confidence === "number" && alt.confidence < DEEPGRAM_MIN_CONFIDENCE) return { text: null, status: "filtered", language };
@@ -1136,7 +1125,7 @@ export class VoiceManager {
    * silence/noise, not speech" than a list of known hallucination strings (see isSilenceTranscript). One retry
    * on a timeout, 429 or 5xx: a single hiccup used to mean she silently never answered.
    */
-  private async transcribeGroq(pcm: Buffer): Promise<SttResult> {
+  private async transcribeGroq(pcm: Buffer, language: SessionLanguage = "en"): Promise<SttResult> {
     const now = Date.now();
     while (this.sttTimes.length > 0 && now - (this.sttTimes[0] ?? now) > 60_000) this.sttTimes.shift();
     if (this.sttTimes.length >= STT_MAX_PER_MINUTE * Math.max(1, this.groqPool.size)) {
@@ -1154,7 +1143,7 @@ export class VoiceManager {
       form.append("temperature", "0");
       // Names and game words in both scripts, so "Mari" / "ماري" and the agents are spelled the way we match them.
       form.append("prompt", "Mari, ماري, Valorant, Premier, Jett, Sage, Omen.");
-      if (this.cfg.language !== "auto") form.append("language", this.cfg.language);
+      form.append("language", language === "ar-EG" ? "ar" : "en"); // Whisper takes ISO 639-1; the session language is fixed, never guessed
       return form;
     };
 
@@ -1206,7 +1195,7 @@ export class VoiceManager {
         text,
         voice: settings.voice,
         direction: settings.direction,
-        tts: { model: this.cfg.ttsModel, arabic: this.cfg.arabic },
+        tts: { model: this.cfg.ttsModel, arabic: this.cfg.arabic ? { ...this.cfg.arabic, enabled: this.cfg.arabic.enabled && settings.language === "ar-EG" } : undefined },
         logger: this.ctx.logger,
       });
     } catch (err) {

@@ -46,6 +46,26 @@ export function pickListen(raw: string | undefined | null): ListenMode {
   return (LISTEN_MODES as readonly string[]).includes(v) ? (v as ListenMode) : DEFAULT_LISTEN;
 }
 
+/**
+ * The language of a voice session (2026-10-02). Chosen per /mari-join, never detected:
+ *   en    - default. She hears English and speaks English.
+ *   ar-EG - Egyptian Arabic. She hears Arabic (Deepgram language=ar-EG) and speaks Arabic script with the Arabic voice.
+ * One fixed language means one speech-to-text request per utterance, with no language detection and no second try.
+ */
+export const SESSION_LANGUAGES = ["en", "ar-EG"] as const;
+export type SessionLanguage = (typeof SESSION_LANGUAGES)[number];
+export const DEFAULT_LANGUAGE: SessionLanguage = "en";
+
+export const LANGUAGE_CHOICES: Array<{ name: string; value: SessionLanguage }> = [
+  { name: "English (default)", value: "en" },
+  { name: "Egyptian Arabic (ar-EG)", value: "ar-EG" },
+];
+
+/** Anything that isn't exactly Egyptian Arabic is English: she never guesses Arabic. */
+export function pickLanguage(raw: string | undefined | null): SessionLanguage {
+  return (raw ?? "").trim().toLowerCase() === "ar-eg" ? "ar-EG" : DEFAULT_LANGUAGE;
+}
+
 /** What an admin typed in /mari-join. null/undefined = "not specified, keep what she has". */
 export interface VoiceOverrides {
   voice?: string | null;
@@ -53,6 +73,8 @@ export interface VoiceOverrides {
   direction?: string | null;
   pitch?: number | null;
   listen?: string | null;
+  /** "en" | "ar-EG" (2026-10-02). null/undefined = keep what she has. */
+  language?: string | null;
 }
 
 /** The settings a live session actually speaks with. */
@@ -61,6 +83,7 @@ export interface VoiceSettings {
   direction: string;
   pitch: number;
   listen: ListenMode;
+  language: SessionLanguage;
 }
 
 /** An unknown voice name falls back to the default instead of failing every request. */
@@ -94,7 +117,7 @@ export function clampPitch(value: number | null | undefined, fallback = 1): numb
 }
 
 export function hasOverrides(o: VoiceOverrides): boolean {
-  return o.voice != null || o.direction != null || o.pitch != null || o.listen != null;
+  return o.voice != null || o.direction != null || o.pitch != null || o.listen != null || o.language != null;
 }
 
 /** Layers the admin's choices over a base; every unspecified field is kept. */
@@ -104,6 +127,7 @@ export function applyOverrides(base: VoiceSettings, o: VoiceOverrides): VoiceSet
     direction: o.direction != null ? sanitizeDirection(o.direction) : base.direction,
     pitch: o.pitch != null ? clampPitch(o.pitch, base.pitch) : base.pitch,
     listen: o.listen != null ? pickListen(o.listen) : base.listen,
+    language: o.language != null ? pickLanguage(o.language) : base.language,
   };
 }
 
@@ -114,5 +138,6 @@ export function describeOverrides(o: VoiceOverrides): string {
   if (o.direction != null) parts.push(o.direction === "" ? "no direction" : `direction **${o.direction}**`);
   if (o.pitch != null) parts.push(`pitch **${clampPitch(o.pitch)}**`);
   if (o.listen != null) parts.push(pickListen(o.listen) === "name" ? "listening: **needs her name**" : pickListen(o.listen) === "always" ? "listening: **no name needed**" : "listening: **auto**");
+  if (o.language != null) parts.push(pickLanguage(o.language) === "ar-EG" ? "language: **Egyptian Arabic**" : "language: **English**");
   return parts.join(" · ");
 }

@@ -3,6 +3,8 @@ import type { Client } from "discord.js";
 import { ChannelType } from "discord.js";
 import type { AppContext } from "../../src/appContext.js";
 import {
+  DEFAULT_LANGUAGE,
+  pickLanguage,
   MAX_PITCH,
   MIN_PITCH,
   ORPHEUS_VOICES,
@@ -15,17 +17,33 @@ import {
 import { VoiceManager, firstSentenceFirst, loadVoiceConfig, type VoiceConfig } from "../../worker/voice.js";
 import mariJoinCommand from "../../src/discord/commands/mariJoin.js";
 
-const base = { voice: "hannah", direction: "", pitch: 1, listen: "auto" as const };
+const base = { voice: "hannah", direction: "", pitch: 1, listen: "auto" as const, language: "en" as const };
 
 describe("voice settings helpers", () => {
   it("keeps everything an admin left out", () => {
     expect(applyOverrides(base, {})).toEqual(base);
-    expect(applyOverrides(base, { voice: "troy" })).toEqual({ voice: "troy", direction: "", pitch: 1, listen: "auto" });
-    expect(applyOverrides({ voice: "troy", direction: "cheerful", pitch: 1.1, listen: "auto" }, { pitch: 0.9 })).toEqual({ voice: "troy", direction: "cheerful", pitch: 0.9, listen: "auto" });
+    expect(applyOverrides(base, { voice: "troy" })).toEqual({ voice: "troy", direction: "", pitch: 1, listen: "auto", language: "en" });
+    expect(applyOverrides({ voice: "troy", direction: "cheerful", pitch: 1.1, listen: "auto", language: "en" }, { pitch: 0.9 })).toEqual({ voice: "troy", direction: "cheerful", pitch: 0.9, listen: "auto", language: "en" });
+  });
+
+  it("language: only exactly ar-EG is Arabic; anything else (or nothing) is English", () => {
+    expect(pickLanguage("ar-EG")).toBe("ar-EG");
+    expect(pickLanguage(" AR-eg ")).toBe("ar-EG");
+    for (const v of ["en", "ar", "arabic", "auto", "", null, undefined]) expect(pickLanguage(v)).toBe("en");
+    expect(DEFAULT_LANGUAGE).toBe("en");
+  });
+
+  it("language is layered like the other choices: kept when left out, switched when given", () => {
+    expect(applyOverrides(base, {}).language).toBe("en");
+    expect(applyOverrides(base, { language: "ar-EG" }).language).toBe("ar-EG");
+    expect(applyOverrides({ ...base, language: "ar-EG" }, { voice: "troy" }).language).toBe("ar-EG"); // a live Arabic session keeps its language
+    expect(applyOverrides({ ...base, language: "ar-EG" }, { language: "en" }).language).toBe("en");
+    expect(hasOverrides({ language: "ar-EG" })).toBe(true);
+    expect(describeOverrides({ language: "ar-EG" })).toContain("Egyptian Arabic");
   });
 
   it("an explicit empty direction clears it; null means unspecified", () => {
-    const withDirection = { voice: "hannah", direction: "cheerful", pitch: 1, listen: "auto" as const };
+    const withDirection = { voice: "hannah", direction: "cheerful", pitch: 1, listen: "auto" as const, language: "en" as const };
     expect(applyOverrides(withDirection, { direction: "" }).direction).toBe("");
     expect(applyOverrides(withDirection, { direction: null }).direction).toBe("cheerful");
   });
@@ -106,11 +124,11 @@ describe("/mari-join voice options reach the worker", () => {
 
   it("if she is already in that channel the settings change live and she does not reconnect", async () => {
     const t = await managerWith({ channelId: "voice-9", voice: "diana", pitch: 0.9 });
-    const session = { channelId: "voice-9", settings: { voice: "hannah", direction: "sad", pitch: 1, listen: "auto" } };
+    const session = { channelId: "voice-9", settings: { voice: "hannah", direction: "sad", pitch: 1, listen: "auto", language: "en" } };
     (t.manager as unknown as { session: unknown }).session = session;
     await t.manager.runScheduledJoins();
     expect(t.connect).not.toHaveBeenCalled();
-    expect(session.settings).toEqual({ voice: "diana", direction: "sad", pitch: 0.9, listen: "auto" }); // direction was not specified: kept
+    expect(session.settings).toEqual({ voice: "diana", direction: "sad", pitch: 0.9, listen: "auto", language: "en" }); // direction was not specified: kept
     expect(t.repo.finish).toHaveBeenCalledWith(1, "DONE");
   });
 });
@@ -187,7 +205,7 @@ describe("listen mode (2026-10-01 (b))", () => {
   });
 
   it("applies per session, keeps the old value when unspecified, and ignores junk", () => {
-    const base = { voice: "hannah", direction: "", pitch: 1, listen: "auto" as const };
+    const base = { voice: "hannah", direction: "", pitch: 1, listen: "auto" as const, language: "en" as const };
     expect(applyOverrides(base, { listen: "name" }).listen).toBe("name");
     expect(applyOverrides({ ...base, listen: "always" }, { pitch: 1.1 }).listen).toBe("always");
     expect(applyOverrides(base, { listen: "nonsense" }).listen).toBe("auto");
