@@ -1,4 +1,4 @@
-import { PermissionsBitField } from "discord.js";
+import { PermissionsBitField, type ChannelType } from "discord.js";
 import { ApplicationCommandOptionType } from "discord-api-types/v10";
 import type {
   APIApplicationCommandInteractionDataOption,
@@ -89,9 +89,17 @@ export function buildCommandInteractionAdapter(
         if (required) throw new Error(`Missing required number option: ${name}`);
         return null;
       },
-      getChannel(name: string): { id: string } | null {
+      /**
+       * A channel option's raw `value` is only an id; its type (and name) live in `data.resolved.channels`.
+       * Returning the type matters: /mari-join refuses anything that isn't a voice channel, and without it
+       * every channel (even a real voice one) looked like "not a voice channel" over HTTP.
+       */
+      getChannel(name: string): { id: string; type: ChannelType | undefined; name: string | null } | null {
         const opt = findOption(options, name);
-        if (opt && opt.type === ApplicationCommandOptionType.Channel) return { id: opt.value };
+        if (opt && opt.type === ApplicationCommandOptionType.Channel) {
+          const resolved = raw.data.resolved?.channels?.[opt.value];
+          return { id: opt.value, type: resolved?.type as ChannelType | undefined, name: resolved?.name ?? null };
+        }
         return null;
       },
       getRole(name: string): { id: string } | null {

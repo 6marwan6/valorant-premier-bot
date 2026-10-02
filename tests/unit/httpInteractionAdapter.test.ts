@@ -17,6 +17,7 @@ function fakeRaw(overrides: {
   options?: unknown[];
   resolvedUsers?: Record<string, { username: string; global_name?: string | null }>;
   resolvedMembers?: Record<string, { nick?: string | null }>;
+  resolvedChannels?: Record<string, { type: number; name?: string }>;
 }): APIChatInputApplicationCommandInteraction {
   return {
     type: 2,
@@ -39,6 +40,7 @@ function fakeRaw(overrides: {
       resolved: {
         users: overrides.resolvedUsers,
         members: overrides.resolvedMembers,
+        channels: overrides.resolvedChannels,
       },
     },
   } as unknown as APIChatInputApplicationCommandInteraction;
@@ -107,6 +109,23 @@ describe("buildCommandInteractionAdapter — getBoolean", () => {
     const raw = fakeRaw({ options: [] });
     const adapter = buildCommandInteractionAdapter(raw, noopDiscord);
     expect(adapter.options.getBoolean("running_jokes")).toBeNull();
+  });
+});
+
+describe("buildCommandInteractionAdapter — getChannel", () => {
+  it("returns the channel's TYPE and name from data.resolved (/mari-join checks the type; the bare id made every channel look like a text channel)", () => {
+    const raw = fakeRaw({
+      options: [{ name: "channel", type: ApplicationCommandOptionType.Channel, value: "voice-9" }],
+      resolvedChannels: { "voice-9": { type: 2, name: "Premier VC" } },
+    });
+    const channel = buildCommandInteractionAdapter(raw, noopDiscord).options.getChannel("channel");
+    expect(channel).toEqual({ id: "voice-9", type: 2, name: "Premier VC" });
+  });
+
+  it("still returns the id when Discord sent no resolved entry, and null when the option is absent", () => {
+    const raw = fakeRaw({ options: [{ name: "channel", type: ApplicationCommandOptionType.Channel, value: "x-1" }] });
+    expect(buildCommandInteractionAdapter(raw, noopDiscord).options.getChannel("channel")).toEqual({ id: "x-1", type: undefined, name: null });
+    expect(buildCommandInteractionAdapter(fakeRaw({ options: [] }), noopDiscord).options.getChannel("channel")).toBeNull();
   });
 });
 

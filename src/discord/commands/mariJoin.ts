@@ -114,7 +114,9 @@ const mariJoinCommand: Command = {
       return;
     }
 
-    if (channel.type !== ChannelType.GuildVoice) {
+    // Discord already limits the picker to voice channels (addChannelTypes above). A payload that carries no type
+    // is not evidence of a text channel, so only a type we can actually see and that isn't voice is refused.
+    if (channel.type !== undefined && channel.type !== ChannelType.GuildVoice) {
       await interaction.reply({ content: "❌ Pick a **voice** channel (Mari can't join a text channel).", ephemeral: true });
       return;
     }
