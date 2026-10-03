@@ -178,6 +178,7 @@ export function buildButtonInteractionAdapter(
       id: (member?.user ?? raw.user)!.id,
       username: (member?.user ?? raw.user)!.username,
       globalName: (member?.user ?? raw.user)!.global_name ?? null,
+      avatar: (member?.user ?? raw.user)!.avatar ?? null,
     },
     deferred: true, // api/interactions.ts always defers (DEFERRED_UPDATE_MESSAGE) before dispatch runs
     replied: false,

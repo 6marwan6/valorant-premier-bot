@@ -18,7 +18,9 @@ export type PlayerProfileFields = Pick<
   | "protectedTopics"
 > &
   // Optional so /add-player and older callers keep working; the column defaults to NEUTRAL.
-  Partial<Pick<NewPlayerRow, "banterStyle">>;
+  Partial<Pick<NewPlayerRow, "banterStyle">> &
+  // Optional: PLAYER unless /add-member (2026-10-03) says otherwise; `active` lets a promotion/demotion reactivate a removed profile.
+  Partial<Pick<NewPlayerRow, "kind" | "active">>;
 
 /**
  * Repository for `players` — plan section 8/9/10 (Phase 5). Mirrors
@@ -115,11 +117,11 @@ export class PlayerRepository {
   }
 
   /**
-   * The team roster — plan section 16's real "No response" section and
-   * `Confirmed: X/Y` denominator (README's flagged Phase 5 debt) both
-   * need exactly this: every currently-active player in the guild.
-   * Ordered by join order (`id`) so the roster reads the same way each
-   * time it's rendered, rather than shuffling on every query.
+   * Every active profile in the guild — Premier players AND server members
+   * (2026-10-03). This is "everyone Mari knows": name resolution, whose
+   * protected topics a public reply must respect, whose shared memories can
+   * come up in chat. It is deliberately NOT the Premier roster; anything
+   * about the team, the schedule or a match wants `listActivePlayersByGuild`.
    */
   async listActiveByGuild(guildId: string): Promise<PlayerRow[]> {
     return this.db
@@ -128,4 +130,32 @@ export class PlayerRepository {
       .where(and(eq(players.guildId, guildId), eq(players.active, true)))
       .orderBy(asc(players.id));
   }
+
+  /**
+   * The Premier roster (2026-10-03): active profiles of kind PLAYER only. A
+   * server MEMBER is never in it, so they are never counted in a denominator,
+   * listed under "No vote yet", reminded, or recapped.
+   */
+  async listActivePlayersByGuild(guildId: string): Promise<PlayerRow[]> {
+    return this.db
+      .select()
+      .from(players)
+      .where(and(eq(players.guildId, guildId), eq(players.active, true), eq(players.kind, "PLAYER")))
+      .orderBy(asc(players.id));
+  }
+
+  /** Inserts a server MEMBER profile (no role/agents). Callers check for an existing row first (see /add-member). */
+  async createMember(
+    guildId: string,
+    discordUserId: string,
+    values: Pick<NewPlayerRow, "displayName" | "roastIntensity"> & Partial<Pick<NewPlayerRow, "banterStyle" | "protectedTopics">>,
+  ): Promise<PlayerRow> {
+    const [inserted] = await this.db
+      .insert(players)
+      .values({ guildId, discordUserId, kind: "MEMBER", role: null, agents: [], preferredAgent: null, ...values })
+      .returning();
+    if (!inserted) throw new Error(`Failed to insert member ${discordUserId} for guild ${guildId}`);
+    return inserted;
+  }
+
 }

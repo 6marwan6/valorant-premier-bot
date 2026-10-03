@@ -84,6 +84,13 @@ const editPlayerCommand: Command = {
     }
 
     const role = interaction.options.getString("role") as PlayerRow["role"] | null;
+    if (existing.kind === "MEMBER" && (role !== null || interaction.options.getString("agents") !== null || interaction.options.getString("preferred_agent") !== null)) {
+      await interaction.reply({
+        content: `❌ <@${target.id}> is a server member, not a Premier player, so they have no role or agents. Run \`/add-player\` to make them a player first.`,
+        ephemeral: true,
+      });
+      return;
+    }
     const agentsRaw = interaction.options.getString("agents");
     const preferredAgentRaw = interaction.options.getString("preferred_agent");
     const roastIntensity = interaction.options.getInteger("roast_intensity");

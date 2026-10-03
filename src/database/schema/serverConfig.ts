@@ -16,8 +16,9 @@ import { pgTable, text, integer, jsonb, timestamp } from "drizzle-orm/pg-core";
  * run (plan section 41). V1 is single-server (plan section 54), so
  * guild_id is the primary key — no multi-tenant abstractions.
  *
- * reminder_schedule stores minutes-before-match offsets, defaulting to the
- * plan's section 13 example: 3h / 1h / 15m before.
+ * reminder_schedule stores minutes-before-match offsets. Plan section 13's
+ * example default was 3h / 1h / 15m; since 2026-10-03 (owner's request, weekly
+ * schedule) the default is 5h / 15m — still just configuration, as section 13 wants.
  */
 export const serverConfig = pgTable("server_config", {
   guildId: text("guild_id").primaryKey(),
@@ -32,11 +33,11 @@ export const serverConfig = pgTable("server_config", {
   matchChannelId: text("match_channel_id"),
   adminRoleId: text("admin_role_id"),
 
-  // Minutes before kickoff, e.g. [180, 60, 15] (plan section 13).
+  // Minutes before kickoff, e.g. [300, 15] (plan section 13; was [180, 60, 15] before 2026-10-03).
   reminderScheduleMinutes: jsonb("reminder_schedule_minutes")
     .$type<number[]>()
     .notNull()
-    .default([180, 60, 15]),
+    .default([300, 15]),
 
   // 0-100 per plan section 9.
   defaultRoastIntensity: integer("default_roast_intensity").notNull().default(50),

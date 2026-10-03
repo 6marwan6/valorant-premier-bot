@@ -41,9 +41,13 @@ const playerCommand: Command = {
 
     const lines = [
       `**${player.displayName}**${player.active ? "" : " _(removed from active roster)_"}`,
-      `• Role: ${player.role}`,
-      `• Agents: ${player.agents.join(", ") || "_none_"}`,
-      `• Preferred agent: ${player.preferredAgent ?? "_not set_"}`,
+      ...(player.kind === "MEMBER"
+        ? ["• **Server member** — not a Premier player (chats with Mari, no schedule/attendance)"]
+        : [
+            `• Role: ${player.role}`,
+            `• Agents: ${player.agents.join(", ") || "_none_"}`,
+            `• Preferred agent: ${player.preferredAgent ?? "_not set_"}`,
+          ]),
       "",
       `• Roast intensity: ${player.roastIntensity} (spice follows it)`,
       `• Banter style: ${player.banterStyle}`,

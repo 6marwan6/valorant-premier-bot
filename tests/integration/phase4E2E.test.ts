@@ -1,3 +1,4 @@
+import { visibleText } from "../unit/helpers/embedText.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
 import { createDatabase, type Database } from "../../src/database/client.js";
@@ -115,8 +116,8 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
 
     const ourCalls = fakeDiscord.callsForChannel(channelId);
     const [, payload] = ourCalls.at(-1)!;
-    expect(payload.content).toContain("🔴 **PREMIER MATCH**");
-    expect(payload.content).toContain(formatMatchDateTime(match.scheduledAt, match.timezone)); // the roster header shows the kickoff (no opponent anymore)
+    expect(payload.content).toContain("PREMIER MATCH"); // the banner above the card
+    expect(visibleText(payload)).toContain(formatMatchDateTime(match.scheduledAt, match.timezone)); // the roster card shows the kickoff (no opponent anymore)
     expect(payload.components).toHaveLength(1); // the roster message's buttons
 
     const rows = await ctx.repositories.reminders.listByMatch(match.id);
@@ -176,7 +177,7 @@ describeIfDb("Phase 4 — reminders cron job (integration)", () => {
     const matchCalls = ourCalls.filter(
       ([, payload]) =>
         payload.embeds?.some((e) => e.toJSON().description?.includes(`Match #${match.id}`)) ||
-        payload.content?.includes(formatMatchDateTime(match.scheduledAt, match.timezone)),
+        visibleText(payload).includes(formatMatchDateTime(match.scheduledAt, match.timezone)),
     );
     expect(matchCalls).toHaveLength(2);
     expect(matchCalls[0]![1].components).toHaveLength(1); // announcement first (largest offset = earliest scheduled_at)

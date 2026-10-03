@@ -89,7 +89,7 @@ export class PostMatchService {
       "Match completed",
     );
 
-    const roster = await this.players.listActiveByGuild(params.guildId);
+    const roster = await this.players.listActivePlayersByGuild(params.guildId);
     const matchEvents = await this.recordMatchEvents(updated, params.notes, roster);
     const recap = await this.ai.generateMatchRecap({ match: updated, result: params.result, matchEvents, roster, notes: params.notes });
 
@@ -105,7 +105,7 @@ export class PostMatchService {
    * match with a bare WIN/LOSS and no commentary is exactly what plan
    * section 39 calls "optional notes").
    */
-  private async recordMatchEvents(match: MatchRow, notes: string | null, roster: Awaited<ReturnType<PlayerRepository["listActiveByGuild"]>>): Promise<MatchEventRow[]> {
+  private async recordMatchEvents(match: MatchRow, notes: string | null, roster: Awaited<ReturnType<PlayerRepository["listActivePlayersByGuild"]>>): Promise<MatchEventRow[]> {
     if (!notes) return [];
 
     const extracted = await this.ai.extractMatchEvents({ notes, roster });

@@ -139,16 +139,32 @@ const ATTENDANCE_LABEL: Record<AiMode, string> = {
   CONSOLE: "WANTS_TO_BUT_CANNOT",
 };
 
+/**
+ * What the reaction is *about*, when it isn't a single match's attendance —
+ * the weekly schedule votes (2026-10-03). `lines` replace the three CURRENT
+ * EVENT lines (all built by the app from the database, plan section 14);
+ * `seedKey` makes the "show Valorant background / memories this time?" dice
+ * deterministic per event, like `${player.id}:${match.id}:${mode}` is for a match.
+ */
+export interface AiEvent {
+  lines: string[];
+  seedKey: string;
+}
+
 export function buildAIContext(params: {
   player: PlayerRow;
   mode: AiMode;
-  match: MatchRow;
+  /** The match being answered. Omit when `event` describes something else (a schedule vote). */
+  match?: MatchRow;
+  event?: AiEvent;
   memories?: MemoryRow[];
   /** Test/override hook. By default role/agents are only shown on about one message in four (mariPersona.valorantSpotlight). */
   includeValorant?: boolean;
 }): AIContext {
   const { player, mode, match } = params;
   const memories = params.memories ?? [];
+  if (!match && !params.event) throw new Error("buildAIContext needs a match or an event");
+  const seedKey = params.event?.seedKey ?? String(match!.id);
 
   const band = roastBandFor(player.roastIntensity);
   // CONSOLE never roasts (plan sections 20 and 31), regardless of settings.
@@ -161,10 +177,12 @@ export function buildAIContext(params: {
   // When they're on, the details are still only shown some of the time so
   // Mari doesn't recite them in every message (2026-09-30).
   const includeValorant =
-    params.includeValorant ?? valorantSpotlight(`${player.id}:${match.id}:${mode}`);
-  if (player.valorantReferencesEnabled) {
+    params.includeValorant ?? valorantSpotlight(`${player.id}:${seedKey}:${mode}`);
+  if (player.kind === "MEMBER") {
+    lines.push("Server member: NOT on the Premier team. Do not assume they play Valorant Premier, and do not treat them as part of the roster, the schedule or match attendance.",);
+  } else if (player.valorantReferencesEnabled) {
     if (includeValorant) {
-      lines.push("Valorant background (optional, skip it unless it makes the joke clearly better):", `Role: ${player.role}`);
+      lines.push("Valorant background (optional, skip it unless it makes the joke clearly better):", `Role: ${player.role ?? "player"}`);
       if (player.agents.length > 0) {
         lines.push(`Agents: ${player.agents.map((a) => cleanInline(a, 40)).join(", ")}`);
       }
@@ -186,9 +204,13 @@ export function buildAIContext(params: {
     `Banter style: ${mode === "CONSOLE" ? "NEUTRAL" : player.banterStyle} — ${BANTER_STYLE_GUIDANCE[mode === "CONSOLE" ? "NEUTRAL" : player.banterStyle]}`,
     "",
     "CURRENT EVENT",
-    `Upcoming Premier match (opponent unknown until it starts)`,
-    `Kickoff: ${formatMatchDateTime(match.scheduledAt, match.timezone)} (${match.timezone})`,
-    `Player response: ${ATTENDANCE_LABEL[mode]}`,
+    ...(params.event
+      ? params.event.lines
+      : [
+          `Upcoming Premier match (opponent unknown until it starts)`,
+          `Kickoff: ${formatMatchDateTime(match!.scheduledAt, match!.timezone)} (${match!.timezone})`,
+          `Player response: ${ATTENDANCE_LABEL[mode]}`,
+        ]),
     ...renderMemoryLines(memories),
     "",
     "FORBIDDEN TOPICS (never mention or joke about)",

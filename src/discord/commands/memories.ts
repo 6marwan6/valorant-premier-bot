@@ -62,7 +62,7 @@ const memoriesCommand: Command = {
 
     const player = await ctx.repositories.players.getByDiscordUserId(guildId, interaction.user.id);
     if (!player) {
-      await interaction.reply({ content: "You're not on the active roster, so there's nothing to look up.", ephemeral: true });
+      await interaction.reply({ content: "Mari doesn't know you yet, so there's nothing to look up. Ask an admin to add you with `/add-member` (or `/add-player` if you play Premier).", ephemeral: true });
       return;
     }
 

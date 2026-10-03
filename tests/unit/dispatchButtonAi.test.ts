@@ -58,7 +58,7 @@ function setup(
   const ctx = {
     logger,
     discord,
-    repositories: { players: { listActiveByGuild: vi.fn(async () => roster) } },
+    repositories: { players: { listActivePlayersByGuild: vi.fn(async () => roster), getByDiscordUserId: vi.fn(async () => undefined) } },
     services: {
       attendance: {
         recordAttendance: vi.fn(async () => ({
@@ -94,7 +94,7 @@ describe("dispatchButton — Phase 6 AI followup", () => {
     await t.run();
     expect(t.interaction.update).toHaveBeenCalledTimes(1);
     expect(t.respondToAttendance).toHaveBeenCalledWith(expect.objectContaining({ status: "PLAYING" }));
-    expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "LET'S GOOO", "user-1");
+    expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "LET'S GOOO", "user-1", expect.objectContaining({ embeds: expect.any(Array) }));
     expect(t.interaction.followUp).not.toHaveBeenCalled();
   });
 
@@ -155,7 +155,7 @@ describe("dispatchButton — Phase 6 AI followup", () => {
       await t.run();
       expect(t.conversations.startConsole).not.toHaveBeenCalled();
       expect(t.discord.sendDirectMessage).not.toHaveBeenCalled();
-      expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "LET'S GOOO", "user-1");
+      expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "LET'S GOOO", "user-1", expect.objectContaining({ embeds: expect.any(Array) }));
     }
   });
 
@@ -179,7 +179,7 @@ describe("dispatchButton — Phase 6 AI followup", () => {
       });
       await t.run();
       expect(t.discord.sendMentionMessage).toHaveBeenCalledTimes(1);
-      expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "can't make it this time 🟡", "user-1");
+      expect(t.discord.sendMentionMessage).toHaveBeenCalledWith("chan-1", "can't make it this time 🟡", "user-1", expect.objectContaining({ embeds: expect.any(Array) }));
     });
 
     it("a rejected public line does not skip the DM pointer (the DM was already opened)", async () => {

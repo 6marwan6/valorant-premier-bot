@@ -10,6 +10,7 @@ import { AiConversationRepository } from "./database/repositories/aiConversation
 import { MemoryRepository } from "./database/repositories/memoryRepository.js";
 import { MatchEventRepository } from "./database/repositories/matchEventRepository.js";
 import { VoiceJoinRepository } from "./database/repositories/voiceJoinRepository.js";
+import { ScheduleRepository } from "./database/repositories/scheduleRepository.js";
 import { MatchService } from "./modules/matches/matchService.js";
 import { AttendanceService } from "./modules/attendance/attendanceService.js";
 import { DiscordRestClient } from "./discord/discordRest.js";
@@ -18,6 +19,7 @@ import { ConversationService } from "./modules/ai/conversationService.js";
 import { MemoryService } from "./modules/memories/memoryService.js";
 import { TeamFactsService } from "./modules/ai/teamFactsService.js";
 import { PostMatchService } from "./modules/matches/postMatchService.js";
+import { ScheduleService } from "./modules/schedules/scheduleService.js";
 import { createLlmClient, type LlmClient } from "./services/ai/llmClient.js";
 
 /**
@@ -51,6 +53,7 @@ export interface AppContext {
     memories: MemoryRepository;
     matchEvents: MatchEventRepository;
     voiceJoins: VoiceJoinRepository;
+    schedules: ScheduleRepository;
   };
   services: {
     matches: MatchService;
@@ -59,6 +62,7 @@ export interface AppContext {
     conversations: ConversationService;
     memories: MemoryService;
     postMatch: PostMatchService;
+    schedules: ScheduleService;
   };
 }
 
@@ -79,6 +83,7 @@ export function buildAppContext(params: {
   const memoryRepo = new MemoryRepository(params.db);
   const matchEventRepo = new MatchEventRepository(params.db);
   const voiceJoinRepo = new VoiceJoinRepository(params.db);
+  const scheduleRepo = new ScheduleRepository(params.db);
   const { llm: llmOverride, ...contextParams } = params;
   const llm = llmOverride !== undefined ? llmOverride : createLlmClient(params.env, params.logger);
   // 2026-09-29: roster / next match / last result / teammates' public memories, read from the DB for the free-form chats.
@@ -97,6 +102,7 @@ export function buildAppContext(params: {
       memories: memoryRepo,
       matchEvents: matchEventRepo,
       voiceJoins: voiceJoinRepo,
+      schedules: scheduleRepo,
     },
     services: {
       matches: new MatchService(matchRepo, serverConfigRepo),
@@ -105,6 +111,7 @@ export function buildAppContext(params: {
       conversations: new ConversationService(aiConversationRepo, playerRepo, matchRepo, aiService, {}, memoryService),
       memories: memoryService,
       postMatch: new PostMatchService(matchRepo, matchEventRepo, playerRepo, serverConfigRepo, aiService, memoryService, params.logger),
+      schedules: new ScheduleService(scheduleRepo, serverConfigRepo, playerRepo),
     },
   };
 }

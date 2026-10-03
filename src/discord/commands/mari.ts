@@ -61,7 +61,7 @@ const mariCommand: Command = {
     const player = await ctx.repositories.players.getByDiscordUserId(guildId, interaction.user.id);
     if (!player || !player.active) {
       await interaction.reply({
-        content: "You're not on the active roster, so there's no one for Mari to chat with here.",
+        content: "Mari doesn't know you yet — ask an admin to add you with `/add-member` (or `/add-player` if you play Premier).",
         ephemeral: true,
       });
       return;

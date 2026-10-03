@@ -33,7 +33,7 @@ describe("command registry", () => {
     expect(json.dm_permission).toBe(false);
   });
 
-  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 + Phase 8 + Phase 10 + 2026-09-28 + 2026-09-30 + 2026-10-01 commands", () => {
+  it("registers all Phase 1 + Phase 2 + Phase 3 + Phase 5 + Phase 8 + Phase 10 + 2026-09-28 + 2026-09-30 + 2026-10-01 + 2026-10-03 (weekly schedule) commands", () => {
     const names = commands.map((c) => c.data.name).sort();
     expect(names).toEqual(
       [
@@ -54,6 +54,10 @@ describe("command registry", () => {
         "mari-say",
         "mari-join",
         "mari-voice",
+        "add-member",
+        "create-schedule",
+        "schedule-slot",
+        "cancel-schedule",
       ].sort(),
     );
   });

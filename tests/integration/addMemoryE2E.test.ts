@@ -159,7 +159,7 @@ describeIfDb("/add-memory — manual starter facts about players (2026-09-28)", 
 
     await dispatchCommand(interaction, ctx);
 
-    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringMatching(/isn't a registered player/i) }));
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringMatching(/isn't registered/i) }));
   });
 
   it("a PROTECTED admin-entered memory never reaches the AI, exactly like a PROTECTED memory from any other source (plan section 24)", async () => {

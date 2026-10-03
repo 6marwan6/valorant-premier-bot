@@ -6,7 +6,7 @@ import type { PlayerRow } from "../../database/schema/players.js";
 import type { MemoryRepository } from "../../database/repositories/memoryRepository.js";
 import type { MemoryRow } from "../../database/schema/memories.js";
 import { LlmError, type LlmClient } from "../../services/ai/llmClient.js";
-import { buildAIContext, forbiddenTopicsFor } from "./aiContextBuilder.js";
+import { buildAIContext, forbiddenTopicsFor, type AIContext, type AiEvent } from "./aiContextBuilder.js";
 import { modeForStatus, type AiMode, type ChatMode, type ConversationMode } from "./aiMode.js";
 import { parseAdminRewrite, parseAiOutput, parseChatOutput, parseMatchEventExtraction, parseTeamMessage, type ExtractedMatchEvent, type MemoryCandidate, type ParseTeamMessageResult } from "./aiOutput.js";
 import {
@@ -160,19 +160,67 @@ export class AiService {
     const includeMemories = params.includeMemories ?? memorySpotlight(`${params.player.id}:${params.match.id}:${mode}`, this.memorySpotlightOneIn);
     const memories = includeMemories ? await this.retrieveFor(params.player, mode, forbiddenTopics) : [];
     const context = buildAIContext({ player: params.player, mode, match: params.match, memories });
+    return this.generateReaction({
+      player: params.player,
+      mode,
+      context,
+      memories,
+      logFields: { matchId: params.match.id },
+    });
+  }
+
+  /**
+   * Mari's reaction to a weekly-schedule vote (2026-10-03): CELEBRATE for the
+   * first slot a player votes for, ROAST for "can't play any day". Same
+   * contract as respondToAttendance — one short line, never throws, never
+   * touches application state (plan sections 37/48), metadata-only logs — but
+   * the event it reacts to is described by `event` (built from the database by
+   * scheduleAiEvent.ts) instead of a match row. Never claims anything about
+   * the vote itself: the app already recorded it.
+   */
+  async respondToScheduleVote(params: {
+    player: PlayerRow;
+    mode: "CELEBRATE" | "ROAST";
+    event: AiEvent;
+    pollId: number;
+    includeMemories?: boolean;
+  }): Promise<AiOutcome> {
+    const fallback: AiOutcome = { text: AI_FALLBACK_MESSAGE, source: "fallback" };
+    if (!this.llm) return fallback;
+
+    const forbiddenTopics = forbiddenTopicsFor(params.player);
+    const includeMemories = params.includeMemories ?? memorySpotlight(`${params.player.id}:${params.event.seedKey}:${params.mode}`, this.memorySpotlightOneIn);
+    const memories = includeMemories ? await this.retrieveFor(params.player, params.mode, forbiddenTopics) : [];
+    const context = buildAIContext({ player: params.player, mode: params.mode, event: params.event, memories });
+    return this.generateReaction({ player: params.player, mode: params.mode, context, memories, logFields: { pollId: params.pollId } });
+  }
+
+  /** The shared tail of the single-shot reactions: call the model, validate the output (incl. protected topics), fall back safely. */
+  private async generateReaction(args: {
+    player: PlayerRow;
+    mode: AiMode;
+    context: AIContext;
+    memories: MemoryRow[];
+    logFields: Record<string, unknown>;
+  }): Promise<AiOutcome> {
+    const fallback: AiOutcome = { text: AI_FALLBACK_MESSAGE, source: "fallback" };
+    const { player, mode, context, memories } = args;
+    const llm = this.llm;
+    if (!llm) return fallback;
+
     const startedAt = Date.now();
     // Plan sections 51/58: metadata only — never prompt or response content.
     const base = {
       event: "ai.response",
       mode,
-      playerId: params.player.id,
-      matchId: params.match.id,
-      model: this.llm.model,
+      playerId: player.id,
+      ...args.logFields,
+      model: llm.model,
       memoryCount: memories.length,
     };
 
     try {
-      const result = await this.llm.complete({ system: context.system, user: context.user });
+      const result = await llm.complete({ system: context.system, user: context.user });
       const metrics = {
         latencyMs: Date.now() - startedAt,
         inputTokens: result.inputTokens,

@@ -2,6 +2,7 @@ import type { AppContext } from "../../appContext.js";
 import { planReminders } from "../../modules/reminders/reminderScheduling.js";
 import { buildReminderNudgeMessage } from "../../modules/reminders/reminderMessages.js";
 import { buildRosterMessage } from "../../modules/attendance/rosterMessage.js";
+import { runScheduleReminders } from "./scheduleReminderJob.js";
 
 export interface ReminderCronSummary {
   guildsProcessed: number;
@@ -9,6 +10,10 @@ export interface ReminderCronSummary {
   remindersSkippedTerminal: number;
   remindersSent: number;
   remindersFailed: number;
+  /** Weekly-schedule reminders (scheduleReminderJob.ts), counted separately from the single-match ones above. */
+  slotRemindersSent: number;
+  slotRemindersSkipped: number;
+  slotRemindersFailed: number;
 }
 
 /**
@@ -89,9 +94,9 @@ export async function runReminderCronJob(ctx: AppContext, now: Date = new Date()
         const prepared = await ctx.services.attendance.prepareAnnouncement(match.guildId, match.id);
         if (!prepared.ok) throw new Error(prepared.error);
 
-        const roster = await ctx.repositories.players.listActiveByGuild(match.guildId);
-        const { content, components } = buildRosterMessage({ ...match, status: "CONFIRMATION_OPEN" }, [], roster);
-        const sent = await ctx.discord.sendChannelMessage(prepared.value.channelId, { content, components });
+        const roster = await ctx.repositories.players.listActivePlayersByGuild(match.guildId);
+        const { content, embeds, components } = buildRosterMessage({ ...match, status: "CONFIRMATION_OPEN" }, [], roster);
+        const sent = await ctx.discord.sendChannelMessage(prepared.value.channelId, { content, embeds, components });
         await ctx.services.attendance.recordAnnouncement(match.id, prepared.value.channelId, sent.id);
         await ctx.repositories.reminders.markSent(claimed.id, prepared.value.channelId, sent.id);
         openedThisTick.set(match.id, { channelId: prepared.value.channelId, messageId: sent.id });
@@ -117,7 +122,7 @@ export async function runReminderCronJob(ctx: AppContext, now: Date = new Date()
         let hypeText: string | null = null;
         if (isClosestToKickoff) {
           try {
-            const roster = await ctx.repositories.players.listActiveByGuild(match.guildId);
+            const roster = await ctx.repositories.players.listActivePlayersByGuild(match.guildId);
             const hype = await ctx.services.ai.generateMatchHype({ match, roster });
             if (hype.source === "ai") hypeText = hype.text;
           } catch (err) {
@@ -160,11 +165,20 @@ export async function runReminderCronJob(ctx: AppContext, now: Date = new Date()
     }
   }
 
+  // Weekly schedule slots (2026-10-03): same tick, own tables. A failure here must never cost the single-match reminders above, nor the other way round.
+  let slotSummary = { slotRemindersSent: 0, slotRemindersSkipped: 0, slotRemindersFailed: 0 };
+  try {
+    slotSummary = await runScheduleReminders(ctx, configs, now);
+  } catch (err) {
+    ctx.logger.error({ event: "schedule.cronFailed", err: err instanceof Error ? err.message : String(err) }, "Weekly schedule reminder pass failed");
+  }
+
   return {
     guildsProcessed: configs.length,
     matchesReconciled,
     remindersSkippedTerminal,
     remindersSent,
     remindersFailed,
+    ...slotSummary,
   };
 }

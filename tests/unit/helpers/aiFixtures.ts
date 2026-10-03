@@ -8,6 +8,7 @@ export function makePlayer(overrides: Partial<PlayerRow> = {}): PlayerRow {
     guildId: "guild-1",
     discordUserId: "user-1",
     displayName: "Ahmed",
+    kind: "PLAYER",
     role: "DUELIST",
     agents: ["Jett", "Raze"],
     preferredAgent: "Jett",

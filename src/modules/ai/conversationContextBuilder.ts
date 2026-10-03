@@ -157,7 +157,9 @@ export function buildConversationContext(params: {
 
   const lines: string[] = ["<application_data>", "PLAYER", `Name: ${cleanInline(player.displayName, 40)}`];
 
-  if (player.valorantReferencesEnabled) {
+  if (player.kind === "MEMBER") {
+    lines.push("Server member: NOT on the Premier team. Do not assume they play Valorant Premier, and do not treat them as part of the roster, the schedule or match attendance.",);
+  } else if (player.valorantReferencesEnabled) {
     // Only when the player is actually talking about the game (2026-09-30).
     if (params.includeValorant ?? chatMentionsValorant(transcript, player.agents)) {
       lines.push("Valorant background (optional, skip it unless it fits):", `Role: ${player.role}`);
@@ -443,7 +445,9 @@ function buildChatContext(mode: ChatMode, params: ChatContextParams): Conversati
   const lines: string[] = ["<application_data>", "PLAYER (the person you are talking to)", `Name: ${cleanInline(player.displayName, 40)}`];
 
   const includeValorant = params.includeValorant ?? chatMentionsValorant(params.transcript, player.agents);
-  if (player.valorantReferencesEnabled) {
+  if (player.kind === "MEMBER") {
+    lines.push("Server member: NOT on the Premier team. Do not assume they play Valorant Premier, and do not treat them as part of the roster, the schedule or match attendance.",);
+  } else if (player.valorantReferencesEnabled) {
     if (includeValorant) {
       lines.push("Valorant background (optional, skip it unless it fits what they are saying):", `Role: ${player.role}`);
       if (player.agents.length > 0) lines.push(`Agents: ${player.agents.map((a) => cleanInline(a, 40)).join(", ")}`);

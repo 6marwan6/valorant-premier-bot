@@ -24,10 +24,11 @@ export async function syncAnnouncementIfPosted(
   if (!match.announcementChannelId || !match.announcementMessageId) return;
 
   try {
-    const roster = await ctx.repositories.players.listActiveByGuild(match.guildId);
-    const { content, components } = buildRosterMessage(match, attendanceRows, roster);
+    const roster = await ctx.repositories.players.listActivePlayersByGuild(match.guildId);
+    const { content, embeds, components } = buildRosterMessage(match, attendanceRows, roster);
     await ctx.discord.editChannelMessage(match.announcementChannelId, match.announcementMessageId, {
       content,
+      embeds,
       components,
     });
   } catch (err) {

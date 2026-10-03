@@ -105,7 +105,7 @@ export function buildMatchHypeContext(params: { match: MatchRow; roster: PlayerR
       if (player.valorantReferencesEnabled) {
         const agent = player.preferredAgent ?? player.agents[0] ?? null;
         lines.push(
-          `- ${cleanInline(player.displayName, 40)} (${player.role}${agent ? `, ${cleanInline(agent, 40)}` : ""})`,
+          `- ${cleanInline(player.displayName, 40)} (${player.role ?? "player"}${agent ? `, ${cleanInline(agent, 40)}` : ""})`,
         );
       } else {
         lines.push(`- ${cleanInline(player.displayName, 40)} (do not mention role, agents or Valorant specifics)`);

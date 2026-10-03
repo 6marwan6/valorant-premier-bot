@@ -101,7 +101,7 @@ async function handleDm(message: Message): Promise<void> {
   if (!player || !player.active) {
     // Not on the roster: say so once, kindly, rather than silently ignoring a person who DMed the bot.
     await discord.sendDirectMessage(message.channelId, {
-      content: "I only chat with players on the team roster — ask an admin to add you with `/add-player`.",
+      content: "I only chat with people an admin has registered — ask them to add you with `/add-member` (or `/add-player` if you play Premier).",
     });
     return;
   }

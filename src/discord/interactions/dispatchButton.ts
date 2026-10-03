@@ -2,13 +2,18 @@ import type { ButtonInteraction } from "discord.js";
 import type { AppContext } from "../../appContext.js";
 import { parseAttendanceCustomId } from "../../modules/attendance/customId.js";
 import { buildRosterMessage } from "../../modules/attendance/rosterMessage.js";
+import { buildFullSquadCard, buildReactionCard } from "../../modules/attendance/reactionCard.js";
 import { resolveDisplayName } from "../displayName.js";
 import { startConsoleDm } from "../consoleConversation.js";
 import { isMemoryDeleteCustomId } from "../../modules/memories/memoryManageCustomId.js";
 import { handleMemoryDeleteButton } from "../memoryDelete.js";
+import { isScheduleCustomId } from "../../modules/schedules/scheduleCustomId.js";
+import { dispatchScheduleButton } from "./dispatchScheduleButton.js";
+import { avatarUrlOf } from "../avatarUrl.js";
 import type { MatchRow } from "../../database/schema/matches.js";
 import type { PlayerRow } from "../../database/schema/players.js";
 import type { AttendanceRow } from "../../database/schema/attendance.js";
+import type { MentionCard } from "../discordRest.js";
 
 /**
  * Plan section 15 step 6 / section 17: "Start the corresponding AI flow".
@@ -45,9 +50,12 @@ import type { AttendanceRow } from "../../database/schema/attendance.js";
  * for CELEBRATE/ROAST it would leave the player with no reply at all
  * (plan sections 48 and 66 #8).
  */
-async function tryPostMention(ctx: AppContext, params: { channelId: string; text: string; userId: string; matchId: number; kind: string }): Promise<boolean> {
+async function tryPostMention(
+  ctx: AppContext,
+  params: { channelId: string; text: string; userId: string; matchId: number; kind: string; card?: MentionCard },
+): Promise<boolean> {
   try {
-    await ctx.discord.sendMentionMessage(params.channelId, params.text, params.userId);
+    await ctx.discord.sendMentionMessage(params.channelId, params.text, params.userId, params.card);
     return true;
   } catch (err) {
     ctx.logger.warn(
@@ -58,15 +66,50 @@ async function tryPostMention(ctx: AppContext, params: { channelId: string; text
   }
 }
 
+/**
+ * The deterministic "everyone's in" moment: posted once, when THIS click is
+ * the one that makes every active player PLAYING. A repeated click
+ * (changed=false) never re-fires it, it needs no LLM, and a Discord failure
+ * is swallowed — attendance is already recorded (plan sections 48, 66 #8).
+ */
+async function maybePostFullSquad(
+  ctx: AppContext,
+  params: { match: MatchRow; status: AttendanceRow["status"]; changed: boolean; attendanceRows: AttendanceRow[]; roster: PlayerRow[] },
+): Promise<void> {
+  const channelId = params.match.announcementChannelId;
+  if (!channelId || !params.changed || params.status !== "PLAYING" || params.roster.length === 0) return;
+  const playingIds = new Set(params.attendanceRows.filter((r) => r.status === "PLAYING").map((r) => r.discordUserId));
+  if (!params.roster.every((p) => playingIds.has(p.discordUserId))) return;
+  try {
+    const card = buildFullSquadCard(params.match, params.roster, Math.floor(params.match.scheduledAt.getTime() / 1000));
+    await ctx.discord.sendChannelMessage(channelId, { embeds: card.embeds });
+  } catch (err) {
+    ctx.logger.warn(
+      { event: "attendance.fullSquadPostFailed", matchId: params.match.id, err: err instanceof Error ? err.message : String(err) },
+      "Full-squad celebration failed (attendance is still recorded)",
+    );
+  }
+}
+
 async function sendAiFollowUp(
   interaction: ButtonInteraction,
   ctx: AppContext,
-  params: { match: MatchRow; status: AttendanceRow["status"]; changed: boolean; roster: PlayerRow[] },
+  params: { match: MatchRow; status: AttendanceRow["status"]; changed: boolean; roster: PlayerRow[]; attendanceRows: AttendanceRow[] },
 ): Promise<void> {
   if (!params.changed || !ctx.services.ai.enabled) return;
   const player = params.roster.find((p) => p.discordUserId === interaction.user.id);
   if (!player) return;
   const channelId = params.match.announcementChannelId;
+  const cardFor = (text: string): MentionCard =>
+    buildReactionCard({
+      player,
+      match: params.match,
+      status: params.status,
+      text,
+      attendanceRows: params.attendanceRows,
+      rosterSize: params.roster.length,
+      avatarUrl: avatarUrlOf(interaction),
+    });
 
   try {
     await ctx.services.conversations.endForAttendanceChange(player.id, params.match.id, params.status);
@@ -76,7 +119,8 @@ async function sendAiFollowUp(
       const started = await startConsoleDm(ctx, { player, match: params.match });
       if (started === "already_open") return;
       if (channelId) {
-        await tryPostMention(ctx, { channelId, text: "can't make it this time 🟡", userId: player.discordUserId, matchId: params.match.id, kind: "wants_note" });
+        const text = "can't make it this time 🟡";
+        await tryPostMention(ctx, { channelId, text, userId: player.discordUserId, matchId: params.match.id, kind: "wants_note", card: cardFor(text) });
       }
       if (started === "started") {
         await interaction.followUp({ content: "📩 I sent you a DM, let's talk there.", ephemeral: true });
@@ -93,7 +137,7 @@ async function sendAiFollowUp(
     });
 
     if (params.status !== "WANTS_TO_BUT_CANNOT" && outcome.source === "ai" && channelId) {
-      const posted = await tryPostMention(ctx, { channelId, text: outcome.text, userId: player.discordUserId, matchId: params.match.id, kind: "reaction" });
+      const posted = await tryPostMention(ctx, { channelId, text: outcome.text, userId: player.discordUserId, matchId: params.match.id, kind: "reaction", card: cardFor(outcome.text) });
       if (posted) return;
       // Public post failed: fall through to the private message below.
     }
@@ -116,7 +160,7 @@ async function sendAiFollowUp(
 }
 
 /**
- * Routes a button click. Two kinds exist: attendance buttons (custom_id
+ * Routes a button click. Three kinds exist: weekly-schedule votes (`sched:...`, handled by dispatchScheduleButton.ts); attendance buttons (custom_id
  * `attendance:<matchId>:<status>`, plan section 15); and the memory
  * `/memories`-and-Forget-note delete buttons (`memory:del:<id>`, plan
  * sections 42/43 — since the section 21 revision, this is the only memory
@@ -131,6 +175,12 @@ async function sendAiFollowUp(
 export async function dispatchButton(interaction: ButtonInteraction, ctx: AppContext): Promise<void> {
   if (isMemoryDeleteCustomId(interaction.customId)) {
     await handleMemoryDeleteButton(interaction, ctx);
+    return;
+  }
+
+  // Weekly schedule votes (2026-10-03): `sched:<pollId>:...` — see dispatchScheduleButton.ts.
+  if (isScheduleCustomId(interaction.customId)) {
+    await dispatchScheduleButton(interaction, ctx);
     return;
   }
 
@@ -157,6 +207,13 @@ export async function dispatchButton(interaction: ButtonInteraction, ctx: AppCon
 
   const startedAt = Date.now();
   try {
+    // Match attendance is a Premier thing (2026-10-03): a server member who taps a button gets a clear private answer, nothing is recorded.
+    const clicker = await ctx.repositories.players.getByDiscordUserId(guildId, interaction.user.id);
+    if (clicker?.active && clicker.kind === "MEMBER") {
+      await interaction.reply({ content: "❌ Match attendance is for Premier players only — you're registered as a server member.", ephemeral: true });
+      return;
+    }
+
     const result = await ctx.services.attendance.recordAttendance({
       guildId,
       matchId: parsed.matchId,
@@ -186,12 +243,12 @@ export async function dispatchButton(interaction: ButtonInteraction, ctx: AppCon
     }
 
     const { match, attendanceRows } = result.value;
-    const roster = await ctx.repositories.players.listActiveByGuild(guildId);
-    const { content, components } = buildRosterMessage(match, attendanceRows, roster);
+    const roster = await ctx.repositories.players.listActivePlayersByGuild(guildId);
+    const { content, embeds, components } = buildRosterMessage(match, attendanceRows, roster);
     // update() edits the message the button itself is attached to — the
     // one shared public message everyone sees (plan section 16), no
     // separate fetch-by-id needed for this path.
-    await interaction.update({ content, components });
+    await interaction.update({ content, embeds, components });
 
     ctx.logger.info(
       {
@@ -205,7 +262,11 @@ export async function dispatchButton(interaction: ButtonInteraction, ctx: AppCon
       "Attendance recorded",
     );
 
-    await sendAiFollowUp(interaction, ctx, { match, status: parsed.status, changed: result.value.changed, roster });
+    const { changed } = result.value;
+    // Deterministic and AI-independent, so it runs before the AI flow (which
+    // returns early in several branches) and works with the AI switched off.
+    await maybePostFullSquad(ctx, { match, status: parsed.status, changed, attendanceRows, roster });
+    await sendAiFollowUp(interaction, ctx, { match, status: parsed.status, changed, roster, attendanceRows });
   } catch (err) {
     const cause = err instanceof Error && "cause" in err ? (err as { cause?: unknown }).cause : undefined;
     ctx.logger.error(

@@ -1,3 +1,4 @@
+import { visibleText } from "../unit/helpers/embedText.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ChatInputCommandInteraction, ButtonInteraction } from "discord.js";
 import type { Pool } from "pg";
@@ -120,7 +121,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
     expect(fakeDiscord.sendChannelMessage).toHaveBeenCalledTimes(1);
     const [sentChannelId, sentPayload] = fakeDiscord.sendChannelMessage.mock.calls[0]!;
     expect(sentChannelId).toBe(channelId);
-    expect(sentPayload.content).toContain(formatMatchDateTime(match.scheduledAt, match.timezone)); // header shows the kickoff (no opponent anymore)
+    expect(visibleText(sentPayload)).toContain(formatMatchDateTime(match.scheduledAt, match.timezone)); // header shows the kickoff (no opponent anymore)
     expect(sentPayload.components).toHaveLength(1); // 3 buttons in one row
 
     const refetched = (await ctx.services.matches.listMatches(guildId)).find((m) => m.id === match.id)!;
@@ -159,9 +160,9 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
     expect(reply).not.toHaveBeenCalled(); // success path uses update(), not reply()
     expect(update).toHaveBeenCalledTimes(1);
     const payload = update.mock.calls[0]![0];
-    expect(payload.content).toContain("Ahmed");
-    expect(payload.content).toContain("🟢 Playing");
-    expect(payload.content).toContain("Responded: 1");
+    expect(visibleText(payload)).toContain("Ahmed");
+    expect(visibleText(payload)).toContain("🟢 Playing");
+    expect(visibleText(payload)).toContain("Responded: 1");
     expect(payload.components).toHaveLength(1);
 
     const withAttendance = await ctx.services.attendance.getMatchWithAttendance(guildId, posted.id);
@@ -187,8 +188,8 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
     expect(withAttendance?.attendanceRows[0]!.status).toBe("CANNOT_PLAY");
 
     const payload = second.update.mock.calls[0]![0];
-    expect(payload.content).toContain("🔴 Can't play");
-    expect(payload.content).not.toContain("🟢 Playing"); // section omitted once empty
+    expect(visibleText(payload)).toContain("🔴 Can't play");
+    expect(visibleText(payload)).not.toContain("🟢 Playing"); // section omitted once empty
   });
 
   it("/cancel-match on an already-posted match disables buttons and refreshes the public message", async () => {
@@ -217,12 +218,12 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
     expect(fakeDiscord.editChannelMessage.mock.calls.length).toBe(editsBefore + 1);
     expect(editCallsForThisMessage).toHaveLength(1);
     const editedPayload = editCallsForThisMessage[0]![2];
-    expect(editedPayload.content).toContain("CANCELLED");
+    expect(visibleText(editedPayload)).toContain("CANCELLED");
     expect(editedPayload.components).toHaveLength(0);
     // Attendance history stays visible even though the match is cancelled.
-    expect(editedPayload.content).toContain("Omar");
+    expect(visibleText(editedPayload)).toContain("Omar");
     // The tracked message state itself reflects the edit.
-    expect(fakeDiscord.messages.get(messageId)?.content).toContain("CANCELLED");
+    expect(visibleText(fakeDiscord.messages.get(messageId)!)).toContain("CANCELLED");
   });
 
   it("a button click on a cancelled match is rejected privately and the public message is left untouched", async () => {
@@ -261,7 +262,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
     const posted = (await ctx.services.matches.listMatches(guildId)).find((m) => m.id === match.id)!;
     const messageId = posted.announcementMessageId!;
 
-    const contentBefore = fakeDiscord.messages.get(messageId)?.content;
+    const contentBefore = visibleText(fakeDiscord.messages.get(messageId)!);
 
     await dispatchCommand(
       fakeSlashInteraction("edit-match", guildId, {
@@ -275,7 +276,7 @@ describeIfDb("Phase 3 — /post-match, attendance buttons, announcement sync (in
     // The header shows the kickoff time (no opponent to show anymore), so
     // the refreshed public message must now carry the edited time.
     const edited = (await ctx.services.matches.listMatches(guildId)).find((m) => m.id === match.id)!;
-    const contentAfter = fakeDiscord.messages.get(messageId)?.content;
+    const contentAfter = visibleText(fakeDiscord.messages.get(messageId)!);
     expect(contentAfter).not.toBe(contentBefore);
     expect(contentAfter).toContain(formatMatchDateTime(edited.scheduledAt, edited.timezone));
   });

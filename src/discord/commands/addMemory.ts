@@ -87,7 +87,7 @@ const addMemoryCommand: Command = {
     const player = await ctx.repositories.players.getByDiscordUserId(guard.guildId, target.id);
     if (!player) {
       await interaction.reply({
-        content: `❌ ${target.username} isn't a registered player. Use \`/add-player\` first.`,
+        content: `❌ ${target.username} isn't registered. Use \`/add-member\` (or \`/add-player\` for a Premier player) first.`,
         ephemeral: true,
       });
       return;

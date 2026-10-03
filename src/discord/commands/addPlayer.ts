@@ -76,8 +76,40 @@ const addPlayerCommand: Command = {
       preferredAgent = preferredAgentRaw.trim();
     }
 
+    // Promoting an existing server member (2026-10-03): keep their AI settings, protected topics and memories — resetting
+    // protected topics here would silently lift privacy filters they (or an admin) set. Only the Premier fields change.
+    const existing = await ctx.repositories.players.getByDiscordUserId(guard.guildId, target.id);
+    if (existing && existing.active && existing.kind === "MEMBER") {
+      const promoted = await ctx.repositories.players.update(guard.guildId, target.id, {
+        kind: "PLAYER",
+        displayName: target.displayName,
+        role,
+        agents: parsedAgents.values,
+        preferredAgent,
+        ...(interaction.options.getInteger("roast_intensity") !== null ? { roastIntensity } : {}),
+      });
+      if (!promoted) {
+        await interaction.reply({ content: "Something went wrong updating that profile. Please try again.", ephemeral: true });
+        return;
+      }
+      ctx.logger.info({ event: "member.promoted", guildId: guard.guildId, discordUserId: target.id }, "Server member promoted to Premier player");
+      await interaction.reply({
+        content: [
+          `✅ **Promoted** <@${target.id}> from server member to Premier player (their memories and AI settings are kept).`,
+          `• Role: ${promoted.role}`,
+          `• Agents: ${promoted.agents.join(", ")}`,
+          `• Preferred agent: ${promoted.preferredAgent ?? "_not set_"}`,
+          `• Roast intensity: ${promoted.roastIntensity}`,
+        ].join("\n"),
+        ephemeral: true,
+      });
+      return;
+    }
+
     const { player, created } = await ctx.repositories.players.upsertByDiscordUserId(guard.guildId, target.id, {
       displayName: target.displayName,
+      kind: "PLAYER",
+      active: true,
       role,
       agents: parsedAgents.values,
       preferredAgent,

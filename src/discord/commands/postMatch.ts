@@ -53,15 +53,15 @@ const postMatchCommand: Command = {
     // is driven by status, and the message we're sending right now IS the
     // "open for confirmation" message — so build it against the status
     // this match is *about to have*, not its current row.
-    const roster = await ctx.repositories.players.listActiveByGuild(guard.guildId);
-    const { content, components } = buildRosterMessage({ ...match, status: "CONFIRMATION_OPEN" }, [], roster);
+    const roster = await ctx.repositories.players.listActivePlayersByGuild(guard.guildId);
+    const { content, embeds, components } = buildRosterMessage({ ...match, status: "CONFIRMATION_OPEN" }, [], roster);
 
     // No channel-type check here: /setup's match_channel option is
     // already restricted to ChannelType.GuildText (see setup.ts), so a
     // configured matchChannelId is guaranteed sendable. Any unexpected
     // REST failure (channel deleted, bot kicked, etc.) surfaces through
     // dispatchCommand's generic error handling.
-    const sent = await ctx.discord.sendChannelMessage(channelId, { content, components });
+    const sent = await ctx.discord.sendChannelMessage(channelId, { content, embeds, components });
 
     await ctx.services.attendance.recordAnnouncement(match.id, channelId, sent.id);
 

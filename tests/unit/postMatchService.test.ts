@@ -22,7 +22,7 @@ function build(overrides: {
   const matchEvents = {
     createMany: vi.fn(async (inputs: any[]) => inputs.map((i, n) => ({ id: n + 1, createdAt: new Date(), ...i }) as MatchEventRow)),
   };
-  const players = { listActiveByGuild: vi.fn(async () => overrides.roster ?? [makePlayer({ id: 1, displayName: "Ahmed" })]) };
+  const players = { listActivePlayersByGuild: vi.fn(async () => overrides.roster ?? [makePlayer({ id: 1, displayName: "Ahmed" })]) };
   const serverConfig = {
     getByGuildId: vi.fn(async () => ({ matchChannelId: "matchChannelId" in overrides ? overrides.matchChannelId : "chan-1" })),
   };

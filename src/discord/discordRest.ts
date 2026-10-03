@@ -15,6 +15,11 @@ export interface DiscordChannelMessage {
   author: { id: string; bot?: boolean };
 }
 
+/** A decorated public reaction (attendance banter): the `<@user>` ping goes in `content`, everything else in the embed. */
+export interface MentionCard {
+  embeds: EmbedBuilder[];
+}
+
 export interface ReplyPayload {
   /** Optional now that embeds exist (reminderMessages.ts, Phase 9+): Discord requires at least one of content/embeds, never both empty — callers are responsible for supplying one or the other. */
   content?: string;
@@ -151,16 +156,19 @@ export class DiscordRestClient {
    * `allowed_mentions` restricts pings to that user, so nothing else in the
    * text — model-written or otherwise — can ping anyone.
    */
-  async sendMentionMessage(channelId: string, content: string, mentionUserId: string): Promise<{ id: string }> {
-    return (await this.rest.post(Routes.channelMessages(channelId), {
-      body: { content: `<@${mentionUserId}> ${content}`, allowed_mentions: { parse: [], users: [mentionUserId] } },
-    })) as { id: string };
+  async sendMentionMessage(channelId: string, content: string, mentionUserId: string, card?: MentionCard): Promise<{ id: string }> {
+    // With a card the text lives in the embed (an embed never pings, so the
+    // ping stays in `content`); without one it is the plain `<@user> text`.
+    const body = card
+      ? { content: `<@${mentionUserId}>`, embeds: serializeEmbeds(card.embeds), allowed_mentions: { parse: [], users: [mentionUserId] } }
+      : { content: `<@${mentionUserId}> ${content}`, allowed_mentions: { parse: [], users: [mentionUserId] } };
+    return (await this.rest.post(Routes.channelMessages(channelId), { body })) as { id: string };
   }
 
   /** Edits an existing message by id — used by announcementSync.ts (edit/cancel outside a button click). */
   async editChannelMessage(channelId: string, messageId: string, payload: ReplyPayload): Promise<void> {
     await this.rest.patch(Routes.channelMessage(channelId, messageId), {
-      body: { content: payload.content, components: serializeComponents(payload.components) },
+      body: { content: payload.content, embeds: serializeEmbeds(payload.embeds), components: serializeComponents(payload.components) },
     });
   }
 
@@ -175,6 +183,7 @@ export class DiscordRestClient {
     await this.rest.patch(Routes.webhookMessage(this.applicationId, interactionToken, "@original"), {
       body: {
         content: payload.content,
+        embeds: serializeEmbeds(payload.embeds),
         components: serializeComponents(payload.components),
         allowed_mentions: payload.suppressMentions ? { parse: [] } : undefined,
       },
@@ -218,6 +227,7 @@ export class DiscordRestClient {
     await this.rest.post(Routes.webhook(this.applicationId, interactionToken), {
       body: {
         content: payload.content,
+        embeds: serializeEmbeds(payload.embeds),
         components: serializeComponents(payload.components),
         flags: payload.ephemeral ? MessageFlags.Ephemeral : undefined,
       },

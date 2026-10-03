@@ -7,7 +7,7 @@ import type { AttendanceRow } from "../../database/schema/attendance.js";
 import type { MatchRow } from "../../database/schema/matches.js";
 import type { MatchEventRow } from "../../database/schema/matchEvents.js";
 import type { MemoryRow } from "../../database/schema/memories.js";
-import type { PlayerRow } from "../../database/schema/players.js";
+import { isPremierPlayer, type PlayerRow } from "../../database/schema/players.js";
 import { forbiddenTopicsFor } from "./aiContextBuilder.js";
 import { isEligible, isRelevantTo, scoreMemory } from "../memories/memoryRetrieval.js";
 
@@ -71,7 +71,7 @@ export interface ServerChatFacts {
   nextMatch: NextMatchFacts | null;
   lastMatch: LastMatchFacts | null;
   sharedMemories: SharedMemoryFact[];
-  /** Union of every active player's protected topics — also validates the model's output for a public reply. */
+  /** Union of every active profile's protected topics (Premier players and server members) — also validates the model's output for a public reply. */
   rosterForbiddenTopics: string[];
 }
 
@@ -94,9 +94,14 @@ export class TeamFactsService {
 
   async load(params: { guildId: string; chatterPlayerId: number; queryText?: string; now?: Date }): Promise<ServerChatFacts> {
     const now = params.now ?? new Date();
-    const roster = await this.players.listActiveByGuild(params.guildId);
+    // Everyone Mari knows, vs. the Premier roster (2026-10-03): the roster,
+    // attendance and match facts are the Premier team's; but a public reply is
+    // read by — and may mention — server members too, so protected topics and
+    // shareable memories cover every active profile, members included.
+    const everyone = await this.players.listActiveByGuild(params.guildId);
+    const roster = everyone.filter(isPremierPlayer);
 
-    const rosterForbiddenTopics = unionForbiddenTopics(roster);
+    const rosterForbiddenTopics = unionForbiddenTopics(everyone);
 
     const [upcoming, completed] = await Promise.all([
       this.matches.listByGuildAndStatuses(params.guildId, ["SCHEDULED", "CONFIRMATION_OPEN"]),
@@ -109,7 +114,7 @@ export class TeamFactsService {
     const [nextMatch, lastMatch, sharedMemories] = await Promise.all([
       nextMatchRow ? this.loadNextMatch(nextMatchRow, roster) : Promise.resolve(null),
       lastMatchRow ? this.loadLastMatch(lastMatchRow, roster) : Promise.resolve(null),
-      this.loadSharedMemories(roster, params.chatterPlayerId, rosterForbiddenTopics, params.queryText, now),
+      this.loadSharedMemories(everyone, params.chatterPlayerId, rosterForbiddenTopics, params.queryText, now),
     ]);
 
     return {

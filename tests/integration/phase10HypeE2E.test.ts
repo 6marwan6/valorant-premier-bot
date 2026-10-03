@@ -1,3 +1,4 @@
+import { visibleText } from "../unit/helpers/embedText.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
 import { createDatabase, type Database } from "../../src/database/client.js";
@@ -192,8 +193,8 @@ describeIfDb("Phase 10 — MATCH_HYPE in the reminder cron job (integration, pla
 
     const [, payload] = fakeD.callsForChannel(channelId).at(-1)!;
     expect(payload.components).toHaveLength(1); // the roster announcement with buttons
-    expect(payload.content).not.toContain("🔥");
-    expect(payload.embeds).toBeUndefined();
+    expect(visibleText(payload)).not.toContain("🔥"); // the roster card carries no hype header
+    expect(payload.embeds).toHaveLength(1); // ...it is the match card itself, not a nudge embed
     expect(llmCallsFor(llm, tag)).toHaveLength(0);
   });
 });

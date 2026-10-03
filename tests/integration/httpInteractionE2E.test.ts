@@ -1,3 +1,4 @@
+import { visibleText } from "../unit/helpers/embedText.js";
 import crypto from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
@@ -199,7 +200,7 @@ describeIfDb("handleDiscordInteraction — full HTTP flow (integration)", () => 
       { status: 200, body: { type: InteractionResponseType.DeferredMessageUpdate } },
     ]);
     expect(fakeDiscord.originalEdits).toHaveLength(1);
-    expect(fakeDiscord.originalEdits[0]!.content).toContain("Ahmed");
+    expect(visibleText(fakeDiscord.originalEdits[0]!)).toContain("Ahmed");
     expect(fakeDiscord.followups).toHaveLength(0); // success path never sends a separate followup
 
     const withAttendance = await ctx.services.attendance.getMatchWithAttendance(guildId, created.value.id);

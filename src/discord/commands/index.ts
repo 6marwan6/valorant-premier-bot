@@ -16,6 +16,10 @@ import addMemoryCommand from "./addMemory.js";
 import mariSayCommand from "./mariSay.js";
 import mariJoinCommand from "./mariJoin.js";
 import mariVoiceCommand from "./mariVoice.js";
+import createScheduleCommand from "./createSchedule.js";
+import addMemberCommand from "./addMember.js";
+import scheduleSlotCommand from "./scheduleSlot.js";
+import cancelScheduleCommand from "./cancelSchedule.js";
 
 /**
  * Central command registry. Every command file exports a default `Command`
@@ -35,6 +39,7 @@ import mariVoiceCommand from "./mariVoice.js";
  * 2026-09-30: /mari-say (admin has Mari post a message verbatim in a channel).
  * 2026-10-01: /mari-join (admin tells Mari which voice channel to join, and when).
  * 2026-10-01 (d): /mari-voice (admin has Mari send a voice note, like /mari-say but spoken).
+ * 2026-10-03: /add-member (server members who aren't Premier players), /create-schedule, /schedule-slot, /cancel-schedule (weekly schedule voting — see docs/Plan_Amendment_Weekly_Schedule.md).
  */
 export const commands: Command[] = [
   setupCommand,
@@ -54,6 +59,10 @@ export const commands: Command[] = [
   mariSayCommand,
   mariJoinCommand,
   mariVoiceCommand,
+  createScheduleCommand,
+  addMemberCommand,
+  scheduleSlotCommand,
+  cancelScheduleCommand,
 ];
 
 export const commandsByName: Map<string, Command> = new Map(

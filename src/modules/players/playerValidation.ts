@@ -8,7 +8,7 @@ import type { PlayerRow } from "../../database/schema/players.js";
  * text, so there's no typo/validation path to get wrong in the first
  * place — see addPlayer.ts / editPlayer.ts.
  */
-export const PLAYER_ROLE_CHOICES: Array<{ name: string; value: PlayerRow["role"] }> = [
+export const PLAYER_ROLE_CHOICES: Array<{ name: string; value: NonNullable<PlayerRow["role"]> }> = [
   { name: "Duelist", value: "DUELIST" },
   { name: "Initiator", value: "INITIATOR" },
   { name: "Controller", value: "CONTROLLER" },

@@ -16,6 +16,21 @@ import { serverConfig } from "./serverConfig.js";
 export const playerRoleEnum = pgEnum("player_role", ["DUELIST", "INITIATOR", "CONTROLLER", "SENTINEL"]);
 
 /**
+ * Who someone is in the server (2026-10-03, owner's request — see
+ * docs/Plan_Amendment_Weekly_Schedule.md):
+ *
+ *   PLAYER  on the Premier team: has a role and agents, appears on the roster,
+ *           votes on the weekly schedule, answers match attendance, gets
+ *           reminders, hype and recaps (plan sections 8-16).
+ *   MEMBER  a server member who is NOT a Premier player. Same profile row, so
+ *           everything keyed on it works unchanged — Mari chat (server, DM,
+ *           voice), memories and retrieval, AI settings, protected topics,
+ *           /memories — but they are never on the roster and cannot vote on or
+ *           be reminded about anything Premier-related. No role or agents.
+ */
+export const playerKindEnum = pgEnum("player_kind", ["PLAYER", "MEMBER"]);
+
+/**
  * How Mari relates to this person (2026-09-30): plain, flirty, or winding them
  * up. Tone only — the LLM never acts on it (plan section 66 principle 3). Set
  * per player via /edit-player, the same way the plan's section 9 AI settings are.
@@ -75,7 +90,11 @@ export const players = pgTable(
     // round-trip every time this row is read.
     displayName: text("display_name").notNull(),
 
-    role: playerRoleEnum("role").notNull(),
+    // Who they are in the server — see playerKindEnum. Default PLAYER keeps every existing row (and /add-player) exactly as before.
+    kind: playerKindEnum("kind").notNull().default("PLAYER"),
+
+    // Null for a MEMBER (no Valorant role to speak of); always set for a PLAYER.
+    role: playerRoleEnum("role"),
     agents: jsonb("agents").$type<string[]>().notNull().default([]),
     preferredAgent: text("preferred_agent"),
 
@@ -114,4 +133,10 @@ export const players = pgTable(
 );
 
 export type PlayerRow = typeof players.$inferSelect;
+export type PlayerKind = PlayerRow["kind"];
+
+/** True for someone on the Premier team (as opposed to a server MEMBER) — the one test every Premier-only feature uses. */
+export function isPremierPlayer(player: Pick<PlayerRow, "kind">): boolean {
+  return player.kind === "PLAYER";
+}
 export type NewPlayerRow = typeof players.$inferInsert;
