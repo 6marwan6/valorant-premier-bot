@@ -197,7 +197,8 @@ describeIfDb("Server members (non-Premier) + AI reactions to schedule votes (int
     const view = (await ctx.services.schedules.getView(created.value.poll.id))!;
     const roster = await ctx.repositories.players.listActivePlayersByGuild(guildId);
     const text = visibleText(buildScheduleMessage(view, roster, new Date("2031-06-25T00:00:00Z")));
-    expect(text).toContain("P1");
+    expect(text).toContain(`<@${premier[0]!.id}>`);
+    expect(text).not.toContain(`<@${sara.id}>`);
     expect(text).not.toContain("Sara");
     await ctx.services.schedules.cancel(guildId);
   });

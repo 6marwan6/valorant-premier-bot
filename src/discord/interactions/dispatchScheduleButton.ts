@@ -5,6 +5,7 @@ import { buildQuorumMessage, buildScheduleReactionCard } from "../../modules/sch
 import { buildDeclineEvent, buildVoteEvent } from "../../modules/schedules/scheduleAiEvent.js";
 import type { ScheduleSlotRow } from "../../database/schema/schedules.js";
 import { avatarUrlOf } from "../avatarUrl.js";
+import { defaultTab, renderPanel } from "./dispatchAgentPick.js";
 import { formatSlotDay, formatSlotTime } from "../../modules/schedules/scheduleLogic.js";
 import { resolveDisplayName } from "../displayName.js";
 import { renderSchedule } from "../scheduleSync.js";
@@ -101,6 +102,19 @@ export async function dispatchScheduleButton(interaction: ButtonInteraction, ctx
   const startedAt = Date.now();
   const who = { discordUserId: interaction.user.id, displayName: resolveDisplayName(interaction) };
   try {
+    if (action.kind === "agents") {
+      // "🎯 PICK AGENT" on the card: open my panel for my first upcoming slot. The click was acknowledged as an update of
+      // the public card, which stays untouched — the panel is a private follow-up.
+      const opened = await ctx.services.agentPicks.openFirst({ guildId, pollId: action.pollId, discordUserId: who.discordUserId });
+      if (!opened.ok) {
+        await interaction.reply({ content: `❌ ${opened.error}`, ephemeral: true });
+        return;
+      }
+      const profile = await ctx.repositories.players.getByDiscordUserId(guildId, who.discordUserId);
+      await interaction.followUp({ ...renderPanel(opened.value, who.discordUserId, defaultTab(profile)), ephemeral: true });
+      return;
+    }
+
     if (action.kind === "vote") {
       const result = await ctx.services.schedules.vote({ guildId, pollId: action.pollId, slotId: action.slotId, ...who });
       if (!result.ok) {
@@ -120,9 +134,17 @@ export async function dispatchScheduleButton(interaction: ButtonInteraction, ctx
       const mine = yourPositions.length
         ? `You're in for slot${yourPositions.length === 1 ? "" : "s"} **${yourPositions.join(", ")}**.`
         : "You're not on any slot right now.";
-      await interaction
-        .followUp({ content: `${did === "added" ? "✅ You're **in** for" : "↩️ Removed your vote for"} **${label}**. ${mine}`, ephemeral: true })
-        .catch(() => undefined);
+      if (did === "added") {
+        // 2026-10-04: choosing a date opens the AGENT PICK panel (map, suggested comps, agents by role) instead of a bare
+        // confirmation. If it can't be built the player still gets the plain confirmation — the vote is already recorded.
+        const panel = await ctx.services.agentPicks.load({ guildId, slotId: slot.id, discordUserId: who.discordUserId }).catch(() => null);
+        const profile = await ctx.repositories.players.getByDiscordUserId(guildId, who.discordUserId).catch(() => undefined);
+        const notice = `✅ You're **in** for **${label}**. ${mine} Pick your agent below 👇`;
+        const reply = panel?.ok ? { ...renderPanel(panel.value, who.discordUserId, defaultTab(profile), notice), ephemeral: true } : { content: `✅ You're **in** for **${label}**. ${mine}`, ephemeral: true };
+        await interaction.followUp(reply).catch(() => undefined);
+      } else {
+        await interaction.followUp({ content: `↩️ Removed your vote for **${label}**. ${mine}`, ephemeral: true }).catch(() => undefined);
+      }
 
       if (did === "added") {
         await reactWithMari(interaction, ctx, {
@@ -140,7 +162,8 @@ export async function dispatchScheduleButton(interaction: ButtonInteraction, ctx
         try {
           const roster = await ctx.repositories.players.listActivePlayersByGuild(guildId);
           const voters = view.votes.filter((v) => v.slotId === slot.id);
-          const quorum = buildQuorumMessage(slot, voters, roster, tz);
+          const customAgents = await ctx.repositories.schedules.listCustomAgents(guildId);
+          const quorum = buildQuorumMessage(slot, voters, roster, tz, view.picks, customAgents);
           await ctx.discord.sendChannelMessage(view.poll.channelId, {
             content: quorum.content,
             embeds: quorum.embeds,

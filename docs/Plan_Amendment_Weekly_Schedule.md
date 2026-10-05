@@ -98,3 +98,52 @@ Schema: migration `0017_add_server_members_and_schedule_ai.sql` — `players.kin
 1. A member **cannot be demoted by accident**: `/add-member` refuses an active Premier player (use `/remove-player` first).
 2. Members don't appear in the plan's team roster facts (who's playing, agents), but Mari still knows them from chats and memories.
 3. Anyone with no profile at all still gets "ask an admin to add you" from Mari, as before — now pointing at `/add-member` or `/add-player`.
+
+---
+
+# Part 3 — Roster @mentions and the Agent Pick panel (2026-10-04)
+
+## Request (owner)
+
+1. Roster players are @mentioned on the schedule message, so they're notified when it's sent.
+2. The message that appears when someone chooses a date becomes an **agent pick** message: the map, 1–2 suggested comps, other options per role, agents grouped by role, an option to add an agent that isn't listed (showing who suggested it), each agent with its in-game picture, and whether someone already picked it.
+
+## @mentions
+
+- The schedule card's text carries an @mention of every active Premier player, and the first post (`/create-schedule`) is sent allowing exactly those mentions — that is the notification. Server members are not on the roster, so they aren't pinged.
+- Voter lists, "can't play any day" and "no vote yet" now show real mentions instead of typed names. An embed never notifies by itself.
+- Every later re-render (votes, picks, `/schedule-slot`, `/cancel-schedule`) is sent with mentions suppressed, so nobody is pinged twice.
+
+## Agent pick panel (plan §14: all facts from the database, nothing written by the model)
+
+Choosing a date now opens a **private** panel (replacing the plain "you're in" text; Mari's public reaction card is unchanged):
+
+- **Header:** day/time, **map** (or "TBD"), **Suggested Comp A / B** for that map (an agent already picked is ticked), your pick, and the squad's picks so far.
+- **Role tabs:** Duelists · Initiators · Controllers · Sentinels. The open tab shows each agent as a card with its **in-game portrait**; suggested agents first, then the other options. Each card says **OPEN**, **YOUR PICK**, or **PICKED BY @someone**; agents held by someone else have their button disabled.
+- **Buttons:** pick an agent, **Clear my pick**, **➕ Add an agent**, **Switch slot** (only if you voted for more than one).
+- **Add an agent:** a popup asks for the name; it is added to the open role tab, the card says **ADDED BY @you**, and everyone sees it from then on. A built-in agent can't be added twice (any spelling, e.g. `kay-o`), an earlier suggestion says who added it, names are 2–20 letters/numbers/`. ' / -`, at most 5 per player and 15 per role. Suggested agents show a role badge since they have no portrait.
+- **Rules:** a player holds one agent per slot, and an agent has one holder per slot (Valorant has no duplicate agents on a team); two players tapping the same agent at once is settled by a database unique index. Taking back your vote, or "can't play any day", frees your agent.
+- **Where picks show:** the schedule card lists each voter as `⚔️ @name · **Jett**`; the squad-locked card and the 5 h / 15 min reminders show each player's pick (falling back to their profile's preferred agent) and the map.
+- **🎯 PICK AGENT** on the schedule card reopens the panel later (for your first upcoming slot; use *Switch slot* for another).
+- Only Premier players who voted for the slot can use the panel; server members are told it's for Premier players.
+
+## Map
+
+`/schedule-slot slot:1 map:Ascent` (all 13 maps, or "not decided yet") — shown on the card board, the slot heading, the panel, the squad-locked card and the reminders. It is a manual setting because a Premier map isn't known when the week is posted.
+
+## Data (all in `src/modules/agents/agentData.ts`, editable)
+
+- **Agents:** 29 playable agents with role and portrait id, checked 2026-10-04 against valorant-api.com (includes Veto and Miks). Portraits load from `media.valorant-api.com`; if that CDN were down the cards simply show without pictures.
+- **Comps:** **my starting suggestions, not meta gospel.** Two per map for 11 maps; **Corrode and Summit have none yet and use the general comps** (labelled "general"). The map pool changes every Act (the next change is around 14 Oct), which is why the map list is all 13 and not just the current pool.
+
+## Schema (migration `0018_add_agent_picks_and_slot_map.sql`)
+
+`schedule_slots.map`, `agent_picks` (unique per slot+player and slot+agent), `custom_agents` (per server).
+
+## Decisions to confirm
+
+1. Comps and the Corrode/Summit fallback (above) — tell me the comps you actually want per map and I'll replace them.
+2. Picks are per match slot, so the same player can play different agents on different days.
+3. No admin command yet to remove a bad suggested agent (each shows who added it); easy to add.
+4. The panel is a snapshot: it redraws on every tap, but doesn't live-update when someone else picks.
+5. Mentions inside embeds can show as "@unknown-user" for someone Discord hasn't loaded on a client; the ping line in the message text is unaffected.

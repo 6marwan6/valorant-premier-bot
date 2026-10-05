@@ -4,6 +4,7 @@ import type { PlayerRepository } from "../../database/repositories/playerReposit
 import type { SchedulePollRow, ScheduleSlotRow, ScheduleAiKind, SlotRemindMode } from "../../database/schema/schedules.js";
 import { planReminders } from "../reminders/reminderScheduling.js";
 import { effectiveAt, MIN_PLAYERS_TO_QUEUE, parseQueueInput, parseSlotsInput } from "./scheduleLogic.js";
+import { findMap } from "../agents/agentData.js";
 
 export type ScheduleResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -135,6 +136,8 @@ export class ScheduleService {
     position: number;
     queueInput?: string;
     remindMode?: SlotRemindMode;
+    /** A map name (any spelling), or "clear" to unset it. */
+    mapInput?: string;
     now?: Date;
   }): Promise<ScheduleResult<{ view: ScheduleView; slot: ScheduleSlotRow }>> {
     const now = params.now ?? new Date();
@@ -143,11 +146,19 @@ export class ScheduleService {
     const view = (await this.schedules.getView(poll.id))!;
     const slot = view.slots.find((s) => s.position === params.position);
     if (!slot) return { ok: false, error: `Schedule #${poll.id} has no slot ${params.position} (it has 1–${view.slots.length}).` };
-    if (params.queueInput === undefined && params.remindMode === undefined) {
-      return { ok: false, error: "Nothing to change — give a `queue` time and/or `reminders`." };
+    if (params.queueInput === undefined && params.remindMode === undefined && params.mapInput === undefined) {
+      return { ok: false, error: "Nothing to change — give a `map`, a `queue` time and/or `reminders`." };
     }
 
-    const changes: { queueAt?: Date | null; remindMode?: SlotRemindMode } = {};
+    const changes: { queueAt?: Date | null; remindMode?: SlotRemindMode; map?: string | null } = {};
+    if (params.mapInput !== undefined) {
+      if (["clear", "none", "tbd"].includes(params.mapInput.trim().toLowerCase())) changes.map = null;
+      else {
+        const map = findMap(params.mapInput);
+        if (!map) return { ok: false, error: `"${params.mapInput}" isn't a Valorant map I know. Pick one from the list.` };
+        changes.map = map;
+      }
+    }
     if (params.queueInput !== undefined) {
       const parsed = parseQueueInput(params.queueInput, slot.scheduledAt, poll.timezone, now);
       if (!parsed.ok) return { ok: false, error: parsed.error };

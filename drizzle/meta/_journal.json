@@ -127,6 +127,13 @@
       "when": 1791059592134,
       "tag": "0017_add_server_members_and_schedule_ai",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1791099356772,
+      "tag": "0018_add_agent_picks_and_slot_map",
+      "breakpoints": true
     }
   ]
 }

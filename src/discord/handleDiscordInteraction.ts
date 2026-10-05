@@ -14,6 +14,8 @@ import {
   buildReplyModal,
   unrecognizedReplyButtonResponse,
 } from "./consoleConversation.js";
+import { isAgentCustomId, isAgentModalCustomId, parseAgentCustomId } from "../modules/agents/agentCustomId.js";
+import { buildAddAgentModal, handleAgentAddModal } from "./interactions/dispatchAgentPick.js";
 import {
   isConsoleModalCustomId,
   isConsoleReplyCustomId,
@@ -118,6 +120,17 @@ export async function handleDiscordInteraction(params: {
       return;
     }
 
+    // 2026-10-04: "➕ Add an agent" on the agent-pick panel opens a popup — like the Reply button above, that has to be
+    // the very first response, so it is answered here before any ctx/database work. Everything the popup needs rides in
+    // its custom_id and is checked when it is submitted.
+    if (isAgentCustomId(interaction.data.custom_id)) {
+      const parsed = parseAgentCustomId(interaction.data.custom_id);
+      if (parsed?.kind === "add") {
+        params.sendInitialResponse(200, buildAddAgentModal(parsed.slotId, parsed.role));
+        return;
+      }
+    }
+
     const ctx = params.buildCtx();
     // Deferred as an update to the message the button lives on (the
     // public roster) — see rosterMessage.ts / dispatchButton.ts for why
@@ -136,6 +149,15 @@ export async function handleDiscordInteraction(params: {
     // (removing its now-answered Reply button) via @original.
     params.sendInitialResponse(200, { type: InteractionResponseType.DeferredMessageUpdate });
     await handleConsoleReplyModal(interaction, ctx);
+    return;
+  }
+
+  // The agent-pick panel's "Add an agent" popup. It was opened from a button on the (ephemeral) panel, so a deferred
+  // *update* is valid and lets the handler redraw that panel in place via @original.
+  if (interaction.type === InteractionType.ModalSubmit && isAgentModalCustomId(interaction.data.custom_id)) {
+    const ctx = params.buildCtx();
+    params.sendInitialResponse(200, { type: InteractionResponseType.DeferredMessageUpdate });
+    await handleAgentAddModal(interaction, ctx);
     return;
   }
 

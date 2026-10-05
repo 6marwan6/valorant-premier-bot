@@ -168,7 +168,13 @@ export class DiscordRestClient {
   /** Edits an existing message by id — used by announcementSync.ts (edit/cancel outside a button click). */
   async editChannelMessage(channelId: string, messageId: string, payload: ReplyPayload): Promise<void> {
     await this.rest.patch(Routes.channelMessage(channelId, messageId), {
-      body: { content: payload.content, embeds: serializeEmbeds(payload.embeds), components: serializeComponents(payload.components) },
+      body: {
+        content: payload.content,
+        embeds: serializeEmbeds(payload.embeds),
+        components: serializeComponents(payload.components),
+        // The schedule card keeps its @mentions in the message text; re-rendering it must never notify anyone again.
+        allowed_mentions: allowedMentionsFor(payload),
+      },
     });
   }
 

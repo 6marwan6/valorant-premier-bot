@@ -9,6 +9,8 @@ import { isMemoryDeleteCustomId } from "../../modules/memories/memoryManageCusto
 import { handleMemoryDeleteButton } from "../memoryDelete.js";
 import { isScheduleCustomId } from "../../modules/schedules/scheduleCustomId.js";
 import { dispatchScheduleButton } from "./dispatchScheduleButton.js";
+import { isAgentCustomId } from "../../modules/agents/agentCustomId.js";
+import { dispatchAgentButton } from "./dispatchAgentPick.js";
 import { avatarUrlOf } from "../avatarUrl.js";
 import type { MatchRow } from "../../database/schema/matches.js";
 import type { PlayerRow } from "../../database/schema/players.js";
@@ -175,6 +177,12 @@ async function sendAiFollowUp(
 export async function dispatchButton(interaction: ButtonInteraction, ctx: AppContext): Promise<void> {
   if (isMemoryDeleteCustomId(interaction.customId)) {
     await handleMemoryDeleteButton(interaction, ctx);
+    return;
+  }
+
+  // Agent-pick panel (2026-10-04): `agent:<slotId>:...` — see dispatchAgentPick.ts.
+  if (isAgentCustomId(interaction.customId)) {
+    await dispatchAgentButton(interaction, ctx);
     return;
   }
 

@@ -4,6 +4,7 @@ import { requireAdminWithConfig } from "../commandGuards.js";
 import { syncScheduleMessage } from "../scheduleSync.js";
 import { formatSlotDay, formatSlotTime } from "../../modules/schedules/scheduleLogic.js";
 import type { SlotRemindMode } from "../../database/schema/schedules.js";
+import { MAPS } from "../../modules/agents/agentData.js";
 
 /**
  * /schedule-slot — the admin's per-slot controls on the current schedule.
@@ -12,6 +13,9 @@ import type { SlotRemindMode } from "../../database/schema/schedules.js";
  * team is queuing at 7:30 → `/schedule-slot slot:1 queue:19:30`. The 5h /
  * 15min reminders then count back from 19:30 and say so. `queue:clear` goes
  * back to the slot time.
+ *
+ * `map` sets the map this match will be played on (2026-10-04): it appears on the
+ * schedule card and drives the agent-pick panel's suggested comps. `map:none` unsets it.
  *
  * `reminders` overrides which slot the reminders are for. Default (auto):
  * the highest-voted slot with at least 5 votes. `always` also reminds a slot
@@ -22,6 +26,12 @@ const data = new SlashCommandBuilder()
   .setDescription("Set a slot's queue time or reminder behaviour on the current schedule. Admin only.")
   .setDMPermission(false)
   .addIntegerOption((opt) => opt.setName("slot").setDescription("The slot number shown on the schedule (1, 2, 3 …)").setMinValue(1).setMaxValue(10).setRequired(true))
+  .addStringOption((opt) =>
+    opt
+      .setName("map")
+      .setDescription("The map this match is on (drives the suggested comps)")
+      .addChoices(...MAPS.map((m) => ({ name: m, value: m })), { name: "— not decided yet —", value: "clear" }),
+  )
   .addStringOption((opt) => opt.setName("queue").setDescription('When you actually queue, e.g. "19:30" or "7:30pm" — or "clear"'))
   .addStringOption((opt) =>
     opt
@@ -42,11 +52,13 @@ const scheduleSlotCommand: Command = {
 
     const queueInput = interaction.options.getString("queue") ?? undefined;
     const remindMode = (interaction.options.getString("reminders") as SlotRemindMode | null) ?? undefined;
+    const mapInput = interaction.options.getString("map") ?? undefined;
     const result = await ctx.services.schedules.editSlot({
       guildId: guard.guildId,
       position: interaction.options.getInteger("slot", true),
       queueInput,
       remindMode,
+      mapInput,
     });
     if (!result.ok) {
       await interaction.reply({ content: `❌ ${result.error}`, ephemeral: true });
@@ -58,6 +70,7 @@ const scheduleSlotCommand: Command = {
     const tz = view.poll.timezone;
     const label = `${formatSlotDay(slot.scheduledAt, tz)} ${formatSlotTime(slot.scheduledAt, tz)}`;
     const lines = [`✅ **Slot ${slot.position} (${label}) updated.**`];
+    lines.push(slot.map ? `🗺️ Map: **${slot.map}**` : "🗺️ Map: not decided yet");
     lines.push(slot.queueAt ? `🎮 Queue time: **${formatSlotTime(slot.queueAt, tz)}** — reminders count back from it.` : "🎮 Queue time: the slot time.");
     lines.push(`⏰ Reminders: **${slot.remindMode.toLowerCase()}**`);
     await interaction.reply({ content: lines.join("\n"), ephemeral: true });

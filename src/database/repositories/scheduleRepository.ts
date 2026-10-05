@@ -1,6 +1,8 @@
 import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { Database } from "../client.js";
 import {
+  agentPicks,
+  customAgents,
   scheduleAiReactions,
   scheduleDeclines,
   schedulePolls,
@@ -14,7 +16,10 @@ import {
   type SlotReminderRow,
   type SlotRemindMode,
   type ScheduleAiKind,
+  type AgentPickRow,
+  type CustomAgentRow,
 } from "../schema/schedules.js";
+import type { PlayerRow } from "../schema/players.js";
 import type { ReminderPlanEntry } from "../../modules/reminders/reminderScheduling.js";
 
 /** A poll with everything the card and the rules need: its slots in display order, and who voted / declined. */
@@ -23,6 +28,8 @@ export interface ScheduleView {
   slots: ScheduleSlotRow[];
   votes: ScheduleVoteRow[];
   declines: ScheduleDeclineRow[];
+  /** Who plays which agent in which slot (see schema/schedules.ts agentPicks). */
+  picks: AgentPickRow[];
 }
 
 export interface DueSlotReminder {
@@ -91,12 +98,19 @@ export class ScheduleRepository {
   async getView(pollId: number): Promise<ScheduleView | undefined> {
     const poll = await this.getPoll(pollId);
     if (!poll) return undefined;
-    const [slots, votes, declines] = await Promise.all([
+    const [slots, votes, declines, picks] = await Promise.all([
       this.db.select().from(scheduleSlots).where(eq(scheduleSlots.pollId, pollId)).orderBy(asc(scheduleSlots.position)),
       this.db.select().from(scheduleVotes).where(eq(scheduleVotes.pollId, pollId)).orderBy(asc(scheduleVotes.createdAt), asc(scheduleVotes.id)),
       this.db.select().from(scheduleDeclines).where(eq(scheduleDeclines.pollId, pollId)).orderBy(asc(scheduleDeclines.createdAt), asc(scheduleDeclines.id)),
+      this.db
+        .select({ pick: agentPicks })
+        .from(agentPicks)
+        .innerJoin(scheduleSlots, eq(agentPicks.slotId, scheduleSlots.id))
+        .where(eq(scheduleSlots.pollId, pollId))
+        .orderBy(asc(agentPicks.id))
+        .then((rows) => rows.map((r) => r.pick)),
     ]);
-    return { poll, slots, votes, declines };
+    return { poll, slots, votes, declines, picks };
   }
 
   /**
@@ -112,7 +126,11 @@ export class ScheduleRepository {
         .delete(scheduleVotes)
         .where(and(eq(scheduleVotes.slotId, params.slotId), eq(scheduleVotes.discordUserId, params.discordUserId)))
         .returning({ id: scheduleVotes.id });
-      if (removed.length > 0) return "removed";
+      if (removed.length > 0) {
+        // Taking back your vote gives the agent back: a pick only exists for someone who is in the slot.
+        await tx.delete(agentPicks).where(and(eq(agentPicks.slotId, params.slotId), eq(agentPicks.discordUserId, params.discordUserId)));
+        return "removed";
+      }
 
       await tx
         .delete(scheduleDeclines)
@@ -136,6 +154,14 @@ export class ScheduleRepository {
         .delete(scheduleVotes)
         .where(and(eq(scheduleVotes.pollId, params.pollId), eq(scheduleVotes.discordUserId, params.discordUserId)))
         .returning({ id: scheduleVotes.id });
+      await tx
+        .delete(agentPicks)
+        .where(
+          and(
+            eq(agentPicks.discordUserId, params.discordUserId),
+            inArray(agentPicks.slotId, tx.select({ id: scheduleSlots.id }).from(scheduleSlots).where(eq(scheduleSlots.pollId, params.pollId))),
+          ),
+        );
       const inserted = await tx
         .insert(scheduleDeclines)
         .values({ pollId: params.pollId, discordUserId: params.discordUserId, discordDisplayName: params.displayName })
@@ -169,10 +195,11 @@ export class ScheduleRepository {
     return rows.length > 0;
   }
 
-  async updateSlot(slotId: number, changes: { queueAt?: Date | null; remindMode?: SlotRemindMode }): Promise<ScheduleSlotRow | undefined> {
+  async updateSlot(slotId: number, changes: { queueAt?: Date | null; remindMode?: SlotRemindMode; map?: string | null }): Promise<ScheduleSlotRow | undefined> {
     const set: Partial<typeof scheduleSlots.$inferInsert> = {};
     if (changes.queueAt !== undefined) set.queueAt = changes.queueAt;
     if (changes.remindMode !== undefined) set.remindMode = changes.remindMode;
+    if (changes.map !== undefined) set.map = changes.map;
     if (Object.keys(set).length === 0) {
       const [row] = await this.db.select().from(scheduleSlots).where(eq(scheduleSlots.id, slotId)).limit(1);
       return row;
@@ -266,6 +293,63 @@ export class ScheduleRepository {
 
   async listRemindersBySlot(slotId: number): Promise<SlotReminderRow[]> {
     return this.db.select().from(slotReminders).where(eq(slotReminders.slotId, slotId)).orderBy(asc(slotReminders.scheduledAt));
+  }
+
+  // ---- agent picks and custom agents (2026-10-04) ----
+
+  async getSlot(slotId: number): Promise<ScheduleSlotRow | undefined> {
+    const [row] = await this.db.select().from(scheduleSlots).where(eq(scheduleSlots.id, slotId)).limit(1);
+    return row;
+  }
+
+  /**
+   * Gives `discordUserId` the agent for this slot, replacing whatever they held. An agent can be held by one player
+   * per slot (Valorant has no duplicate agents on a team): if someone else has it nothing changes and the holder is
+   * returned. Two players grabbing the same agent at once is settled by the unique index, never by luck.
+   */
+  async pickAgent(params: { slotId: number; discordUserId: string; agentKey: string }): Promise<{ ok: true; changed: boolean } | { ok: false; takenBy: string }> {
+    const holderOf = async () => {
+      const [row] = await this.db.select().from(agentPicks).where(and(eq(agentPicks.slotId, params.slotId), eq(agentPicks.agentKey, params.agentKey))).limit(1);
+      return row;
+    };
+    try {
+      return await this.db.transaction(async (tx) => {
+        const [held] = await tx.select().from(agentPicks).where(and(eq(agentPicks.slotId, params.slotId), eq(agentPicks.agentKey, params.agentKey))).limit(1);
+        if (held) return held.discordUserId === params.discordUserId ? { ok: true as const, changed: false } : { ok: false as const, takenBy: held.discordUserId };
+        await tx.delete(agentPicks).where(and(eq(agentPicks.slotId, params.slotId), eq(agentPicks.discordUserId, params.discordUserId)));
+        await tx.insert(agentPicks).values({ slotId: params.slotId, discordUserId: params.discordUserId, agentKey: params.agentKey });
+        return { ok: true as const, changed: true };
+      });
+    } catch (err) {
+      const code = (err as { code?: string; cause?: { code?: string } })?.cause?.code ?? (err as { code?: string })?.code;
+      if (code !== "23505") throw err;
+      // Lost a race on the unique index: someone else got there first.
+      const holder = await holderOf();
+      if (holder && holder.discordUserId !== params.discordUserId) return { ok: false, takenBy: holder.discordUserId };
+      return { ok: true, changed: false };
+    }
+  }
+
+  async clearPick(slotId: number, discordUserId: string): Promise<boolean> {
+    const rows = await this.db
+      .delete(agentPicks)
+      .where(and(eq(agentPicks.slotId, slotId), eq(agentPicks.discordUserId, discordUserId)))
+      .returning({ id: agentPicks.id });
+    return rows.length > 0;
+  }
+
+  async listPicksBySlot(slotId: number): Promise<AgentPickRow[]> {
+    return this.db.select().from(agentPicks).where(eq(agentPicks.slotId, slotId)).orderBy(asc(agentPicks.id));
+  }
+
+  async listCustomAgents(guildId: string): Promise<CustomAgentRow[]> {
+    return this.db.select().from(customAgents).where(eq(customAgents.guildId, guildId)).orderBy(asc(customAgents.id));
+  }
+
+  /** Inserts a player-suggested agent; undefined when that key already exists in this server (idempotent: a double-submitted modal adds one). */
+  async createCustomAgent(row: Pick<CustomAgentRow, "guildId" | "key" | "displayName" | "role" | "suggestedByUserId" | "suggestedByName">): Promise<CustomAgentRow | undefined> {
+    const [created] = await this.db.insert(customAgents).values(row).onConflictDoNothing().returning();
+    return created;
   }
 
   /** Vote count per slot for one poll, for callers that don't need the voter names. */

@@ -41,8 +41,10 @@ const createScheduleCommand: Command = {
     // leave a poll with no card (plan section 48) — discard it and say so.
     try {
       const view = (await ctx.services.schedules.getView(poll.id))!;
-      const { content, embeds, components } = await renderSchedule(ctx, view);
-      const sent = await ctx.discord.sendChannelMessage(channelId, { content, embeds, components });
+      const { content, embeds, components, suppressMentions, rosterIds } = await renderSchedule(ctx, view);
+      // The roster is @mentioned in the text; this first post is the one that notifies them (and only them — nothing else in
+      // the message can ping). Every later edit of the card suppresses mentions.
+      const sent = await ctx.discord.sendChannelMessage(channelId, { content, embeds, components, suppressMentions, mentionUserIds: rosterIds });
       await ctx.services.schedules.recordMessage(poll.id, sent.id);
     } catch (err) {
       await ctx.services.schedules.discard(poll.id);

@@ -4,6 +4,7 @@
  *
  *   sched:<pollId>:vote:<slotId>    toggle "I can play this slot"
  *   sched:<pollId>:decline          "I can't play any day"
+ *   sched:<pollId>:agents           open my agent-pick panel (2026-10-04)
  *
  * Same contract as attendance/customId.ts: parse returns null for anything
  * malformed so the dispatcher treats it like an unknown button instead of
@@ -11,7 +12,7 @@
  */
 const PREFIX = "sched";
 
-export type ScheduleAction = { pollId: number; kind: "vote"; slotId: number } | { pollId: number; kind: "decline" };
+export type ScheduleAction = { pollId: number; kind: "vote"; slotId: number } | { pollId: number; kind: "decline" } | { pollId: number; kind: "agents" };
 
 export function buildVoteCustomId(pollId: number, slotId: number): string {
   return `${PREFIX}:${pollId}:vote:${slotId}`;
@@ -19,6 +20,10 @@ export function buildVoteCustomId(pollId: number, slotId: number): string {
 
 export function buildDeclineCustomId(pollId: number): string {
   return `${PREFIX}:${pollId}:decline`;
+}
+
+export function buildAgentsCustomId(pollId: number): string {
+  return `${PREFIX}:${pollId}:agents`;
 }
 
 export function isScheduleCustomId(customId: string): boolean {
@@ -36,6 +41,7 @@ export function parseScheduleCustomId(customId: string): ScheduleAction | null {
   const pollId = positiveInt(parts[1]);
   if (pollId === null) return null;
   if (parts.length === 3 && parts[2] === "decline") return { pollId, kind: "decline" };
+  if (parts.length === 3 && parts[2] === "agents") return { pollId, kind: "agents" };
   if (parts.length === 4 && parts[2] === "vote") {
     const slotId = positiveInt(parts[3]);
     return slotId === null ? null : { pollId, kind: "vote", slotId };

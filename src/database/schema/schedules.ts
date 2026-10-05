@@ -1,6 +1,7 @@
 import { pgTable, pgEnum, serial, integer, text, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { serverConfig } from "./serverConfig.js";
 import { reminderStatusEnum } from "./reminders.js";
+import { playerRoleEnum } from "./players.js";
 
 /**
  * Weekly schedule polling (2026-10-03, owner's request — an amendment to plan
@@ -61,6 +62,8 @@ export const scheduleSlots = pgTable(
     // The admin's "we're queuing at 7:30" edit. Null = queue at scheduledAt.
     queueAt: timestamp("queue_at", { withTimezone: true }),
     remindMode: slotRemindModeEnum("remind_mode").notNull().default("AUTO"),
+    // The map this slot will be played on (canonical name, e.g. "Ascent"), set by /schedule-slot. Null = not decided yet.
+    map: text("map"),
     // Set once, atomically, by the vote that first brings the slot to quorum,
     // so the "MATCH ON" card is posted exactly once (plan section 50).
     quorumAnnouncedAt: timestamp("quorum_announced_at", { withTimezone: true }),
@@ -118,6 +121,55 @@ export const scheduleAiReactions = pgTable(
   (table) => [uniqueIndex("schedule_ai_reactions_poll_user_kind_idx").on(table.pollId, table.discordUserId, table.kind)],
 );
 
+/**
+ * Agent picks (2026-10-04, owner's request): which agent each voter plays in a
+ * slot's match. Valorant doesn't allow duplicate agents on a team, so an agent
+ * can be held by one player per slot, and a player holds one agent per slot —
+ * both enforced by unique indexes, which is also what makes a double-delivered
+ * click or two players tapping the same agent at once safe (plan section 50).
+ * A pick disappears with the vote it belongs to (see ScheduleRepository).
+ */
+export const agentPicks = pgTable(
+  "agent_picks",
+  {
+    id: serial("id").primaryKey(),
+    slotId: integer("slot_id")
+      .notNull()
+      .references(() => scheduleSlots.id, { onDelete: "cascade" }),
+    discordUserId: text("discord_user_id").notNull(),
+    // Normalized agent key: a built-in agent's slug ("jett", "kayo") or a custom agent's.
+    agentKey: text("agent_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("agent_picks_slot_user_idx").on(table.slotId, table.discordUserId),
+    uniqueIndex("agent_picks_slot_agent_idx").on(table.slotId, table.agentKey),
+  ],
+);
+
+/**
+ * Agents players added that the built-in list doesn't have (a brand-new
+ * release, say) — "add an agent that's not there", with who suggested it kept
+ * for display. Per server, so one suggestion serves every later schedule.
+ */
+export const customAgents = pgTable(
+  "custom_agents",
+  {
+    id: serial("id").primaryKey(),
+    guildId: text("guild_id")
+      .notNull()
+      .references(() => serverConfig.guildId, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    displayName: text("display_name").notNull(),
+    role: playerRoleEnum("role").notNull(),
+    suggestedByUserId: text("suggested_by_user_id").notNull(),
+    suggestedByName: text("suggested_by_name").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("custom_agents_guild_key_idx").on(table.guildId, table.key)],
+);
+
 export const scheduleDeclines = pgTable(
   "schedule_declines",
   {
@@ -161,5 +213,7 @@ export type ScheduleSlotRow = typeof scheduleSlots.$inferSelect;
 export type ScheduleVoteRow = typeof scheduleVotes.$inferSelect;
 export type ScheduleDeclineRow = typeof scheduleDeclines.$inferSelect;
 export type SlotReminderRow = typeof slotReminders.$inferSelect;
+export type AgentPickRow = typeof agentPicks.$inferSelect;
+export type CustomAgentRow = typeof customAgents.$inferSelect;
 export type ScheduleAiKind = (typeof scheduleAiKindEnum.enumValues)[number];
 export type SlotRemindMode = ScheduleSlotRow["remindMode"];

@@ -4,8 +4,13 @@ import { buildScheduleMessage } from "../modules/schedules/scheduleMessage.js";
 
 /** Builds the card for a poll from current database state (roster read fresh, so "No vote yet" is always current). */
 export async function renderSchedule(ctx: AppContext, view: ScheduleView, now: Date = new Date()) {
-  const roster = await ctx.repositories.players.listActivePlayersByGuild(view.poll.guildId);
-  return buildScheduleMessage(view, roster, now);
+  const [roster, customAgents] = await Promise.all([
+    ctx.repositories.players.listActivePlayersByGuild(view.poll.guildId),
+    ctx.repositories.schedules.listCustomAgents(view.poll.guildId),
+  ]);
+  // `suppressMentions`: the card carries the roster's @mentions in its text, and a re-render (a vote, an edit) must never
+  // notify anyone again. Only the very first post pings — createSchedule overrides this with the roster as the allowed users.
+  return { ...buildScheduleMessage(view, roster, now, customAgents), suppressMentions: true as const, rosterIds: roster.map((p) => p.discordUserId) };
 }
 
 /**
@@ -19,8 +24,8 @@ export async function renderSchedule(ctx: AppContext, view: ScheduleView, now: D
 export async function syncScheduleMessage(ctx: AppContext, view: ScheduleView): Promise<void> {
   if (!view.poll.messageId) return;
   try {
-    const { content, embeds, components } = await renderSchedule(ctx, view);
-    await ctx.discord.editChannelMessage(view.poll.channelId, view.poll.messageId, { content, embeds, components });
+    const { content, embeds, components, suppressMentions } = await renderSchedule(ctx, view);
+    await ctx.discord.editChannelMessage(view.poll.channelId, view.poll.messageId, { content, embeds, components, suppressMentions });
   } catch (err) {
     ctx.logger.warn(
       { event: "schedule.syncFailed", pollId: view.poll.id, guildId: view.poll.guildId, err: err instanceof Error ? err.message : String(err) },

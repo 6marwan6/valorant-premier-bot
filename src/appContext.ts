@@ -20,6 +20,7 @@ import { MemoryService } from "./modules/memories/memoryService.js";
 import { TeamFactsService } from "./modules/ai/teamFactsService.js";
 import { PostMatchService } from "./modules/matches/postMatchService.js";
 import { ScheduleService } from "./modules/schedules/scheduleService.js";
+import { AgentPickService } from "./modules/agents/agentPickService.js";
 import { createLlmClient, type LlmClient } from "./services/ai/llmClient.js";
 
 /**
@@ -63,6 +64,7 @@ export interface AppContext {
     memories: MemoryService;
     postMatch: PostMatchService;
     schedules: ScheduleService;
+    agentPicks: AgentPickService;
   };
 }
 
@@ -112,6 +114,7 @@ export function buildAppContext(params: {
       memories: memoryService,
       postMatch: new PostMatchService(matchRepo, matchEventRepo, playerRepo, serverConfigRepo, aiService, memoryService, params.logger),
       schedules: new ScheduleService(scheduleRepo, serverConfigRepo, playerRepo),
+      agentPicks: new AgentPickService(scheduleRepo, playerRepo),
     },
   };
 }

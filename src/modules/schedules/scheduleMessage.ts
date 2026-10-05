@@ -1,8 +1,10 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } from "discord.js";
 import { DateTime } from "luxon";
 import type { ScheduleView } from "../../database/repositories/scheduleRepository.js";
-import type { ScheduleSlotRow, ScheduleVoteRow } from "../../database/schema/schedules.js";
-import { buildDeclineCustomId, buildVoteCustomId } from "./scheduleCustomId.js";
+import type { AgentPickRow, ScheduleSlotRow, ScheduleVoteRow } from "../../database/schema/schedules.js";
+import { buildAgentsCustomId, buildDeclineCustomId, buildVoteCustomId } from "./scheduleCustomId.js";
+import { agentNameFor } from "../agents/agentPanel.js";
+import type { CustomAgentRow } from "../../database/schema/schedules.js";
 import { effectiveAt, formatSlotDay, formatSlotTime, MIN_PLAYERS_TO_QUEUE, pickLeadingSlot, voteBar } from "./scheduleLogic.js";
 import { formatOffsetLabel } from "../reminders/reminderScheduling.js";
 
@@ -47,11 +49,38 @@ function cap(text: string): string {
   return text.length <= FIELD_LIMIT ? text : `${text.slice(0, FIELD_LIMIT - 1)}…`;
 }
 
-/** `⚔️ **Ahmed**` (role glyph from the profile when the voter is on the roster). */
-function nameOf(userId: string, displayName: string, profiles: Map<string, SchedulePlayer>): string {
+/**
+ * `⚔️ <@id>` — a real @mention (2026-10-04): it renders as the person's name
+ * and is clickable. Mentions inside an embed never notify anyone; the pings
+ * come from the message text (see `rosterPings`), once, when the schedule is
+ * posted. Role glyph from the profile when the person is on the roster.
+ */
+function nameOf(userId: string, profiles: Map<string, SchedulePlayer>): string {
   const p = profiles.get(userId);
   const glyph = p?.role ? `${ROLE_GLYPH[p.role]} ` : "";
-  return `${glyph}**${escapeMarkdown(p?.displayName ?? displayName)}**`;
+  return `${glyph}<@${userId}>`;
+}
+
+/** `⚔️ <@id> · **Jett**` — a person with the agent they picked for this slot. */
+function withPick(userId: string, profiles: Map<string, SchedulePlayer>, picks: Map<string, string>): string {
+  const pick = picks.get(userId);
+  return `${nameOf(userId, profiles)}${pick ? ` · **${escapeMarkdown(pick)}**` : ""}`;
+}
+
+/** slot id -> (user id -> agent display name). */
+function picksBySlot(picks: readonly AgentPickRow[], customAgents: readonly CustomAgentRow[]): Map<number, Map<string, string>> {
+  const out = new Map<number, Map<string, string>>();
+  for (const p of picks) {
+    const inner = out.get(p.slotId) ?? new Map<string, string>();
+    inner.set(p.discordUserId, agentNameFor(p.agentKey, customAgents));
+    out.set(p.slotId, inner);
+  }
+  return out;
+}
+
+/** The notification line: every Premier player on the roster, @mentioned, so posting the schedule pings the team. */
+export function rosterPings(roster: readonly SchedulePlayer[]): string {
+  return roster.map((p) => `<@${p.discordUserId}>`).join(" ");
 }
 
 function votesBySlot(votes: readonly ScheduleVoteRow[]): Map<number, ScheduleVoteRow[]> {
@@ -75,12 +104,17 @@ function buildBoard(view: ScheduleView, counts: Map<number, number>, leaderId: n
     return s.queueAt ? `${t}▸${formatSlotTime(s.queueAt, tz)}` : t;
   };
   const timeWidth = Math.max(4, ...view.slots.map((s) => timeCell(s).length));
-  const lines = [` #  ${"DAY".padEnd(9)}  ${"TIME".padEnd(timeWidth)}  SQUAD`];
+  // A MAP column only once someone has set a map, so an unplanned week doesn't carry a column of dashes.
+  const showMap = view.slots.some((s) => s.map);
+  const mapWidth = Math.max(3, ...view.slots.map((s) => (s.map ?? "—").length));
+  const mapHead = showMap ? `${"MAP".padEnd(mapWidth)}  ` : "";
+  const lines = [` #  ${"DAY".padEnd(9)}  ${"TIME".padEnd(timeWidth)}  ${mapHead}SQUAD`];
   for (const s of view.slots) {
     const n = counts.get(s.id) ?? 0;
     const past = effectiveAt(s).getTime() <= now.getTime();
     const marker = past ? "  · done" : s.id === leaderId ? "  ★ ON" : n >= MIN_PLAYERS_TO_QUEUE ? "  ✔" : "";
-    lines.push(`${String(s.position).padStart(2)}  ${formatSlotDay(s.scheduledAt, tz)}  ${timeCell(s).padEnd(timeWidth)}  ${voteBar(n)} ${n}/${MIN_PLAYERS_TO_QUEUE}${marker}`);
+    const mapCell = showMap ? `${(s.map ?? "—").padEnd(mapWidth)}  ` : "";
+    lines.push(`${String(s.position).padStart(2)}  ${formatSlotDay(s.scheduledAt, tz)}  ${timeCell(s).padEnd(timeWidth)}  ${mapCell}${voteBar(n)} ${n}/${MIN_PLAYERS_TO_QUEUE}${marker}`);
   }
   return "```\n" + lines.join("\n") + "\n```";
 }
@@ -90,7 +124,7 @@ function buildBoard(view: ScheduleView, counts: Map<number, number>, leaderId: n
  * the card also lists who hasn't voted yet; without it (a guild that hasn't
  * run /add-player) that section is simply omitted rather than invented.
  */
-export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[] = [], now: Date = new Date()): ScheduleMessage {
+export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[] = [], now: Date = new Date(), customAgents: CustomAgentRow[] = []): ScheduleMessage {
   const { poll, slots } = view;
   const tz = poll.timezone;
   const cancelled = poll.status === "CANCELLED";
@@ -98,8 +132,11 @@ export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[
   const bySlot = votesBySlot(view.votes);
   const counts = new Map(slots.map((s) => [s.id, bySlot.get(s.id)?.length ?? 0]));
   const leader = cancelled ? null : pickLeadingSlot(slots, counts, now);
+  const picksFor = picksBySlot(view.picks ?? [], customAgents);
 
-  const content = `# ◢◤ VALORANT PREMIER ◥◣\n-# WEEKLY SCHEDULE · ${cancelled ? "CANCELLED" : "VOTE YOUR AVAILABILITY"}`;
+  // The roster is @mentioned in the message text, so posting the schedule notifies the team (the card itself is an embed, and an embed never pings). Edits don't re-notify: they are sent with mentions suppressed.
+  const pings = !cancelled && roster.length > 0 ? `\n${rosterPings(roster)}` : "";
+  const content = `# ◢◤ VALORANT PREMIER ◥◣\n-# WEEKLY SCHEDULE · ${cancelled ? "CANCELLED" : "VOTE YOUR AVAILABILITY"}${pings}`;
 
   const embed = new EmbedBuilder()
     .setColor(cancelled ? COLOR_CANCELLED : leader ? COLOR_LOCKED : COLOR_RED)
@@ -131,23 +168,24 @@ export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[
   // Who voted for what, slot by slot.
   for (const s of slots) {
     const voters = bySlot.get(s.id) ?? [];
-    const label = `${NUMBER_EMOJI[s.position - 1] ?? s.position}  ${formatSlotDay(s.scheduledAt, tz)} · ${formatSlotTime(s.scheduledAt, tz)}`;
+    const label = `${NUMBER_EMOJI[s.position - 1] ?? s.position}  ${formatSlotDay(s.scheduledAt, tz)} · ${formatSlotTime(s.scheduledAt, tz)}${s.map ? ` · 🗺️ ${s.map.toUpperCase()}` : ""}`;
+    const slotPicks = picksFor.get(s.id) ?? new Map<string, string>();
     embed.addFields({
       name: `${label}  —  ${voters.length}/${MIN_PLAYERS_TO_QUEUE}`,
-      value: voters.length ? cap(voters.map((v) => nameOf(v.discordUserId, v.discordDisplayName, profiles)).join("  ·  ")) : "_no votes yet_",
+      value: voters.length ? cap(voters.map((v) => withPick(v.discordUserId, profiles, slotPicks)).join(slotPicks.size > 0 ? "\n" : "  ·  ")) : "_no votes yet_",
     });
   }
   if (view.declines.length > 0) {
     embed.addFields({
       name: `🚫 Can't play any day · ${view.declines.length}`,
-      value: cap(view.declines.map((d) => nameOf(d.discordUserId, d.discordDisplayName, profiles)).join("  ·  ")),
+      value: cap(view.declines.map((d) => nameOf(d.discordUserId, profiles)).join("  ·  ")),
     });
   }
   if (roster.length > 0 && !cancelled) {
     const answered = new Set([...view.votes.map((v) => v.discordUserId), ...view.declines.map((d) => d.discordUserId)]);
     const waiting = roster.filter((p) => !answered.has(p.discordUserId));
     if (waiting.length > 0) {
-      embed.addFields({ name: `⚪ No vote yet · ${waiting.length}`, value: cap(waiting.map((p) => nameOf(p.discordUserId, p.displayName, profiles)).join("  ·  ")) });
+      embed.addFields({ name: `⚪ No vote yet · ${waiting.length}`, value: cap(waiting.map((p) => nameOf(p.discordUserId, profiles)).join("  ·  ")) });
     }
   }
   embed.setFooter({ text: cancelled ? `Schedule #${poll.id} · cancelled` : `PREMIER · Schedule #${poll.id} · reminders 5h and 15min before queue` });
@@ -171,17 +209,19 @@ export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[
     components.push(
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId(buildDeclineCustomId(poll.id)).setLabel("CAN'T PLAY ANY DAY").setEmoji("🚫").setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(buildAgentsCustomId(poll.id)).setLabel("PICK AGENT").setEmoji("🎯").setStyle(ButtonStyle.Primary),
       ),
     );
   }
   return { content, embeds: [embed], components };
 }
 
-/** One line per person for lineups: `⚔️ **Ahmed** · Jett`. */
-function lineupLine(userId: string, displayName: string, profiles: Map<string, SchedulePlayer>): string {
-  const p = profiles.get(userId);
-  const agent = p?.preferredAgent ? ` · ${escapeMarkdown(p.preferredAgent)}` : "";
-  return `${nameOf(userId, displayName, profiles)}${agent}`;
+/** One line per person for lineups: `⚔️ <@id> · **Jett**` — the agent they picked for this slot, else their profile's preferred agent. */
+function lineupLine(userId: string, profiles: Map<string, SchedulePlayer>, picks: Map<string, string>): string {
+  const picked = picks.get(userId);
+  const preferred = profiles.get(userId)?.preferredAgent;
+  const agent = picked ? ` · **${escapeMarkdown(picked)}**` : preferred ? ` · ${escapeMarkdown(preferred)}` : "";
+  return `${nameOf(userId, profiles)}${agent}`;
 }
 
 function mentions(userIds: string[]): string {
@@ -194,15 +234,19 @@ export function buildQuorumMessage(
   voters: ScheduleVoteRow[],
   roster: SchedulePlayer[],
   timezone: string,
+  picks: readonly AgentPickRow[] = [],
+  customAgents: readonly CustomAgentRow[] = [],
 ): { content: string; embeds: EmbedBuilder[]; mentionUserIds: string[] } {
   const profiles = new Map(roster.map((p) => [p.discordUserId, p]));
+  const slotPicks = picksBySlot(picks.filter((p) => p.slotId === slot.id), customAgents).get(slot.id) ?? new Map<string, string>();
   const ids = voters.map((v) => v.discordUserId);
   const at = unix(effectiveAt(slot));
   const lines = [
     `${"🟩".repeat(Math.min(voters.length, 10))}  **${voters.length}/${MIN_PLAYERS_TO_QUEUE}**`,
     "",
-    ...voters.map((v) => lineupLine(v.discordUserId, v.discordDisplayName, profiles)),
+    ...voters.map((v) => lineupLine(v.discordUserId, profiles, slotPicks)),
     "",
+    ...(slot.map ? [`🗺️ **Map: ${slot.map}**`] : []),
     slot.queueAt
       ? `🎮 **Queue ${formatSlotTime(slot.queueAt, timezone)}** (slot ${formatSlotTime(slot.scheduledAt, timezone)}) · <t:${at}:R>`
       : `🎮 **Queue ${formatSlotTime(slot.scheduledAt, timezone)}** · <t:${at}:R>`,
@@ -228,8 +272,11 @@ export function buildSlotReminderMessage(
   timezone: string,
   offsetMinutes: number,
   pollId: number,
+  picks: readonly AgentPickRow[] = [],
+  customAgents: readonly CustomAgentRow[] = [],
 ): { content: string; embeds: EmbedBuilder[]; mentionUserIds: string[] } {
   const profiles = new Map(roster.map((p) => [p.discordUserId, p]));
+  const slotPicks = picksBySlot(picks.filter((p) => p.slotId === slot.id), customAgents).get(slot.id) ?? new Map<string, string>();
   const ids = voters.map((v) => v.discordUserId);
   const imminent = offsetMinutes <= 20;
   const at = unix(effectiveAt(slot));
@@ -241,7 +288,8 @@ export function buildSlotReminderMessage(
   } else {
     description.push(`🎮 **QUEUE AT ${formatSlotTime(slot.scheduledAt, timezone)}** · <t:${at}:R>`);
   }
-  description.push("", ...voters.map((v) => lineupLine(v.discordUserId, v.discordDisplayName, profiles)));
+  if (slot.map) description.push(`🗺️ **Map: ${slot.map}**`);
+  description.push("", ...voters.map((v) => lineupLine(v.discordUserId, profiles, slotPicks)));
 
   const label = formatOffsetLabel(offsetMinutes).toUpperCase();
   const embed = new EmbedBuilder()

@@ -100,7 +100,8 @@ export async function runScheduleReminders(ctx: AppContext, configs: ServerConfi
       }
 
       if (!rosterCache.has(poll.guildId)) rosterCache.set(poll.guildId, await ctx.repositories.players.listActivePlayersByGuild(poll.guildId));
-      const message = buildSlotReminderMessage(liveSlot, voters, rosterCache.get(poll.guildId)!, poll.timezone, reminder.offsetMinutes, poll.id);
+      const customAgents = await repo.listCustomAgents(poll.guildId);
+      const message = buildSlotReminderMessage(liveSlot, voters, rosterCache.get(poll.guildId)!, poll.timezone, reminder.offsetMinutes, poll.id, view.picks, customAgents);
       const sent = await ctx.discord.sendChannelMessage(poll.channelId, {
         content: message.content,
         embeds: message.embeds,
