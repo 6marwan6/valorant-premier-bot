@@ -134,6 +134,13 @@
       "when": 1791099356772,
       "tag": "0018_add_agent_picks_and_slot_map",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1791102956772,
+      "tag": "0019_add_agent_board_message",
+      "breakpoints": true
     }
   ]
 }

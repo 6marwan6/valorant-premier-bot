@@ -2,6 +2,7 @@ import { SlashCommandBuilder } from "discord.js";
 import type { Command } from "./types.js";
 import { requireAdminWithConfig } from "../commandGuards.js";
 import { renderSchedule } from "../scheduleSync.js";
+import { syncAgentBoard } from "../agentBoardSync.js";
 
 /**
  * /create-schedule — posts the week's Premier slots for the team to vote on.
@@ -46,6 +47,8 @@ const createScheduleCommand: Command = {
       // the message can ping). Every later edit of the card suppresses mentions.
       const sent = await ctx.discord.sendChannelMessage(channelId, { content, embeds, components, suppressMentions, mentionUserIds: rosterIds });
       await ctx.services.schedules.recordMessage(poll.id, sent.id);
+      // The public AGENT SELECT lineup goes right under the card (best-effort: never fails the command).
+      await syncAgentBoard(ctx, view);
     } catch (err) {
       await ctx.services.schedules.discard(poll.id);
       ctx.logger.error(

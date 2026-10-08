@@ -36,17 +36,13 @@ const COLOR_RED = 0xff4655; // Valorant red: open / waiting for a squad
 const COLOR_LOCKED = 0x3bd671; // a slot has its squad
 const COLOR_AMBER = 0xf5a623;
 const COLOR_CANCELLED = 0x4f545c;
+const COLOR_DARK = 0x2d3a4a; // Valorant's dark slate — the quieter second card
 
 const NUMBER_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
 const ROLE_GLYPH = { DUELIST: "⚔️", INITIATOR: "🔎", CONTROLLER: "☁️", SENTINEL: "🛡️" } as const;
-const FIELD_LIMIT = 1024;
 
 function unix(date: Date): number {
   return Math.floor(date.getTime() / 1000);
-}
-
-function cap(text: string): string {
-  return text.length <= FIELD_LIMIT ? text : `${text.slice(0, FIELD_LIMIT - 1)}…`;
 }
 
 /**
@@ -119,10 +115,24 @@ function buildBoard(view: ScheduleView, counts: Map<number, number>, leaderId: n
   return "```\n" + lines.join("\n") + "\n```";
 }
 
+const DESCRIPTION_LIMIT = 4096;
+/** Discord caps all embeds of one message at 6000 characters together; this leaves room for titles and footers. */
+const EMBED_TOTAL_BUDGET = 5800;
+
+function capDescription(text: string, limit: number = DESCRIPTION_LIMIT): string {
+  return text.length <= limit ? text : `${text.slice(0, Math.max(limit - 1, 0))}…`;
+}
+
 /**
  * The weekly schedule card. `roster` (active players) is optional: with it
  * the card also lists who hasn't voted yet; without it (a guild that hasn't
  * run /add-player) that section is simply omitted rather than invented.
+ *
+ * Layout (re-spaced 2026-10-07, "so crowded"): two embeds instead of one packed
+ * one. The first is the status — what's needed, the board, whether a match is
+ * on. The second is "who's in": one block per slot with a blank line between
+ * blocks, then the people who can't play and who hasn't voted. Written as
+ * description text rather than a stack of fields so the gaps are real gaps.
  */
 export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[] = [], now: Date = new Date(), customAgents: CustomAgentRow[] = []): ScheduleMessage {
   const { poll, slots } = view;
@@ -138,82 +148,82 @@ export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[
   const pings = !cancelled && roster.length > 0 ? `\n${rosterPings(roster)}` : "";
   const content = `# ◢◤ VALORANT PREMIER ◥◣\n-# WEEKLY SCHEDULE · ${cancelled ? "CANCELLED" : "VOTE YOUR AVAILABILITY"}${pings}`;
 
-  const embed = new EmbedBuilder()
+  const status = new EmbedBuilder()
     .setColor(cancelled ? COLOR_CANCELLED : leader ? COLOR_LOCKED : COLOR_RED)
     .setTitle(cancelled ? `~~PREMIER WEEK · ${dateRange(slots, tz)}~~` : `◢ PREMIER WEEK · ${dateRange(slots, tz)} ◣`);
 
-  const description: string[] = [];
   if (cancelled) {
-    description.push("🚫 **This schedule was cancelled.**");
+    status.setDescription("🚫 **This schedule was cancelled.**");
+    status.setFooter({ text: `Schedule #${poll.id} · cancelled` });
+    return { content, embeds: [status], components: [] };
+  }
+
+  const verdict: string[] = [];
+  if (leader) {
+    const at = unix(effectiveAt(leader));
+    const queue = leader.queueAt ? ` · **queue ${formatSlotTime(leader.queueAt, tz)}**` : "";
+    verdict.push(`🔥 **MATCH ON → ${formatSlotDay(leader.scheduledAt, tz)} · ${formatSlotTime(leader.scheduledAt, tz)}**${queue} · <t:${at}:R>`);
   } else {
-    description.push(`**Need ${MIN_PLAYERS_TO_QUEUE} to queue.** Tap every slot you can play — tap again to take it back.`);
-    description.push(buildBoard(view, counts, leader?.id ?? null, now));
-    if (leader) {
-      const at = unix(effectiveAt(leader));
-      const queue = leader.queueAt ? ` · **queue ${formatSlotTime(leader.queueAt, tz)}**` : "";
-      description.push(`🔥 **MATCH ON → ${formatSlotDay(leader.scheduledAt, tz)} · ${formatSlotTime(leader.scheduledAt, tz)}**${queue} · <t:${at}:R>`);
+    const open = slots.filter((s) => effectiveAt(s).getTime() > now.getTime() && s.remindMode !== "NEVER");
+    const best = open.reduce<ScheduleSlotRow | null>((b, s) => (b === null || (counts.get(s.id) ?? 0) > (counts.get(b.id) ?? 0) ? s : b), null);
+    if (best) {
+      const missing = MIN_PLAYERS_TO_QUEUE - (counts.get(best.id) ?? 0);
+      verdict.push(`⏳ No squad yet — **${formatSlotDay(best.scheduledAt, tz)} ${formatSlotTime(best.scheduledAt, tz)}** needs **${missing}** more.`);
     } else {
-      const open = slots.filter((s) => effectiveAt(s).getTime() > now.getTime() && s.remindMode !== "NEVER");
-      const best = open.reduce<ScheduleSlotRow | null>((b, s) => (b === null || (counts.get(s.id) ?? 0) > (counts.get(b.id) ?? 0) ? s : b), null);
-      if (best) {
-        const missing = MIN_PLAYERS_TO_QUEUE - (counts.get(best.id) ?? 0);
-        description.push(`⏳ No squad yet — **${formatSlotDay(best.scheduledAt, tz)} ${formatSlotTime(best.scheduledAt, tz)}** needs **${missing}** more.`);
-      } else {
-        description.push("⏳ Every slot has passed.");
-      }
+      verdict.push("⏳ Every slot has passed.");
     }
   }
-  embed.setDescription(description.join("\n"));
+  status.setDescription(
+    [`**Need ${MIN_PLAYERS_TO_QUEUE} to queue.** Tap every slot you can play — tap again to take it back.`, buildBoard(view, counts, leader?.id ?? null, now), ...verdict].join("\n\n"),
+  );
 
-  // Who voted for what, slot by slot.
-  for (const s of slots) {
+  // ---- who's in: a block per slot, blank line between blocks
+  const blocks: string[] = slots.map((s) => {
     const voters = bySlot.get(s.id) ?? [];
-    const label = `${NUMBER_EMOJI[s.position - 1] ?? s.position}  ${formatSlotDay(s.scheduledAt, tz)} · ${formatSlotTime(s.scheduledAt, tz)}${s.map ? ` · 🗺️ ${s.map.toUpperCase()}` : ""}`;
+    const heading = `${NUMBER_EMOJI[s.position - 1] ?? s.position}  **${formatSlotDay(s.scheduledAt, tz)} · ${formatSlotTime(s.scheduledAt, tz)}**${s.map ? ` · 🗺️ ${s.map.toUpperCase()}` : ""}  —  **${voters.length}/${MIN_PLAYERS_TO_QUEUE}**`;
     const slotPicks = picksFor.get(s.id) ?? new Map<string, string>();
-    embed.addFields({
-      name: `${label}  —  ${voters.length}/${MIN_PLAYERS_TO_QUEUE}`,
-      value: voters.length ? cap(voters.map((v) => withPick(v.discordUserId, profiles, slotPicks)).join(slotPicks.size > 0 ? "\n" : "  ·  ")) : "_no votes yet_",
-    });
-  }
+    const people = voters.length ? voters.map((v) => withPick(v.discordUserId, profiles, slotPicks)).join(slotPicks.size > 0 ? "\n" : "  ·  ") : "_no votes yet_";
+    return `${heading}\n${people}`;
+  });
+  const out: string[] = [];
   if (view.declines.length > 0) {
-    embed.addFields({
-      name: `🚫 Can't play any day · ${view.declines.length}`,
-      value: cap(view.declines.map((d) => nameOf(d.discordUserId, profiles)).join("  ·  ")),
-    });
+    out.push(`🚫 **Can't play any day** · ${view.declines.length}\n${view.declines.map((d) => nameOf(d.discordUserId, profiles)).join("  ·  ")}`);
   }
-  if (roster.length > 0 && !cancelled) {
+  if (roster.length > 0) {
     const answered = new Set([...view.votes.map((v) => v.discordUserId), ...view.declines.map((d) => d.discordUserId)]);
     const waiting = roster.filter((p) => !answered.has(p.discordUserId));
-    if (waiting.length > 0) {
-      embed.addFields({ name: `⚪ No vote yet · ${waiting.length}`, value: cap(waiting.map((p) => nameOf(p.discordUserId, profiles)).join("  ·  ")) });
-    }
+    if (waiting.length > 0) out.push(`⚪ **No vote yet** · ${waiting.length}\n${waiting.map((p) => nameOf(p.discordUserId, profiles)).join("  ·  ")}`);
   }
-  embed.setFooter({ text: cancelled ? `Schedule #${poll.id} · cancelled` : `PREMIER · Schedule #${poll.id} · reminders 5h and 15min before queue` });
+  const whoIsIn = new EmbedBuilder()
+    .setColor(COLOR_DARK)
+    .setTitle("WHO'S IN")
+    .setFooter({ text: `PREMIER · Schedule #${poll.id} · reminders 5h and 15min before queue` });
+  // The "who's in" text gets whatever the status embed leaves of the 6000-character message budget.
+  const room = Math.min(DESCRIPTION_LIMIT, EMBED_TOTAL_BUDGET - JSON.stringify(status.toJSON()).length - JSON.stringify(whoIsIn.toJSON()).length);
+  whoIsIn.setDescription(capDescription([...blocks, ...out].join("\n\n"), room));
 
   const components: ActionRowBuilder<ButtonBuilder>[] = [];
-  if (!cancelled) {
-    for (let i = 0; i < slots.length; i += 5) {
-      components.push(
-        new ActionRowBuilder<ButtonBuilder>().addComponents(
-          slots.slice(i, i + 5).map((s) =>
-            new ButtonBuilder()
-              .setCustomId(buildVoteCustomId(poll.id, s.id))
-              .setLabel(`${formatSlotDay(s.scheduledAt, tz).slice(0, 3)} ${formatSlotTime(s.scheduledAt, tz)}`)
-              .setEmoji(NUMBER_EMOJI[s.position - 1] ?? "🗓️")
-              .setStyle(counts.get(s.id)! >= MIN_PLAYERS_TO_QUEUE ? ButtonStyle.Success : ButtonStyle.Secondary)
-              .setDisabled(effectiveAt(s).getTime() <= now.getTime()),
-          ),
-        ),
-      );
-    }
+  for (let i = 0; i < slots.length; i += 5) {
     components.push(
       new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(buildDeclineCustomId(poll.id)).setLabel("CAN'T PLAY ANY DAY").setEmoji("🚫").setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId(buildAgentsCustomId(poll.id)).setLabel("PICK AGENT").setEmoji("🎯").setStyle(ButtonStyle.Primary),
+        slots.slice(i, i + 5).map((s) =>
+          new ButtonBuilder()
+            .setCustomId(buildVoteCustomId(poll.id, s.id))
+            .setLabel(`${formatSlotDay(s.scheduledAt, tz).slice(0, 3)} ${formatSlotTime(s.scheduledAt, tz)}`)
+            .setEmoji(NUMBER_EMOJI[s.position - 1] ?? "🗓️")
+            .setStyle(counts.get(s.id)! >= MIN_PLAYERS_TO_QUEUE ? ButtonStyle.Success : ButtonStyle.Secondary)
+            .setDisabled(effectiveAt(s).getTime() <= now.getTime()),
+        ),
       ),
     );
   }
-  return { content, embeds: [embed], components };
+  components.push(
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(buildDeclineCustomId(poll.id)).setLabel("CAN'T PLAY ANY DAY").setEmoji("🚫").setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(buildAgentsCustomId(poll.id)).setLabel("PICK AGENT").setEmoji("🎯").setStyle(ButtonStyle.Primary),
+    ),
+  );
+  return { content, embeds: [status, whoIsIn], components };
 }
 
 /** One line per person for lineups: `⚔️ <@id> · **Jett**` — the agent they picked for this slot, else their profile's preferred agent. */

@@ -8,6 +8,8 @@ import { buildAgentPanel } from "../../modules/agents/agentPanel.js";
 import type { PanelOutcome, PanelState } from "../../modules/agents/agentPickService.js";
 import type { PlayerRow } from "../../database/schema/players.js";
 import { syncScheduleMessage } from "../scheduleSync.js";
+import { loadAgentEmojis } from "../agentEmojiCache.js";
+import type { AgentEmojiMap } from "../../modules/agents/agentEmojis.js";
 
 /**
  * The agent-pick panel's interactions (2026-10-04, owner's request): the
@@ -27,7 +29,7 @@ export function defaultTab(player: PlayerRow | undefined): AgentRole {
   return player?.kind === "PLAYER" && player.role ? player.role : "DUELIST";
 }
 
-export function renderPanel(state: PanelState, viewerId: string, tab: AgentRole, notice?: string): ReplyPayload {
+export function renderPanel(state: PanelState, viewerId: string, tab: AgentRole, notice?: string, emojis?: AgentEmojiMap): ReplyPayload {
   const panel = buildAgentPanel({
     poll: state.poll,
     slot: state.slot,
@@ -37,6 +39,7 @@ export function renderPanel(state: PanelState, viewerId: string, tab: AgentRole,
     tab,
     hasOtherSlots: state.mySlots.length > 1,
     notice,
+    emojis,
   });
   return { content: panel.content, embeds: panel.embeds, components: panel.components };
 }
@@ -137,7 +140,8 @@ export async function dispatchAgentButton(interaction: ButtonInteraction, ctx: A
       await interaction.reply({ content: `❌ ${outcome.error}`, ephemeral: true });
       return;
     }
-    await interaction.update(renderPanel(outcome.value.state, discordUserId, tab, outcome.value.notice));
+    const emojis = await loadAgentEmojis(ctx.discord, ctx.logger);
+    await interaction.update(renderPanel(outcome.value.state, discordUserId, tab, outcome.value.notice, emojis));
     ctx.logger.info(
       { event: "agent.panel", op: action.kind, guildId, slotId: outcome.value.state.slot.id, discordUserId, changed: outcome.value.changed ?? false, latencyMs: Date.now() - startedAt },
       "Agent panel interaction",
@@ -185,7 +189,8 @@ export async function handleAgentAddModal(raw: APIModalSubmitInteraction, ctx: A
       return;
     }
     const tab = outcome.value.focusRole ?? parsed.role;
-    await ctx.discord.editOriginalInteractionResponse(raw.token, renderPanel(outcome.value.state, sender.id, tab, outcome.value.notice));
+    const emojis = await loadAgentEmojis(ctx.discord, ctx.logger);
+    await ctx.discord.editOriginalInteractionResponse(raw.token, renderPanel(outcome.value.state, sender.id, tab, outcome.value.notice, emojis));
     ctx.logger.info({ event: "agent.suggested", guildId, slotId: parsed.slotId, discordUserId: sender.id, latencyMs: Date.now() - startedAt }, "Agent suggestion handled");
   } catch (err) {
     ctx.logger.error(

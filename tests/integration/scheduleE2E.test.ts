@@ -7,6 +7,7 @@ import type { DiscordRestClient, ReplyPayload } from "../../src/discord/discordR
 import { runScheduleReminders } from "../../src/services/scheduling/scheduleReminderJob.js";
 import { dispatchButton } from "../../src/discord/interactions/dispatchButton.js";
 import { logger } from "../../src/config/logger.js";
+import { syncAgentBoard } from "../../src/discord/agentBoardSync.js";
 import { buildVoteCustomId, buildDeclineCustomId } from "../../src/modules/schedules/scheduleCustomId.js";
 import { visibleText } from "../unit/helpers/embedText.js";
 
@@ -87,6 +88,9 @@ describeIfDb("Weekly schedule voting + reminders (integration)", () => {
   async function newPoll(slotsInput: string, now: Date = new Date("2031-06-25T00:00:00Z")) {
     const r = await ctx.services.schedules.create({ guildId, slotsInput, now });
     if (!r.ok) throw new Error(r.error);
+    // /create-schedule posts the public AGENT SELECT lineup right after the card; do the same so later sends are only what a test provokes.
+    const view = (await ctx.services.schedules.getView(r.value.poll.id))!;
+    await syncAgentBoard(ctx, view);
     return r.value;
   }
   const vote = (pollId: number, slotId: number, u: (typeof users)[number], now?: Date) =>
@@ -176,7 +180,7 @@ describeIfDb("Weekly schedule voting + reminders (integration)", () => {
     expect(posted[0]!.content).toContain(`<@${users[0]!.id}>`);
     expect(visibleText(posted[0]!)).toContain("SQUAD LOCKED");
     const card = fifth.update.mock.calls[0]![0] as { embeds: unknown[]; components: unknown[] };
-    expect(card.embeds).toHaveLength(1);
+    expect(card.embeds).toHaveLength(2); // status + who's in
     expect(card.components.length).toBeGreaterThan(0);
 
     // A 6th vote and a toggle-off/on of the 5th never re-announce.

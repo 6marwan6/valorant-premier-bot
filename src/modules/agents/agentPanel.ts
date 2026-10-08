@@ -15,19 +15,25 @@ import {
   type AgentRole,
 } from "./agentData.js";
 import { agentAddId, agentClearId, agentPickId, agentRoleId, agentSwitchId } from "./agentCustomId.js";
+import { agentIconText, type AgentEmojiMap } from "./agentEmojis.js";
 
 /**
  * The "AGENT PICK" panel (2026-10-04, owner's request) — what a player sees
- * after choosing a date, in place of the old text confirmation:
+ * after choosing a date. Re-laid-out 2026-10-07 ("so crowded", "make the agent
+ * cards horizontal like Valorant"):
  *
- *  - the match: day/time and the MAP (or "TBD" until the admin sets it);
- *  - one or two SUGGESTED COMPS for that map, each agent marked once taken;
- *  - the squad's picks so far and the viewer's own;
- *  - role tabs (Duelists / Initiators / Controllers / Sentinels), so each
- *    role's agents sit together; the open tab lists its agents as cards with
- *    the in-game portrait — suggested ones first, then the other options —
- *    each saying OPEN, YOUR PICK, or who already picked it;
- *  - buttons to pick, clear, add an agent that isn't listed, or switch slot.
+ *  - ONE header embed with room to breathe: when, the map, your pick, the
+ *    suggested comps (a blank line between each block);
+ *  - ONE agents embed for the open role tab. The agents sit side by side — three
+ *    across, like the agent-select screen — instead of one tall card each. Each
+ *    cell is the agent's portrait + name over its status (OPEN / YOUR PICK /
+ *    PICKED BY @someone). The portrait is an application emoji when the team
+ *    has run `npm run sync-agent-emojis`, otherwise the role glyph;
+ *  - role tabs, the agent buttons (also in rows, with the same portrait), and
+ *    pick / clear / add-an-agent / switch-slot.
+ *
+ * Everyone's picks are on the public AGENT SELECT lineup message
+ * (agentBoard.ts); this panel is the private place to choose.
  *
  * Pure: built from rows the caller loaded, no database or Discord. Everything
  * on it is a database fact (plan section 14); the model writes none of it.
@@ -45,6 +51,8 @@ export interface AgentPanelInput {
   hasOtherSlots: boolean;
   /** One line shown above the panel: what just happened (picked / already taken / agent added). */
   notice?: string;
+  /** Uploaded agent portrait emojis (discord/agentEmojiCache.ts). Absent or empty = role glyphs. */
+  emojis?: AgentEmojiMap;
 }
 
 /** A built-in or player-suggested agent, normalized for display. */
@@ -57,17 +65,8 @@ export interface PanelAgent {
 }
 
 const COLOR_HEADER = 0xff4655; // Valorant red
-const COLOR_SUGGESTED = 0xff4655;
-const COLOR_OTHER = 0x2d3a4a; // Valorant's dark slate
-const COLOR_TAKEN = 0x4f545c;
-const COLOR_MINE = 0xf5c542;
+const COLOR_AGENTS = 0x2d3a4a; // Valorant's dark slate
 
-/**
- * The most agent cards (embeds with a portrait) one message can hold next to the header embed: Discord allows 10
- * embeds. A role with more agents than that shows one card fewer, to leave the last embed for a compact "MORE" list.
- * (Duelists are 8 today, so one player-suggested duelist still gets a full card.)
- */
-export const MAX_AGENT_CARDS = 9;
 /** Buttons: role tabs take row 1, actions the last row, so three rows of five remain for agents. */
 export const MAX_AGENT_BUTTONS = 15;
 /** The most agents one role can hold (built-in + suggested): what the button rows can show. */
@@ -89,7 +88,7 @@ export function agentNameFor(key: string, customAgents: readonly CustomAgentRow[
 const COMP_LETTER = ["A", "B"];
 
 export function buildAgentPanel(input: AgentPanelInput): { content: string; embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } {
-  const { poll, slot, picks, customAgents, viewerId, tab } = input;
+  const { poll, slot, picks, customAgents, viewerId, tab, emojis } = input;
   const tz = poll.timezone;
   const holderOf = new Map(picks.map((p) => [p.agentKey, p.discordUserId]));
   const mine = picks.find((p) => p.discordUserId === viewerId);
@@ -102,78 +101,54 @@ export function buildAgentPanel(input: AgentPanelInput): { content: string; embe
   });
 
   const nameOf = (key: string) => escapeMarkdown(agentNameFor(key, customAgents));
+  const iconOf = (key: string) => {
+    const a = agentByKey(key);
+    return agentIconText(key, a ? ROLE_GLYPH[a.role] : "▫️", emojis);
+  };
   const dayTime = `${formatSlotDay(slot.scheduledAt, tz)} · ${formatSlotTime(slot.scheduledAt, tz)}`;
   const at = Math.floor((slot.queueAt ?? slot.scheduledAt).getTime() / 1000);
 
-  // ---- header
+  // ---- header: one block per idea, a blank line between them
+  const compBlocks = comps.map((comp, i) => {
+    const line = comp.agents.map((key) => `${iconOf(key)} ${nameOf(key)}${holderOf.has(key) ? " ✅" : ""}`).join("  ·  ");
+    return `${i === 0 ? "🅰️" : "🅱️"} **COMP ${COMP_LETTER[i]} — ${comp.name}${general ? " (general)" : ""}**\n${line}`;
+  });
   const header = new EmbedBuilder()
     .setColor(COLOR_HEADER)
     .setTitle("◢ AGENT PICK ◣")
     .setDescription(
       [
-        `📅 **${dayTime}** · <t:${at}:R>`,
-        slot.map ? `🗺️ **MAP: ${slot.map.toUpperCase()}**` : "🗺️ **MAP: TBD** — an admin sets it with `/schedule-slot`",
-        "",
-        `▸ **${ROLE_LABEL[tab].toUpperCase()}** — ${ROLE_BLURB[tab]}`,
-      ].join("\n"),
+        `📅 **${dayTime}** · <t:${at}:R>\n${slot.map ? `🗺️ **MAP: ${slot.map.toUpperCase()}**` : "🗺️ **MAP: TBD** — an admin sets it with `/schedule-slot`"}`,
+        `🎯 **YOUR PICK:** ${mine ? `**${nameOf(mine.agentKey)}**` : "_none yet — tap an agent below_"}`,
+        ...compBlocks,
+        ...(picks.length > 0 ? [`🔒 **SQUAD · ${picks.length} locked**\n${picks.map((p) => `<@${p.discordUserId}> — **${nameOf(p.agentKey)}**`).join("\n")}`] : []),
+      ].join("\n\n"),
     );
-
-  comps.forEach((comp, i) => {
-    const line = comp.agents
-      .map((key) => {
-        const a = agentByKey(key);
-        const taken = holderOf.has(key) ? " ✅" : "";
-        return `${a ? ROLE_GLYPH[a.role] : "▫️"} ${nameOf(key)}${taken}`;
-      })
-      .join("  ·  ");
-    header.addFields({ name: `${i === 0 ? "🅰️" : "🅱️"} SUGGESTED COMP ${COMP_LETTER[i]} — ${comp.name}${general ? " (general)" : ""}`, value: line });
-  });
-
-  header.addFields({
-    name: "🎯 YOUR PICK",
-    value: mine ? `**${nameOf(mine.agentKey)}**` : "_none yet — tap an agent below_",
-    inline: true,
-  });
-  if (picks.length > 0) {
-    header.addFields({
-      name: `🔒 SQUAD PICKS · ${picks.length}`,
-      value: picks.map((p) => `<@${p.discordUserId}> — **${nameOf(p.agentKey)}**`).join("\n").slice(0, 1024),
-      inline: true,
-    });
+  if (mine) {
+    const portrait = agentByKey(mine.agentKey);
+    if (portrait) header.setThumbnail(agentIconUrl(portrait)); // the selected agent, big — like the centre of the game's select screen
   }
-  header.setFooter({ text: `PREMIER · Schedule #${poll.id} · slot ${slot.position} · one agent each, no duplicates` });
 
-  // ---- the open tab: suggested agents first, then the other options
+  // ---- the open tab: suggested agents first, then the other options, three across
   const all = agentsForRole(tab, customAgents);
   const ordered = [...all.filter((a) => suggestedBy.has(a.key)), ...all.filter((a) => !suggestedBy.has(a.key))];
-  const cardCount = ordered.length <= MAX_AGENT_CARDS ? ordered.length : MAX_AGENT_CARDS - 1;
-  const cards = ordered.slice(0, cardCount).map((a) => {
+  const cells = ordered.slice(0, MAX_AGENT_BUTTONS).map((a) => {
     const holder = holderOf.get(a.key);
     const isMine = holder === viewerId;
-    const tags = [
-      suggestedBy.has(a.key) ? `⭐ SUGGESTED · ${suggestedBy.get(a.key)!.join(", ")}` : "OTHER OPTION",
-      a.custom ? `➕ ADDED BY <@${a.custom.suggestedByUserId}>` : null,
-    ].filter(Boolean);
-    const status = isMine ? "✅ **YOUR PICK**" : holder ? `🔒 **PICKED BY** <@${holder}>` : "🟢 **OPEN**";
-    return new EmbedBuilder()
-      .setColor(isMine ? COLOR_MINE : holder ? COLOR_TAKEN : suggestedBy.has(a.key) ? COLOR_SUGGESTED : COLOR_OTHER)
-      .setTitle(`${ROLE_GLYPH[tab]} ${a.name.toUpperCase()}`)
-      .setThumbnail(a.iconUrl)
-      .setDescription(`${tags.join(" · ")}\n${status}`);
+    const status = isMine ? "✅ **YOU**" : holder ? `🔒 <@${holder}>` : "🟢 Open";
+    const tags = suggestedBy.has(a.key) ? `⭐ ${suggestedBy.get(a.key)!.join(", ")}` : a.custom ? `➕ by <@${a.custom.suggestedByUserId}>` : null;
+    return {
+      name: `${a.custom ? ROLE_GLYPH[tab] : iconOf(a.key)} ${a.name.toUpperCase()}`.slice(0, 256),
+      value: tags ? `${status}\n${tags}` : status,
+      inline: true,
+    };
   });
-  const overflow = ordered.slice(cardCount);
-  if (overflow.length > 0) {
-    cards.push(
-      new EmbedBuilder().setColor(COLOR_OTHER).setTitle(`MORE ${ROLE_LABEL[tab].toUpperCase()}`).setDescription(
-        overflow
-          .map((a) => {
-            const holder = holderOf.get(a.key);
-            return `**${escapeMarkdown(a.name)}** — ${holder === viewerId ? "✅ your pick" : holder ? `🔒 <@${holder}>` : "🟢 open"}${a.custom ? ` (added by <@${a.custom.suggestedByUserId}>)` : ""}`;
-          })
-          .join("\n"),
-      ),
-    );
-  }
+  const agents = new EmbedBuilder()
+    .setColor(COLOR_AGENTS)
+    .setTitle(`${ROLE_GLYPH[tab]} ${ROLE_LABEL[tab].toUpperCase()}`)
+    .setDescription(`_${ROLE_BLURB[tab]}_`)
+    .addFields(cells)
+    .setFooter({ text: `PREMIER · Schedule #${poll.id} · slot ${slot.position} · one agent each, no duplicates` });
 
   // ---- buttons
   const rows: ActionRowBuilder<ButtonBuilder>[] = [
@@ -196,11 +171,14 @@ export function buildAgentPanel(input: AgentPanelInput): { content: string; embe
           const holder = holderOf.get(a.key);
           const isMine = holder === viewerId;
           const takenByOther = Boolean(holder) && !isMine;
-          return new ButtonBuilder()
+          const button = new ButtonBuilder()
             .setCustomId(agentPickId(slot.id, a.key))
             .setLabel(takenByOther ? `${a.name} 🔒`.slice(0, 80) : a.name.slice(0, 80))
             .setStyle(isMine ? ButtonStyle.Success : suggestedBy.has(a.key) && !takenByOther ? ButtonStyle.Primary : ButtonStyle.Secondary)
             .setDisabled(takenByOther);
+          const portrait = a.custom ? undefined : emojis?.get(a.key);
+          if (portrait) button.setEmoji({ id: portrait.id, name: portrait.name });
+          return button;
         }),
       ),
     );
@@ -214,8 +192,8 @@ export function buildAgentPanel(input: AgentPanelInput): { content: string; embe
   }
   rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(actions));
 
-  const content = [`🎯 **AGENT PICK** — ${dayTime}${slot.map ? ` · ${slot.map}` : ""}`, input.notice].filter(Boolean).join("\n");
-  return { content, embeds: [header, ...cards], components: rows };
+  // `content` is always a string: an edit that omits it would leave the previous notice on screen.
+  return { content: input.notice ?? "", embeds: [header, agents], components: rows };
 }
 
 export { ROLE_SINGULAR };

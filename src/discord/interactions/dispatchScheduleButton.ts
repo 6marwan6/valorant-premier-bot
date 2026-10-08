@@ -9,6 +9,8 @@ import { defaultTab, renderPanel } from "./dispatchAgentPick.js";
 import { formatSlotDay, formatSlotTime } from "../../modules/schedules/scheduleLogic.js";
 import { resolveDisplayName } from "../displayName.js";
 import { renderSchedule } from "../scheduleSync.js";
+import { syncAgentBoard } from "../agentBoardSync.js";
+import { loadAgentEmojis } from "../agentEmojiCache.js";
 
 /**
  * Mari's reaction to a schedule vote (2026-10-03): CELEBRATE for a player's
@@ -111,7 +113,8 @@ export async function dispatchScheduleButton(interaction: ButtonInteraction, ctx
         return;
       }
       const profile = await ctx.repositories.players.getByDiscordUserId(guildId, who.discordUserId);
-      await interaction.followUp({ ...renderPanel(opened.value, who.discordUserId, defaultTab(profile)), ephemeral: true });
+      const emojis = await loadAgentEmojis(ctx.discord, ctx.logger);
+      await interaction.followUp({ ...renderPanel(opened.value, who.discordUserId, defaultTab(profile), undefined, emojis), ephemeral: true });
       return;
     }
 
@@ -140,11 +143,15 @@ export async function dispatchScheduleButton(interaction: ButtonInteraction, ctx
         const panel = await ctx.services.agentPicks.load({ guildId, slotId: slot.id, discordUserId: who.discordUserId }).catch(() => null);
         const profile = await ctx.repositories.players.getByDiscordUserId(guildId, who.discordUserId).catch(() => undefined);
         const notice = `✅ You're **in** for **${label}**. ${mine} Pick your agent below 👇`;
-        const reply = panel?.ok ? { ...renderPanel(panel.value, who.discordUserId, defaultTab(profile), notice), ephemeral: true } : { content: `✅ You're **in** for **${label}**. ${mine}`, ephemeral: true };
+        const emojis = await loadAgentEmojis(ctx.discord, ctx.logger);
+        const reply = panel?.ok ? { ...renderPanel(panel.value, who.discordUserId, defaultTab(profile), notice, emojis), ephemeral: true } : { content: `✅ You're **in** for **${label}**. ${mine}`, ephemeral: true };
         await interaction.followUp(reply).catch(() => undefined);
       } else {
         await interaction.followUp({ content: `↩️ Removed your vote for **${label}**. ${mine}`, ephemeral: true }).catch(() => undefined);
       }
+
+      // The public AGENT SELECT lineup shows who is in (and drops a pick that went with a removed vote). Never throws.
+      await syncAgentBoard(ctx, view);
 
       if (did === "added") {
         await reactWithMari(interaction, ctx, {
@@ -194,6 +201,7 @@ export async function dispatchScheduleButton(interaction: ButtonInteraction, ctx
       .followUp({ content: "🚫 Got it — you can't play any day this week. Tap a slot any time if that changes.", ephemeral: true })
       .catch(() => undefined);
     if (result.value.changed) {
+      await syncAgentBoard(ctx, result.value.view); // a decline frees the player's pick (and their place in the lineup)
       await reactWithMari(interaction, ctx, {
         guildId,
         pollId: action.pollId,

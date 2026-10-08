@@ -11,6 +11,7 @@
     "dev": "vercel dev",
     "deploy-commands": "tsx src/scripts/deployCommands.ts",
     "validate-commands": "tsx src/scripts/validateCommands.ts",
+    "sync-agent-emojis": "tsx src/scripts/syncAgentEmojis.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/database/migrate.ts",
     "test": "vitest run tests/unit",

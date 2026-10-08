@@ -103,7 +103,7 @@ describe("a member can chat with Mari (server chat is not Premier-gated)", () =>
 });
 
 describe("schedule AI events — sparse, database-only facts", () => {
-  const slot = { id: 3, pollId: 1, position: 1, scheduledAt: new Date("2026-10-10T16:00:00Z"), queueAt: null, remindMode: "AUTO", quorumAnnouncedAt: null, createdAt: new Date() } as const;
+  const slot = { id: 3, pollId: 1, position: 1, scheduledAt: new Date("2026-10-10T16:00:00Z"), queueAt: null, remindMode: "AUTO", map: null, quorumAnnouncedAt: null, createdAt: new Date() } as const;
 
   it("a vote names only the slot voted for", () => {
     const e = buildVoteEvent({ pollId: 1, slot: { ...slot }, timezone: "Africa/Cairo" });

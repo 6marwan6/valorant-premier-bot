@@ -43,6 +43,7 @@ describeIfDb("Agent pick panel (integration)", () => {
   const stamp = Date.now();
   const guildId = `agent-guild-${stamp}`;
   const channelId = `agent-chan-${stamp}`;
+  let posted = 0;
   const edits: Array<{ channelId: string; messageId: string; payload: ReplyPayload }> = [];
   const interactionEdits: Array<{ token: string; payload: ReplyPayload }> = [];
   const followups: Array<{ token: string; payload: ReplyPayload }> = [];
@@ -56,7 +57,7 @@ describeIfDb("Agent pick panel (integration)", () => {
   beforeAll(async () => {
     ({ db, pool } = createDatabase({ DATABASE_URL: databaseUrl! }));
     const discord = {
-      sendChannelMessage: vi.fn(async () => ({ id: "m" })),
+      sendChannelMessage: vi.fn(async () => ({ id: `posted-${++posted}` })),
       sendMentionMessage: vi.fn(async () => ({ id: "mention" })),
       editChannelMessage: vi.fn(async (c: string, m: string, payload: ReplyPayload) => {
         edits.push({ channelId: c, messageId: m, payload });
@@ -93,6 +94,10 @@ describeIfDb("Agent pick panel (integration)", () => {
     return created.value;
   }
   const finish = () => ctx.services.schedules.cancel(guildId);
+  /** One agent's cell in the panel's agents grid (the second embed): its name over its status. */
+  const cell = (panel: ReplyPayload, agent: string) => (panel.embeds?.at(1)?.toJSON().fields ?? []).find((f) => f.name.includes(agent.toUpperCase()));
+  /** Edits of the schedule card itself (the lineup message is a different message). */
+  const cardEdits = (pollId: number) => edits.filter((e) => e.messageId === `msg-${pollId}`);
   const voteVia = (pollId: number, slotId: number, u: { id: string; name: string }) => {
     const c = click(buildVoteCustomId(pollId, slotId), u, guildId);
     return dispatchButton(c.interaction, ctx).then(() => c);
@@ -106,16 +111,16 @@ describeIfDb("Agent pick panel (integration)", () => {
     expect(c.followUp).toHaveBeenCalledTimes(1);
     const panel = c.followUp.mock.calls[0]![0];
     expect(panel.ephemeral).toBe(true);
-    expect(panel.embeds!.length).toBeGreaterThan(1);
+    expect(panel.embeds).toHaveLength(2); // the header and one grid of agents — not a tall card per agent
     expect(panel.components!.length).toBeGreaterThanOrEqual(3);
     const text = visibleText(panel);
     expect(text).toContain("AGENT PICK");
     expect(text).toContain("SAT 28/06");
-    expect(text).toContain("SUGGESTED COMP A");
+    expect(text).toContain("COMP A");
     expect(text).toContain("MAP: TBD");
     expect(panel.content).toContain("You're **in**");
     // p1 is a Duelist: the panel opens on the Duelists tab.
-    expect(panel.embeds!.slice(1).some((e) => e.toJSON().title?.includes("JETT"))).toBe(true);
+    expect(cell(panel, "Jett")).toBeTruthy();
     // the controller and sentinel tabs are one tap away
     const tabs = (panel.components![0]!.toJSON().components as Array<{ label: string; disabled?: boolean }>);
     expect(tabs.map((t) => t.label)).toEqual(["Duelists", "Initiators", "Controllers", "Sentinels"]);
@@ -152,11 +157,10 @@ describeIfDb("Agent pick panel (integration)", () => {
     expect((await ctx.repositories.schedules.listPicksBySlot(slotId)).map((p) => [p.discordUserId, p.agentKey])).toEqual([[p1.id, "jett"]]);
 
     // the public schedule card was refreshed with the pick, and that edit cannot notify anyone
-    expect(edits).toHaveLength(1);
-    expect(edits[0]!.messageId).toBe(`msg-${poll.id}`);
-    expect(visibleText(edits[0]!.payload)).toContain(`<@${p1.id}> · **Jett**`);
-    expect(edits[0]!.payload.suppressMentions).toBe(true);
-    expect(edits[0]!.payload.mentionUserIds ?? []).toHaveLength(0);
+    expect(cardEdits(poll.id)).toHaveLength(1);
+    expect(visibleText(cardEdits(poll.id)[0]!.payload)).toContain(`<@${p1.id}> · **Jett**`);
+    expect(cardEdits(poll.id)[0]!.payload.suppressMentions).toBe(true);
+    expect(cardEdits(poll.id)[0]!.payload.mentionUserIds ?? []).toHaveLength(0);
 
     // picking the same agent again changes nothing and doesn't refresh the card
     edits.length = 0;
@@ -179,8 +183,7 @@ describeIfDb("Agent pick panel (integration)", () => {
     expect(lastPanel(taken).content).toContain(`already picked by <@${p1.id}>`);
     expect((await ctx.repositories.schedules.listPicksBySlot(slotId)).map((p) => p.discordUserId)).toEqual([p1.id]);
     // The panel jumps to the tab of the agent that was refused and shows Jett as picked by p1, with its button disabled.
-    const card = lastPanel(taken).embeds!.map((e) => e.toJSON()).find((e) => e.title?.includes("JETT"))!;
-    expect(card.description).toContain(`PICKED BY** <@${p1.id}>`);
+    expect(cell(lastPanel(taken), "Jett")!.value).toContain(`🔒 <@${p1.id}>`);
     const jettButton = (lastPanel(taken).components!.flatMap((r) => r.toJSON().components) as Array<{ label: string; disabled?: boolean }>).find((b) => b.label.startsWith("Jett"))!;
     expect(jettButton.disabled).toBe(true);
 
@@ -331,24 +334,23 @@ describeIfDb("Agent pick panel (integration)", () => {
       const r = await submit(slotId, "DUELIST", p1, "Zephyr");
       expect(r.edit!.content).toContain("**Zephyr** added to Duelists");
       expect(r.edit!.content).toContain(`suggested by <@${p1.id}>`);
-      const card = r.edit!.embeds!.map((e) => e.toJSON()).find((e) => e.title?.includes("ZEPHYR"))!;
-      expect(card.description).toContain(`ADDED BY <@${p1.id}>`);
-      expect(card.description).toContain("OPEN");
+      const card = cell(r.edit!, "Zephyr")!;
+      expect(card.value).toContain(`➕ by <@${p1.id}>`);
+      expect(card.value).toContain("Open");
       const stored = (await ctx.repositories.schedules.listCustomAgents(guildId)).find((c) => c.key === "zephyr")!;
       expect(stored).toMatchObject({ displayName: "Zephyr", role: "DUELIST", suggestedByUserId: p1.id });
 
       // another player sees it on the Duelists tab, credited to p1
       const tab = click(agentRoleId(slotId, "DUELIST"), p2, guildId);
       await dispatchButton(tab.interaction, ctx);
-      const seen = lastPanel(tab).embeds!.map((e) => e.toJSON()).find((e) => e.title?.includes("ZEPHYR"))!;
-      expect(seen.description).toContain(`ADDED BY <@${p1.id}>`);
+      expect(cell(lastPanel(tab), "Zephyr")!.value).toContain(`➕ by <@${p1.id}>`);
 
       // ...and can pick it; the public card then shows the name
       edits.length = 0;
       const pickIt = click(agentPickId(slotId, "zephyr"), p2, guildId);
       await dispatchButton(pickIt.interaction, ctx);
       expect(lastPanel(pickIt).content).toContain("You're playing **Zephyr**");
-      expect(visibleText(edits.at(-1)!.payload)).toContain(`<@${p2.id}> · **Zephyr**`);
+      expect(visibleText(cardEdits(poll.id).at(-1)!.payload)).toContain(`<@${p2.id}> · **Zephyr**`);
       await finish();
     });
 
@@ -370,7 +372,7 @@ describeIfDb("Agent pick panel (integration)", () => {
       await voteVia(poll.id, slotId, p1);
       const r = await submit(slotId, "DUELIST", p1, "kay-o");
       expect(r.edit!.content).toContain("**KAY/O** is already in the list under Initiators");
-      expect(r.edit!.embeds!.map((e) => e.toJSON()).some((e) => e.title?.includes("KAY/O"))).toBe(true); // now on the Initiators tab
+      expect(cell(r.edit!, "KAY/O")).toBeTruthy(); // now on the Initiators tab
       await finish();
     });
 

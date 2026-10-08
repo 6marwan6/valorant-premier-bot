@@ -63,6 +63,15 @@ export class DiscordRestClient {
     private readonly applicationId: string,
   ) {}
 
+  /**
+   * The emojis this application owns (the agent portraits uploaded by `npm run sync-agent-emojis`). Application emojis
+   * work in every server the bot is in, with no extra permission. Throws on a Discord error; callers fall back to glyphs.
+   */
+  async listApplicationEmojis(): Promise<Array<{ id: string; name: string | null }>> {
+    const res = (await this.rest.get(Routes.applicationEmojis(this.applicationId))) as { items?: Array<{ id: string; name: string | null }> };
+    return res.items ?? [];
+  }
+
   /** Posts a brand-new message to a channel — used by /post-match and the reminder cron job (plain-text roster announcement, or an embed nudge — reminderMessages.ts). */
   async sendChannelMessage(channelId: string, payload: ReplyPayload): Promise<{ id: string }> {
     return (await this.rest.post(Routes.channelMessages(channelId), {

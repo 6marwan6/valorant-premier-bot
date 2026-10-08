@@ -66,6 +66,31 @@ export class ScheduleRepository {
     await this.db.update(schedulePolls).set({ messageId, updatedAt: new Date() }).where(eq(schedulePolls.id, pollId));
   }
 
+  /**
+   * Takes the right to post the poll's AGENT SELECT lineup. One `UPDATE ... WHERE` so only one of several racing
+   * callers wins; a claim older than `staleAfterMs` (a poster that crashed between claiming and posting) can be retaken.
+   * Never wins once a message id is recorded.
+   */
+  async claimAgentBoardPost(pollId: number, now: Date = new Date(), staleAfterMs = 60_000): Promise<boolean> {
+    const rows = await this.db
+      .update(schedulePolls)
+      .set({ agentBoardClaimedAt: now })
+      .where(
+        and(
+          eq(schedulePolls.id, pollId),
+          isNull(schedulePolls.agentBoardMessageId),
+          sql`(${schedulePolls.agentBoardClaimedAt} IS NULL OR ${schedulePolls.agentBoardClaimedAt} < ${new Date(now.getTime() - staleAfterMs)})`,
+        ),
+      )
+      .returning({ id: schedulePolls.id });
+    return rows.length > 0;
+  }
+
+  /** Records the posted lineup message (clearing the claim), or forgets it (`null`) when someone deleted it in Discord. */
+  async setAgentBoardMessageId(pollId: number, messageId: string | null): Promise<void> {
+    await this.db.update(schedulePolls).set({ agentBoardMessageId: messageId, agentBoardClaimedAt: null }).where(eq(schedulePolls.id, pollId));
+  }
+
   /** Removes a poll that never got its message (the post to Discord failed) so a retry starts clean. */
   async deletePoll(pollId: number): Promise<void> {
     await this.db.delete(schedulePolls).where(eq(schedulePolls.id, pollId));

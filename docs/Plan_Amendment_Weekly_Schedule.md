@@ -147,3 +147,49 @@ Choosing a date now opens a **private** panel (replacing the plain "you're in" t
 3. No admin command yet to remove a bad suggested agent (each shows who added it); easy to add.
 4. The panel is a snapshot: it redraws on every tap, but doesn't live-update when someone else picks.
 5. Mentions inside embeds can show as "@unknown-user" for someone Discord hasn't loaded on a client; the ping line in the message text is unaffected.
+
+---
+
+# Part 4 — Roomier messages, horizontal agent pick, public lineup (2026-10-07)
+
+## Request (owner)
+
+1. The schedule and agent-pick messages are too crowded — especially the agent pick — and need more space.
+2. A **main agent-pick message visible to everyone** that shows which agents have been picked so far and who picked them.
+3. In the (private) agent pick, show the agents **horizontally, not vertically**, to look more like Valorant.
+
+Plan sections touched: §14 (facts stay deterministic — still true: nothing here is written by the model), §16 (one public message edited in place, as for the match roster), §44 (the lineup only repeats what the schedule card already shows publicly: who voted for a slot and which agent they took), principle #8 (a failed Discord call never affects a vote or pick).
+
+## What changed
+
+| | Before | Now |
+|---|---|---|
+| Schedule card | One packed embed: board, then a field per slot repeating the same slots | Two embeds: **status + board**, then **WHO'S IN** — one block per slot, a blank line between blocks, then "can't play any day" and "no vote yet". Buttons unchanged |
+| Agent pick panel | Header + one tall embed per agent (up to 10 embeds) | Two embeds: a header (when, map, your pick, comps A/B, squad) and **one grid of agents, three across**, each cell = portrait + name over OPEN / YOU / 🔒 @player. Your picked agent's portrait is the header thumbnail |
+| Public pick message | none | **AGENT SELECT lineup**: one message per schedule, edited in place. Per slot with votes: map, "N/M locked in", the picks side by side (agent over player, ordered Duelists → Initiators → Controllers → Sentinels), and who is still choosing. Has a 🎯 PICK AGENT button |
+
+## Why "horizontal" looks like this (Discord's limits)
+
+Embeds always stack vertically; the only things that sit side by side are *inline fields* (3 per row), buttons (5 per row) and inline emoji. So the agents are a 3-across grid of inline fields, and the portraits are **application emojis** that sit inline in a cell's name and on the buttons. A card-per-agent with a big picture each cannot be made horizontal in Discord.
+
+Portraits as emoji need one setup step: **`npm run sync-agent-emojis`** (uploads the small portrait of each agent from valorant-api.com as `agent_<key>`; safe to re-run, e.g. after adding a new agent to `agentData.ts`). **Until it is run (or if Discord can't be reached) the panel and lineup use the role glyph instead** — nothing breaks. The app picks new emojis up within 10 minutes. Agents added with "➕ Add an agent" have no portrait and always show the role glyph.
+
+## Lineup message — behaviour
+
+- Posted by `/create-schedule` right under the card; a schedule created **before** this change gets one on its next vote or pick.
+- Refreshed after every vote, "can't play any day", agent pick/clear, `/schedule-slot` and `/cancel-schedule` (cancelled: the text says so and the button is removed).
+- Never pings anyone (mentions inside embeds don't notify, and it is sent with mentions suppressed). Slots that have started are left out.
+- Posting is claimed in the database first, so two simultaneous clicks post one message (§50); a crashed poster's claim expires after 60 s. If someone deletes the message, the next change posts a fresh one.
+- A Discord failure is logged and swallowed — the vote or pick is already saved (§48, principle #8).
+- Discord's 6000-character limit across a message's embeds is enforced: with an unusually large number of voters (only possible before a roster exists) fewer players are listed per slot, with "+N more".
+
+## Schema (migration `0019_add_agent_board_message.sql`)
+
+`schedule_polls.agent_board_message_id` and `agent_board_claimed_at`. Run the migration, then (optionally) `npm run sync-agent-emojis`. No new slash commands, so `deploy-commands` is not needed for this change.
+
+## Decisions to confirm
+
+1. The lineup is **one message for the whole schedule** (a card per slot with votes), not one per slot.
+2. The squad list stays on the private panel as a short list, and is the full picture on the public lineup.
+3. The comps are now text blocks in the header rather than fields (same content).
+4. Not verified against live Discord: layout was checked as message data and tests, not by looking at it in a server — worth a glance after deploying, especially on mobile where inline fields may wrap to two across.

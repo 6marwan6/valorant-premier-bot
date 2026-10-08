@@ -43,6 +43,11 @@ export const schedulePolls = pgTable(
     channelId: text("channel_id").notNull(),
     // Null only between inserting the poll and posting its message.
     messageId: text("message_id"),
+    // The public AGENT SELECT lineup message (2026-10-07): one per poll, edited in place as votes and picks change.
+    // Null until it has been posted. `agentBoardClaimedAt` is the short-lived claim taken *before* posting, so two
+    // simultaneous clicks on an old poll can't post two lineups (plan section 50); a crashed poster's claim expires.
+    agentBoardMessageId: text("agent_board_message_id"),
+    agentBoardClaimedAt: timestamp("agent_board_claimed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
