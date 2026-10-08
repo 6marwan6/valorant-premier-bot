@@ -2,16 +2,18 @@ import type { AppContext } from "../appContext.js";
 import type { ScheduleView } from "../database/repositories/scheduleRepository.js";
 import { buildScheduleMessage } from "../modules/schedules/scheduleMessage.js";
 import { syncAgentBoard } from "./agentBoardSync.js";
+import { loadAgentEmojis } from "./agentEmojiCache.js";
 
 /** Builds the card for a poll from current database state (roster read fresh, so "No vote yet" is always current). */
 export async function renderSchedule(ctx: AppContext, view: ScheduleView, now: Date = new Date()) {
-  const [roster, customAgents] = await Promise.all([
+  const [roster, customAgents, emojis] = await Promise.all([
     ctx.repositories.players.listActivePlayersByGuild(view.poll.guildId),
     ctx.repositories.schedules.listCustomAgents(view.poll.guildId),
+    loadAgentEmojis(ctx.discord, ctx.logger), // never throws; empty = no portraits yet
   ]);
   // `suppressMentions`: the card carries the roster's @mentions in its text, and a re-render (a vote, an edit) must never
   // notify anyone again. Only the very first post pings — createSchedule overrides this with the roster as the allowed users.
-  return { ...buildScheduleMessage(view, roster, now, customAgents), suppressMentions: true as const, rosterIds: roster.map((p) => p.discordUserId) };
+  return { ...buildScheduleMessage(view, roster, now, customAgents, emojis), suppressMentions: true as const, rosterIds: roster.map((p) => p.discordUserId) };
 }
 
 /**

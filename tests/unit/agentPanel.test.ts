@@ -138,6 +138,7 @@ describe("buildAgentPanel", () => {
     expect(cellOf(p, "Raze").name).toContain("⚔️"); // no emoji uploaded for Raze
     const jett = p.components.flatMap((r) => r.toJSON().components as Array<{ label?: string; emoji?: { id?: string } }>).find((b) => b.label === "Jett")!;
     expect(jett.emoji?.id).toBe("111111111111111111");
+    expect(build({ emojis, picks: [pick("u1", "jett")] }).embeds[0]!.toJSON().description).toContain("<@u1> — <:agent_jett:111111111111111111> **Jett**"); // the squad list too
     // without any emojis the panel still builds
     expect(cellOf(build(), "Jett").name).toContain("⚔️");
   });

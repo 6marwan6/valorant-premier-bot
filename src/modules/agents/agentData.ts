@@ -82,11 +82,6 @@ export function agentIconUrl(agent: Pick<AgentInfo, "uuid">): string {
   return `https://media.valorant-api.com/agents/${agent.uuid}/displayicon.png`;
 }
 
-/** The small portrait (valorant-api.com's `displayiconsmall`) — what the one-time emoji sync uploads, light enough for Discord's 256 KB emoji limit. */
-export function agentSmallIconUrl(agent: Pick<AgentInfo, "uuid">): string {
-  return `https://media.valorant-api.com/agents/${agent.uuid}/displayiconsmall.png`;
-}
-
 /** Discord application-emoji name for an agent's portrait (2-32 letters/digits/underscores): `agent_jett`, `agent_kayo`. */
 export const AGENT_EMOJI_PREFIX = "agent_";
 export const agentEmojiName = (key: string) => `${AGENT_EMOJI_PREFIX}${key}`;

@@ -2,8 +2,8 @@ import "dotenv/config";
 import { REST, Routes } from "discord.js";
 import { loadEnv } from "../config/env.js";
 import { logger } from "../config/logger.js";
-import { agentEmojiName, agentSmallIconUrl } from "../modules/agents/agentData.js";
-import { agentsMissingEmojis } from "../modules/agents/agentEmojis.js";
+import { AGENTS, agentEmojiName } from "../modules/agents/agentData.js";
+import { EMOJI_PIXELS, syncAgentEmojis, type AgentImageMeta } from "../modules/agents/agentEmojiSync.js";
 
 /**
  * Uploads the agent portraits as Discord *application emojis* so the agent
@@ -12,43 +12,49 @@ import { agentsMissingEmojis } from "../modules/agents/agentEmojis.js";
  * that already have an emoji are skipped, so after Riot adds an agent you add
  * it to agentData.ts and run this again.
  *
- * The portraits come from valorant-api.com (the same catalogue agentData.ts
- * points at), the small 128px-class icon so it fits Discord's 256 KB emoji limit.
- * Needs only the bot token and client id already in .env. The app picks the new
- * emojis up within ~10 minutes (or on its next cold start).
+ * Each agent's image URLs come from valorant-api.com, and the image is resized
+ * to a 128x128 PNG here (with `sharp`, a dev dependency — this script runs on
+ * your machine, not in the deployed app). Needs only the bot token and client
+ * id already in .env. The app picks the new emojis up within ~10 minutes.
  *
  * Run with: npm run sync-agent-emojis
  */
-const MAX_EMOJI_BYTES = 256 * 1024;
-
 async function main() {
   const env = loadEnv();
   const rest = new REST().setToken(env.DISCORD_BOT_TOKEN);
   const route = Routes.applicationEmojis(env.DISCORD_CLIENT_ID);
 
+  const sharp = (await import("sharp")).default;
   const existing = ((await rest.get(route)) as { items?: Array<{ name: string | null }> }).items ?? [];
-  const missing = agentsMissingEmojis(existing.map((e) => e.name ?? ""));
-  logger.info({ event: "agentEmojis.start", existing: existing.length, toUpload: missing.length }, "Syncing agent portrait emojis");
+  logger.info({ event: "agentEmojis.start", existing: existing.length, agents: AGENTS.length }, "Syncing agent portrait emojis");
 
-  let uploaded = 0;
-  let failed = 0;
-  for (const agent of missing) {
-    try {
-      const res = await fetch(agentSmallIconUrl(agent), { signal: AbortSignal.timeout(15_000) });
-      if (!res.ok) throw new Error(`portrait download failed (HTTP ${res.status})`);
-      const bytes = Buffer.from(await res.arrayBuffer());
-      if (bytes.length > MAX_EMOJI_BYTES) throw new Error(`portrait is ${bytes.length} bytes, over Discord's ${MAX_EMOJI_BYTES} byte emoji limit`);
-      await rest.post(route, { body: { name: agentEmojiName(agent.key), image: `data:image/png;base64,${bytes.toString("base64")}` } });
-      uploaded++;
-      logger.info({ event: "agentEmojis.uploaded", agent: agent.key }, `Uploaded ${agent.name}`);
-    } catch (err) {
-      failed++;
-      logger.warn({ event: "agentEmojis.failed", agent: agent.key, err: err instanceof Error ? err.message : String(err) }, `Couldn't upload ${agent.name}`);
-    }
+  const result = await syncAgentEmojis({
+    existingNames: existing.map((e) => e.name ?? ""),
+    async fetchMeta(uuid) {
+      const res = await fetch(`https://valorant-api.com/v1/agents/${uuid}`, { signal: AbortSignal.timeout(15_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return ((await res.json()) as { data?: AgentImageMeta }).data ?? {};
+    },
+    async fetchBytes(url) {
+      const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return Buffer.from(await res.arrayBuffer());
+    },
+    toEmojiPng: (bytes) =>
+      sharp(bytes).resize(EMOJI_PIXELS, EMOJI_PIXELS, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } }).png({ compressionLevel: 9 }).toBuffer(),
+    async upload(name, png) {
+      await rest.post(route, { body: { name, image: `data:image/png;base64,${png.toString("base64")}` } });
+    },
+    onProgress: ({ agent, ok, detail }) =>
+      ok ? logger.info({ event: "agentEmojis.uploaded", agent }, `Uploaded ${agent} (${detail})`) : logger.warn({ event: "agentEmojis.failed", agent, err: detail }, `Couldn't upload ${agent}`),
+  });
+
+  logger.info({ event: "agentEmojis.complete", uploaded: result.uploaded.length, failed: result.failed.length, alreadyThere: result.alreadyThere }, "Agent portrait emoji sync finished");
+  if (result.failed.length > 0) {
+    // Repeat the reasons at the very end so they are not lost above 29 lines of progress.
+    console.error(`\n${result.failed.length} failed:\n${result.failed.map((f) => `  ${f.agent}: ${f.reason}`).join("\n")}`);
+    process.exit(1);
   }
-
-  logger.info({ event: "agentEmojis.complete", uploaded, failed, alreadyThere: existing.length }, "Agent portrait emoji sync finished");
-  if (failed > 0) process.exit(1);
 }
 
 main().catch((err) => {

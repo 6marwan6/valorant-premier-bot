@@ -1,3 +1,4 @@
+import { emojiMarkup, type AgentEmojiMap } from "../agents/agentEmojis.js";
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } from "discord.js";
 import { DateTime } from "luxon";
 import type { ScheduleView } from "../../database/repositories/scheduleRepository.js";
@@ -58,9 +59,21 @@ function nameOf(userId: string, profiles: Map<string, SchedulePlayer>): string {
 }
 
 /** `⚔️ <@id> · **Jett**` — a person with the agent they picked for this slot. */
-function withPick(userId: string, profiles: Map<string, SchedulePlayer>, picks: Map<string, string>): string {
+function withPick(userId: string, profiles: Map<string, SchedulePlayer>, picks: Map<string, string>, keys?: Map<string, string>, emojis?: AgentEmojiMap): string {
   const pick = picks.get(userId);
-  return `${nameOf(userId, profiles)}${pick ? ` · **${escapeMarkdown(pick)}**` : ""}`;
+  const portrait = pick ? emojis?.get(keys?.get(userId) ?? "") : undefined; // the agent's portrait, once `npm run sync-agent-emojis` has been run
+  return `${nameOf(userId, profiles)}${pick ? ` · ${portrait ? `${emojiMarkup(portrait)} ` : ""}**${escapeMarkdown(pick)}**` : ""}`;
+}
+
+/** slot id -> (user id -> agent key), to look a pick's portrait up. */
+function pickKeysBySlot(picks: readonly AgentPickRow[]): Map<number, Map<string, string>> {
+  const out = new Map<number, Map<string, string>>();
+  for (const p of picks) {
+    const inner = out.get(p.slotId) ?? new Map<string, string>();
+    inner.set(p.discordUserId, p.agentKey);
+    out.set(p.slotId, inner);
+  }
+  return out;
 }
 
 /** slot id -> (user id -> agent display name). */
@@ -134,7 +147,7 @@ function capDescription(text: string, limit: number = DESCRIPTION_LIMIT): string
  * blocks, then the people who can't play and who hasn't voted. Written as
  * description text rather than a stack of fields so the gaps are real gaps.
  */
-export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[] = [], now: Date = new Date(), customAgents: CustomAgentRow[] = []): ScheduleMessage {
+export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[] = [], now: Date = new Date(), customAgents: CustomAgentRow[] = [], emojis?: AgentEmojiMap): ScheduleMessage {
   const { poll, slots } = view;
   const tz = poll.timezone;
   const cancelled = poll.status === "CANCELLED";
@@ -143,6 +156,7 @@ export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[
   const counts = new Map(slots.map((s) => [s.id, bySlot.get(s.id)?.length ?? 0]));
   const leader = cancelled ? null : pickLeadingSlot(slots, counts, now);
   const picksFor = picksBySlot(view.picks ?? [], customAgents);
+  const keysFor = pickKeysBySlot(view.picks ?? []);
 
   // The roster is @mentioned in the message text, so posting the schedule notifies the team (the card itself is an embed, and an embed never pings). Edits don't re-notify: they are sent with mentions suppressed.
   const pings = !cancelled && roster.length > 0 ? `\n${rosterPings(roster)}` : "";
@@ -182,7 +196,8 @@ export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[
     const voters = bySlot.get(s.id) ?? [];
     const heading = `${NUMBER_EMOJI[s.position - 1] ?? s.position}  **${formatSlotDay(s.scheduledAt, tz)} · ${formatSlotTime(s.scheduledAt, tz)}**${s.map ? ` · 🗺️ ${s.map.toUpperCase()}` : ""}  —  **${voters.length}/${MIN_PLAYERS_TO_QUEUE}**`;
     const slotPicks = picksFor.get(s.id) ?? new Map<string, string>();
-    const people = voters.length ? voters.map((v) => withPick(v.discordUserId, profiles, slotPicks)).join(slotPicks.size > 0 ? "\n" : "  ·  ") : "_no votes yet_";
+    const slotKeys = keysFor.get(s.id);
+    const people = voters.length ? voters.map((v) => withPick(v.discordUserId, profiles, slotPicks, slotKeys, emojis)).join(slotPicks.size > 0 ? "\n" : "  ·  ") : "_no votes yet_";
     return `${heading}\n${people}`;
   });
   const out: string[] = [];

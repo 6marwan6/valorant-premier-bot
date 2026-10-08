@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AGENTS, agentEmojiName, agentSmallIconUrl } from "../../src/modules/agents/agentData.js";
+import { AGENTS, agentEmojiName } from "../../src/modules/agents/agentData.js";
 import { agentEmojiMapFrom, agentIconText, agentsMissingEmojis, emojiMarkup } from "../../src/modules/agents/agentEmojis.js";
 import { clearAgentEmojiCache, loadAgentEmojis } from "../../src/discord/agentEmojiCache.js";
 
@@ -23,11 +23,9 @@ describe("agent emoji map", () => {
     expect(agentIconText("raze", "⚔️", undefined)).toBe("⚔️");
   });
 
-  it("names every emoji validly (2–32 chars, letters/digits/underscore) and points at the small portrait", () => {
-    for (const a of AGENTS) {
-      expect(agentEmojiName(a.key)).toMatch(/^[A-Za-z0-9_]{2,32}$/);
-      expect(agentSmallIconUrl(a)).toBe(`https://media.valorant-api.com/agents/${a.uuid}/displayiconsmall.png`);
-    }
+  it("names every emoji validly (2–32 chars, letters/digits/underscore) and uniquely", () => {
+    for (const a of AGENTS) expect(agentEmojiName(a.key)).toMatch(/^[A-Za-z0-9_]{2,32}$/);
+    expect(new Set(AGENTS.map((a) => agentEmojiName(a.key))).size).toBe(AGENTS.length);
   });
 
   it("plans uploads only for agents without an emoji yet (the sync script is safe to re-run)", () => {

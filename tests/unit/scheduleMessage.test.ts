@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ScheduleView } from "../../src/database/repositories/scheduleRepository.js";
 import type { ScheduleSlotRow, ScheduleVoteRow } from "../../src/database/schema/schedules.js";
 import { buildQuorumMessage, buildScheduleMessage, buildSlotReminderMessage } from "../../src/modules/schedules/scheduleMessage.js";
+import { agentEmojiMapFrom } from "../../src/modules/agents/agentEmojis.js";
 import { visibleText } from "./helpers/embedText.js";
 
 const TZ = "Africa/Cairo";
@@ -15,7 +16,7 @@ function vote(slotId: number, user: string, name = user): ScheduleVoteRow {
 }
 function view(over: Partial<ScheduleView> = {}): ScheduleView {
   return {
-    poll: { id: 1, guildId: "g", status: "OPEN", timezone: TZ, channelId: "c", messageId: "m", createdAt: NOW, updatedAt: NOW },
+    poll: { id: 1, guildId: "g", status: "OPEN", timezone: TZ, channelId: "c", messageId: "m", agentBoardMessageId: null, agentBoardClaimedAt: null, createdAt: NOW, updatedAt: NOW },
     slots: [slot(11, 1, "2026-10-10T16:00:00Z"), slot(12, 2, "2026-10-11T16:00:00Z")],
     votes: [],
     declines: [],
@@ -24,6 +25,8 @@ function view(over: Partial<ScheduleView> = {}): ScheduleView {
   };
 }
 const embed = (m: ReturnType<typeof buildScheduleMessage>) => m.embeds[0]!.toJSON();
+/** The second embed: who voted for each slot, who can't play, who hasn't voted. */
+const who = (m: ReturnType<typeof buildScheduleMessage>) => m.embeds[1]!.toJSON();
 const buttons = (m: ReturnType<typeof buildScheduleMessage>) => m.components.flatMap((r) => r.toJSON().components as Array<{ custom_id: string; label: string; disabled?: boolean; style: number }>);
 
 describe("buildScheduleMessage — the weekly schedule card", () => {
@@ -43,14 +46,14 @@ describe("buildScheduleMessage — the weekly schedule card", () => {
   it("shows a vote bar and who voted for each slot", () => {
     const v = view({ votes: [vote(11, "u1", "Ahmed"), vote(11, "u2", "Omar"), vote(12, "u1", "Ahmed")] });
     const m = buildScheduleMessage(v, [], NOW);
-    const fields = embed(m).fields!;
+    const blocks = who(m).description!.split("\n\n");
     expect(embed(m).description).toContain("■■□□□ 2/5");
-    expect(fields[0]!.name).toContain("SAT 10/10 · 19:00");
-    expect(fields[0]!.name).toContain("2/5");
+    expect(blocks[0]).toContain("SAT 10/10 · 19:00");
+    expect(blocks[0]).toContain("2/5");
     // Voters are real @mentions (2026-10-04), not typed names.
-    expect(fields[0]!.value).toContain("<@u1>");
-    expect(fields[0]!.value).toContain("<@u2>");
-    expect(fields[1]!.value).toContain("<@u1>");
+    expect(blocks[0]).toContain("<@u1>");
+    expect(blocks[0]).toContain("<@u2>");
+    expect(blocks[1]).toContain("<@u1>");
     expect(embed(m).description).toContain("needs **3** more");
   });
 
@@ -84,12 +87,12 @@ describe("buildScheduleMessage — the weekly schedule card", () => {
       votes: [vote(11, "u1", "Ahmed")],
       declines: [{ id: 1, pollId: 1, discordUserId: "u2", discordDisplayName: "Omar", createdAt: NOW }],
     });
-    const names = embed(buildScheduleMessage(v, roster, NOW)).fields!.map((f) => f.name);
-    expect(names).toContain("🚫 Can't play any day · 1");
-    expect(names).toContain("⚪ No vote yet · 1");
+    const text = who(buildScheduleMessage(v, roster, NOW)).description!;
+    expect(text).toContain("🚫 **Can't play any day** · 1");
+    expect(text).toContain("⚪ **No vote yet** · 1");
     expect(visibleText(buildScheduleMessage(v, roster, NOW))).toContain("⚔️ <@u1>");
     // Without a roster there is nobody to call out as "not voted".
-    expect(embed(buildScheduleMessage(v, [], NOW)).fields!.map((f) => f.name).join()).not.toContain("No vote yet");
+    expect(who(buildScheduleMessage(v, [], NOW)).description).not.toContain("No vote yet");
   });
 
   it("has one button per slot plus 'CAN'T PLAY ANY DAY', and disables slots that have started", () => {
@@ -107,7 +110,7 @@ describe("buildScheduleMessage — the weekly schedule card", () => {
     const m = buildScheduleMessage(view({ slots }), [], NOW);
     expect(m.components).toHaveLength(3);
     expect(m.components.every((r) => r.components.length <= 5)).toBe(true);
-    expect(embed(m).fields!.length).toBeLessThanOrEqual(25);
+    expect(who(m).description!.length).toBeLessThanOrEqual(4096);
   });
 
   it("cancelled: grey, struck through, no buttons", () => {
@@ -117,14 +120,25 @@ describe("buildScheduleMessage — the weekly schedule card", () => {
     expect(embed(m).color).toBe(0x4f545c);
     expect(embed(m).title).toContain("~~");
     expect(m.components).toHaveLength(0);
+    expect(m.embeds).toHaveLength(1); // no "who's in" once cancelled
   });
 
-  it("keeps every field under Discord's limit for a huge slot, and never prints a typed name (mentions only)", () => {
-    const votes = Array.from({ length: 60 }, (_, i) => vote(11, `u${i}`, `**x${i}**_${"z".repeat(30)}`));
+  it("is two embeds with blank lines between blocks — status first, then who's in — instead of one packed embed", () => {
+    const m = buildScheduleMessage(view({ votes: [vote(11, "u1")] }), [{ discordUserId: "u2", displayName: "O" }], NOW);
+    expect(m.embeds).toHaveLength(2);
+    expect(embed(m).fields ?? []).toHaveLength(0);
+    expect(who(m).title).toBe("WHO'S IN");
+    expect(who(m).description!.split("\n\n").length).toBeGreaterThanOrEqual(3); // slot 1, slot 2, no vote yet
+    expect(who(m).footer?.text).toContain("Schedule #1");
+  });
+
+  it("keeps the description under Discord's limit for a huge slot, and never prints a typed name (mentions only)", () => {
+    const votes = Array.from({ length: 600 }, (_, i) => vote(11, `u${i}`, `**x${i}**_${"z".repeat(30)}`));
     const m = buildScheduleMessage(view({ votes }), [], NOW);
-    expect(embed(m).fields!.every((f) => f.value.length <= 1024)).toBe(true);
-    expect(embed(m).fields![0]!.value).toContain("<@u0>");
-    expect(embed(m).fields![0]!.value).not.toContain("x0");
+    expect(who(m).description!.length).toBeLessThanOrEqual(4096);
+    expect(m.embeds.reduce((n, e) => n + JSON.stringify(e.toJSON()).length, 0)).toBeLessThan(6000); // Discord's limit across all embeds
+    expect(who(m).description).toContain("<@u0>");
+    expect(who(m).description).not.toContain("x0");
   });
 });
 
@@ -201,8 +215,9 @@ describe("roster pings, maps and agent picks on the schedule card (2026-10-04)",
     expect(embed(m).description).toContain("MAP");
     expect(embed(m).description).toMatch(/SAT 10\/10 {2}19:00 {2}Ascent/);
     expect(embed(m).description).toMatch(/SUN 11\/10 {2}19:00 {2}— /);
-    expect(embed(m).fields![0]!.name).toContain("🗺️ ASCENT");
-    expect(embed(m).fields![1]!.name).not.toContain("🗺️");
+    const [first, second] = who(m).description!.split("\n\n");
+    expect(first).toContain("🗺️ ASCENT");
+    expect(second).not.toContain("🗺️");
     expect(embed(buildScheduleMessage(view(), [], NOW)).description).not.toContain("MAP");
   });
 
@@ -211,8 +226,8 @@ describe("roster pings, maps and agent picks on the schedule card (2026-10-04)",
       votes: [vote(11, "u1"), vote(11, "u2")],
       picks: [{ id: 1, slotId: 11, discordUserId: "u1", agentKey: "jett", createdAt: NOW, updatedAt: NOW }],
     });
-    const value = embed(buildScheduleMessage(v, roster, NOW)).fields![0]!.value;
-    expect(value).toBe("⚔️ <@u1> · **Jett**\n<@u2>");
+    const block = who(buildScheduleMessage(v, roster, NOW)).description!.split("\n\n")[0]!;
+    expect(block.split("\n").slice(1).join("\n")).toBe("⚔️ <@u1> · **Jett**\n<@u2>");
   });
 
   it("names a player-suggested agent from the custom list", () => {
@@ -221,7 +236,7 @@ describe("roster pings, maps and agent picks on the schedule card (2026-10-04)",
       picks: [{ id: 1, slotId: 11, discordUserId: "u2", agentKey: "newguy", createdAt: NOW, updatedAt: NOW }],
     });
     const custom = [{ id: 1, guildId: "g", key: "newguy", displayName: "Newguy", role: "DUELIST" as const, suggestedByUserId: "u1", suggestedByName: "Ahmed", createdAt: NOW }];
-    expect(embed(buildScheduleMessage(v, roster, NOW, custom)).fields![0]!.value).toContain("<@u2> · **Newguy**");
+    expect(who(buildScheduleMessage(v, roster, NOW, custom)).description).toContain("<@u2> · **Newguy**");
   });
 
   it("has a PICK AGENT button next to CAN'T PLAY ANY DAY", () => {
@@ -240,5 +255,14 @@ describe("roster pings, maps and agent picks on the schedule card (2026-10-04)",
     const r = visibleText(buildSlotReminderMessage(s, voters, [], TZ, 300, 1, picks));
     expect(r).toContain("Map: Haven");
     expect(r).toContain("<@u1> · **KAY/O**");
+  });
+
+  it("shows the picked agent's portrait emoji next to its name once portraits are uploaded, and nothing extra before", () => {
+    const v = view({ votes: [vote(11, "u1"), vote(11, "u2")], picks: [{ id: 1, slotId: 11, discordUserId: "u1", agentKey: "jett", createdAt: NOW, updatedAt: NOW }] });
+    const emojis = agentEmojiMapFrom([{ id: "111111111111111111", name: "agent_jett" }]);
+    expect(who(buildScheduleMessage(v, [], NOW, [], emojis)).description).toContain("<@u1> · <:agent_jett:111111111111111111> **Jett**");
+    expect(who(buildScheduleMessage(v, [], NOW, [], undefined)).description).toContain("<@u1> · **Jett**");
+    const u2Line = who(buildScheduleMessage(v, [], NOW, [], emojis)).description!.split("\n").find((l) => l.startsWith("<@u2>"))!;
+    expect(u2Line).toBe("<@u2>"); // only the one who picked gets a portrait
   });
 });

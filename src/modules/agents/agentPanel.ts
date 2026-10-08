@@ -15,7 +15,7 @@ import {
   type AgentRole,
 } from "./agentData.js";
 import { agentAddId, agentClearId, agentPickId, agentRoleId, agentSwitchId } from "./agentCustomId.js";
-import { agentIconText, type AgentEmojiMap } from "./agentEmojis.js";
+import { agentIconText, emojiMarkup, type AgentEmojiMap } from "./agentEmojis.js";
 
 /**
  * The "AGENT PICK" panel (2026-10-04, owner's request) — what a player sees
@@ -121,7 +121,7 @@ export function buildAgentPanel(input: AgentPanelInput): { content: string; embe
         `📅 **${dayTime}** · <t:${at}:R>\n${slot.map ? `🗺️ **MAP: ${slot.map.toUpperCase()}**` : "🗺️ **MAP: TBD** — an admin sets it with `/schedule-slot`"}`,
         `🎯 **YOUR PICK:** ${mine ? `**${nameOf(mine.agentKey)}**` : "_none yet — tap an agent below_"}`,
         ...compBlocks,
-        ...(picks.length > 0 ? [`🔒 **SQUAD · ${picks.length} locked**\n${picks.map((p) => `<@${p.discordUserId}> — **${nameOf(p.agentKey)}**`).join("\n")}`] : []),
+        ...(picks.length > 0 ? [`🔒 **SQUAD · ${picks.length} locked**\n${picks.map((p) => `<@${p.discordUserId}> — ${emojis?.get(p.agentKey) ? `${emojiMarkup(emojis.get(p.agentKey)!)} ` : ""}**${nameOf(p.agentKey)}**`).join("\n")}`] : []),
       ].join("\n\n"),
     );
   if (mine) {
