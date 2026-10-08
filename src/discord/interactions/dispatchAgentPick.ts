@@ -3,6 +3,8 @@ import type { ButtonInteraction } from "discord.js";
 import type { AppContext } from "../../appContext.js";
 import type { ReplyPayload } from "../discordRest.js";
 import { agentByKey, ROLE_SINGULAR, type AgentRole } from "../../modules/agents/agentData.js";
+import { agentNameFor } from "../../modules/agents/agentPanel.js";
+import { reactWithMari } from "../scheduleReaction.js";
 import { agentModalId, parseAgentCustomId, parseAgentModalCustomId } from "../../modules/agents/agentCustomId.js";
 import { buildAgentPanel } from "../../modules/agents/agentPanel.js";
 import type { PanelOutcome, PanelState } from "../../modules/agents/agentPickService.js";
@@ -150,6 +152,26 @@ export async function dispatchAgentButton(interaction: ButtonInteraction, ctx: A
     if (outcome.value.changed) {
       const view = await ctx.services.schedules.getView(outcome.value.state.poll.id);
       if (view) await syncScheduleMessage(ctx, view);
+
+      // Mari's public "LOCKED IN" card is sent once the player has picked an agent (2026-10-08), so it shows that agent.
+      // It is claimed once per player per poll, so changing the pick afterwards stays silent. Never throws.
+      if (action.kind === "pick") {
+        const { state } = outcome.value;
+        const mine = state.picks.find((p) => p.discordUserId === discordUserId);
+        const role = mine ? (agentByKey(mine.agentKey)?.role ?? state.customAgents.find((c) => c.key === mine.agentKey)?.role) : undefined;
+        if (mine && role) {
+          await reactWithMari(interaction, ctx, {
+            guildId,
+            pollId: state.poll.id,
+            channelId: state.poll.channelId,
+            timezone: state.poll.timezone,
+            kind: "VOTE",
+            slot: state.slot,
+            slotCount: view?.slots.length ?? 1,
+            agent: { key: mine.agentKey, name: agentNameFor(mine.agentKey, state.customAgents), role },
+          });
+        }
+      }
     }
   } catch (err) {
     ctx.logger.error(

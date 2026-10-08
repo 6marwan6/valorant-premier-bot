@@ -1,10 +1,11 @@
-import { emojiMarkup, type AgentEmojiMap } from "../agents/agentEmojis.js";
+import { agentIconText, emojiMarkup, type AgentEmojiMap } from "../agents/agentEmojis.js";
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } from "discord.js";
 import { DateTime } from "luxon";
 import type { ScheduleView } from "../../database/repositories/scheduleRepository.js";
 import type { AgentPickRow, ScheduleSlotRow, ScheduleVoteRow } from "../../database/schema/schedules.js";
 import { buildAgentsCustomId, buildDeclineCustomId, buildVoteCustomId } from "./scheduleCustomId.js";
 import { agentNameFor } from "../agents/agentPanel.js";
+import { agentByKey, agentIconUrl, ROLE_SINGULAR, type AgentRole } from "../agents/agentData.js";
 import type { CustomAgentRow } from "../../database/schema/schedules.js";
 import { effectiveAt, formatSlotDay, formatSlotTime, MIN_PLAYERS_TO_QUEUE, pickLeadingSlot, voteBar } from "./scheduleLogic.js";
 import { formatOffsetLabel } from "../reminders/reminderScheduling.js";
@@ -340,21 +341,32 @@ export function buildScheduleReactionCard(params: {
   slot?: ScheduleSlotRow;
   timezone: string;
   avatarUrl?: string | null;
+  /** The agent the player locked in (VOTE only): shown on the card, with its portrait as the picture. */
+  agent?: { key: string; name: string; role: AgentRole };
+  emojis?: AgentEmojiMap;
 }): { embeds: EmbedBuilder[] } {
-  const { player, kind } = params;
+  const { player, kind, agent } = params;
   const embed = new EmbedBuilder()
     .setColor(kind === "VOTE" ? COLOR_LOCKED : COLOR_RED)
     .setTitle(kind === "VOTE" ? "🟢  LOCKED IN" : "🚫  OUT THIS WEEK")
     .setDescription(params.text.slice(0, 4000))
     .setAuthor({ name: player.displayName.slice(0, 256), ...(params.avatarUrl ? { iconURL: params.avatarUrl } : {}) });
-  if (params.avatarUrl) embed.setThumbnail(params.avatarUrl);
+  // The picked agent's portrait is the picture on a LOCKED IN card; the player's avatar stays in the author line (and is the picture when there is no portrait).
+  const builtIn = kind === "VOTE" && agent ? agentByKey(agent.key) : undefined;
+  const picture = builtIn ? agentIconUrl(builtIn) : params.avatarUrl;
+  if (picture) embed.setThumbnail(picture);
 
   const fields: Array<{ name: string; value: string; inline: boolean }> = [];
   if (kind === "VOTE" && params.slot) {
     fields.push({ name: "Slot", value: `${formatSlotDay(params.slot.scheduledAt, params.timezone)} · ${formatSlotTime(params.slot.scheduledAt, params.timezone)}`, inline: true });
   }
-  if (player.role) fields.push({ name: "Role", value: `${ROLE_GLYPH[player.role]} ${player.role.charAt(0)}${player.role.slice(1).toLowerCase()}`, inline: true });
-  if (player.preferredAgent) fields.push({ name: "Agent", value: escapeMarkdown(player.preferredAgent), inline: true });
+  if (kind === "VOTE" && agent) {
+    fields.push({ name: "Agent", value: `${agentIconText(agent.key, ROLE_GLYPH[agent.role], params.emojis)} **${escapeMarkdown(agent.name)}**`, inline: true });
+    fields.push({ name: "Role", value: `${ROLE_GLYPH[agent.role]} ${ROLE_SINGULAR[agent.role]}`, inline: true });
+  } else {
+    if (player.role) fields.push({ name: "Role", value: `${ROLE_GLYPH[player.role]} ${player.role.charAt(0)}${player.role.slice(1).toLowerCase()}`, inline: true });
+    if (player.preferredAgent) fields.push({ name: "Agent", value: escapeMarkdown(player.preferredAgent), inline: true });
+  }
   if (fields.length > 0) embed.addFields(fields);
   return { embeds: [embed.setFooter({ text: `PREMIER · Schedule #${params.pollId}` })] };
 }

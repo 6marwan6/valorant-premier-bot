@@ -1,3 +1,4 @@
+import { agentPickId } from "../../src/modules/agents/agentCustomId.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ButtonInteraction, ChatInputCommandInteraction, User } from "discord.js";
 import type { Pool } from "pg";
@@ -235,8 +236,10 @@ describeIfDb("Server members (non-Premier) + AI reactions to schedule votes (int
       return created.value;
     }
     const mentionsFor = (userId: string) => mentions.filter((m) => m.userId === userId);
+    // Since 2026-10-08 the CELEBRATE card is sent when the player picks an agent, not when they vote.
+    const pick = (slotId: number, user: (typeof premier)[number], key = "jett") => dispatchButton(fakeClick(agentPickId(slotId, key), user, guildId).interaction, ctx);
 
-    it("first vote -> one public CELEBRATE card @mentioning the voter; more votes and toggling -> silence", async () => {
+    it("a vote is silent; the first agent pick -> one public CELEBRATE card @mentioning the player; more votes, picks and toggling -> silence", async () => {
       const { poll, slots } = await freshPoll();
       const [s1, s2] = slots as [(typeof slots)[number], (typeof slots)[number]];
       const before = mentionsFor(premier[1]!.id).length;
@@ -244,6 +247,10 @@ describeIfDb("Server members (non-Premier) + AI reactions to schedule votes (int
 
       const first = fakeClick(buildVoteCustomId(poll.id, s1.id), premier[1]!, guildId);
       await dispatchButton(first.interaction, ctx);
+      expect(mentionsFor(premier[1]!.id).slice(before)).toHaveLength(0); // voting alone says nothing
+      expect(llm.complete.mock.calls.length).toBe(calls);
+
+      await pick(s1.id, premier[1]!);
       const mine = mentionsFor(premier[1]!.id).slice(before);
       expect(mine).toHaveLength(1);
       expect(mine[0]!.channelId).toBe(channelId);
@@ -253,6 +260,7 @@ describeIfDb("Server members (non-Premier) + AI reactions to schedule votes (int
       const [{ system, user }] = llm.complete.mock.calls.at(-1) as [{ system: string; user: string }];
       expect(system).toContain("MODE: CELEBRATE");
       expect(user).toContain("CAN play SAT 28/06 at 19:00");
+      expect(user).toContain("Agent they locked in for that slot: Jett (Duelist)");
       expect(user).toContain("- Family");
       expect(llm.complete.mock.calls.length).toBe(calls + 1);
 
@@ -260,6 +268,8 @@ describeIfDb("Server members (non-Premier) + AI reactions to schedule votes (int
       for (const id of [s2.id, s1.id, s1.id]) {
         await dispatchButton(fakeClick(buildVoteCustomId(poll.id, id), premier[1]!, guildId).interaction, ctx);
       }
+      await pick(s2.id, premier[1]!, "raze");
+      await pick(s1.id, premier[1]!, "neon");
       expect(mentionsFor(premier[1]!.id).slice(before)).toHaveLength(1);
       expect(llm.complete.mock.calls.length).toBe(calls + 1);
       await ctx.services.schedules.cancel(guildId);
@@ -288,6 +298,7 @@ describeIfDb("Server members (non-Premier) + AI reactions to schedule votes (int
       const before = mentionsFor(u.id).length;
       await dispatchButton(fakeClick(buildDeclineCustomId(poll.id), u, guildId).interaction, ctx);
       await dispatchButton(fakeClick(buildVoteCustomId(poll.id, slots[0]!.id), u, guildId).interaction, ctx);
+      await pick(slots[0]!.id, u);
       await dispatchButton(fakeClick(buildDeclineCustomId(poll.id), u, guildId).interaction, ctx);
       expect(mentionsFor(u.id).slice(before).map((m) => m.text)).toEqual(["see you never then 💀", "ok ok you're in 😏"]);
       await ctx.services.schedules.cancel(guildId);
@@ -300,6 +311,7 @@ describeIfDb("Server members (non-Premier) + AI reactions to schedule votes (int
       const before = mentionsFor(premier[4]!.id).length;
       const click = fakeClick(buildVoteCustomId(poll.id, slots[0]!.id), premier[4]!, guildId);
       await dispatchButton(click.interaction, ctx);
+      await pick(slots[0]!.id, premier[4]!);
       expect(mentionsFor(premier[4]!.id).slice(before)).toHaveLength(0);
       expect(click.update).toHaveBeenCalledTimes(1); // the vote itself is fine
       llm.complete.mockImplementation(calls);
@@ -312,7 +324,11 @@ describeIfDb("Server members (non-Premier) + AI reactions to schedule votes (int
       mentionFails = true;
       const click = fakeClick(buildVoteCustomId(poll.id, slots[0]!.id), premier[0]!, guildId);
       await dispatchButton(click.interaction, ctx);
+      const picked = fakeClick(agentPickId(slots[0]!.id, "jett"), premier[0]!, guildId);
+      await dispatchButton(picked.interaction, ctx);
       mentionFails = false;
+      expect(picked.update).toHaveBeenCalledTimes(1);
+      expect(picked.reply).not.toHaveBeenCalled();
       expect(click.update).toHaveBeenCalledTimes(1);
       expect(click.reply).not.toHaveBeenCalled();
       expect((await ctx.services.schedules.getView(poll.id))!.votes).toHaveLength(1);

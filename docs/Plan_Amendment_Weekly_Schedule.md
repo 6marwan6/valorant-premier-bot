@@ -195,3 +195,46 @@ Where the portrait shows once uploaded: each cell and button of the agent pick g
 2. The squad list stays on the private panel as a short list, and is the full picture on the public lineup.
 3. The comps are now text blocks in the header rather than fields (same content).
 4. Not verified against live Discord: layout was checked as message data and tests, not by looking at it in a server — worth a glance after deploying, especially on mobile where inline fields may wrap to two across.
+
+---
+
+# Part 5 — "LOCKED IN" waits for the agent; reaction channel; map comps (2026-10-08)
+
+## Request (owner)
+
+1. Mari's public "LOCKED IN" card (the one with the AI text) should wait until the player has **chosen an agent**, so it shows the final pick.
+2. The owner should **control which channel** it appears in.
+3. How are the **comp suggestions per map** controlled?
+
+Plan sections touched: §14 / principle #9 (the agent, slot and role on the card, and the agent line given to the model, are database facts; the model writes only the voice), §50 (the card is still claimed once per player per poll, before the model is called), §48 / principle #8 (a failed AI or Discord call never affects a vote or pick), §53 (configuration lives in the database: the channel is a `server_config` column).
+
+## What changed
+
+- **When:** a vote no longer triggers the card. The player's **first agent pick in that poll** does. The AI is told the slot and the locked-in agent ("Agent they locked in for that slot: Jett (Duelist)"). Later pick changes, other slots, and toggling votes stay silent (the claim is per player per poll, as before).
+- **What it shows:** *Slot*, *Agent* (the **picked** agent, with its portrait emoji once uploaded) and *Role* (that agent's role). Before, the Agent field was the player's profile "preferred agent". The card's picture is the picked agent's portrait (the player's avatar stays in the author line); a player-suggested agent has no portrait, so the avatar remains the picture.
+- **A player who votes but never picks** gets no card; the AGENT SELECT lineup shows them as "still choosing". (Say if you'd rather have a fallback card after some delay — that needs a timed job.)
+- **"OUT THIS WEEK"** (the "can't play any day" roast) is unchanged: still immediate.
+- **Channel:** `/setup reaction_channel:#channel` sets where both Mari schedule reactions are posted (the LOCKED IN and OUT THIS WEEK cards). `/setup reaction_channel_reset:True` goes back to the default, the schedule's own channel. Setting both in one call changes nothing. `/setup` now shows the current value. The schedule card, the AGENT SELECT lineup and the SQUAD LOCKED card are **not** affected: they stay in the match channel.
+
+Because `/setup` gained two options, **re-run `npm run deploy-commands`** (and apply migration `0020_add_reaction_channel.sql`).
+
+## Map comp suggestions — how they are controlled
+
+They are plain data in `src/modules/agents/agentData.ts`, in `MAP_COMPS` (a map name → two comps). To change one, edit it and redeploy; there is no Discord command for it yet.
+
+```ts
+Ascent: [
+  { name: "Standard",  agents: ["jett", "sova", "omen", "killjoy", "kayo"] },
+  { name: "Fast hits", agents: ["neon", "fade", "astra", "cypher", "skye"] },
+],
+```
+
+Rules (enforced by `tests/unit/agentData.test.ts`, which fails the build otherwise):
+
+- The map name must be one of the 13 in `MAPS`; each map that has its own comps has **exactly two**.
+- Each comp is **exactly five distinct agents**, written as their lowercase key (the name with only letters/digits: `kayo`, `jett`).
+- Each comp must include **at least one of every role** (Duelist, Initiator, Controller, Sentinel), plus a flex.
+- `name` is the label shown ("COMP A — Standard").
+- A map with no entry (today Corrode and Summit) shows `GENERAL_COMPS` and says "(general)". To add one, add an entry for it. To change what everyone falls back to, edit `GENERAL_COMPS`.
+
+An in-Discord command (e.g. `/map-comps`) is not built; it would store comps in the database instead of the file.

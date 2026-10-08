@@ -47,6 +47,7 @@ export class ServerConfigRepository {
         ServerConfigRow,
         | "timezone"
         | "matchChannelId"
+        | "reactionChannelId"
         | "adminRoleId"
         | "reminderScheduleMinutes"
         | "defaultRoastIntensity"

@@ -141,6 +141,13 @@
       "when": 1791102956772,
       "tag": "0019_add_agent_board_message",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1791106556772,
+      "tag": "0020_add_reaction_channel",
+      "breakpoints": true
     }
   ]
 }

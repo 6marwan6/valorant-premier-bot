@@ -31,6 +31,9 @@ export const serverConfig = pgTable("server_config", {
   timezone: text("timezone").notNull().default("Africa/Cairo"),
 
   matchChannelId: text("match_channel_id"),
+  // Where Mari's public schedule reactions (the "LOCKED IN" and "OUT THIS WEEK" cards) are posted — set with /setup
+  // reaction_channel (2026-10-08, owner's request). Null = the schedule's own channel, which was the behaviour before.
+  reactionChannelId: text("reaction_channel_id"),
   adminRoleId: text("admin_role_id"),
 
   // Minutes before kickoff, e.g. [300, 15] (plan section 13; was [180, 60, 15] before 2026-10-03).

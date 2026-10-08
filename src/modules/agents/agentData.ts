@@ -169,8 +169,8 @@ export const GENERAL_COMPS: readonly Comp[] = [
 
 export const MAP_COMPS: Partial<Record<MapName, readonly Comp[]>> = {
   Abyss: [
-    { name: "Standard", agents: ["jett", "sova", "omen", "cypher", "fade"] },
-    { name: "Execute-heavy", agents: ["neon", "gekko", "clove", "killjoy", "breach"] },
+    { name: "Standard", agents: ["jett", "sova", "harbor", "cypher", "fade"] },
+    { name: "Execute-heavy", agents: ["waylay", "gekko", "clove", "killjoy", "breach"] },
   ],
   Ascent: [
     { name: "Standard", agents: ["jett", "sova", "omen", "killjoy", "kayo"] },

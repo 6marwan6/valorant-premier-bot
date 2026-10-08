@@ -29,6 +29,19 @@ const data = new SlashCommandBuilder()
       .addChannelTypes(ChannelType.GuildText)
       .setRequired(false),
   )
+  .addChannelOption((opt) =>
+    opt
+      .setName("reaction_channel")
+      .setDescription("Channel for Mari's schedule reactions (the LOCKED IN / OUT THIS WEEK cards)")
+      .addChannelTypes(ChannelType.GuildText)
+      .setRequired(false),
+  )
+  .addBooleanOption((opt) =>
+    opt
+      .setName("reaction_channel_reset")
+      .setDescription("Post Mari's schedule reactions in the schedule's own channel again")
+      .setRequired(false),
+  )
   .addRoleOption((opt) =>
     opt
       .setName("admin_role")
@@ -63,6 +76,8 @@ const setupCommand: Command = {
     }
 
     const matchChannel = interaction.options.getChannel("match_channel");
+    const reactionChannel = interaction.options.getChannel("reaction_channel");
+    const reactionReset = interaction.options.getBoolean("reaction_channel_reset");
     const adminRole = interaction.options.getRole("admin_role");
     const timezone = interaction.options.getString("timezone");
     const roastIntensity = interaction.options.getInteger("default_roast_intensity");
@@ -75,8 +90,14 @@ const setupCommand: Command = {
       return;
     }
 
+    if (reactionChannel && reactionReset) {
+      await interaction.reply({ content: "Pick one: either set a `reaction_channel`, or `reaction_channel_reset` to go back to the schedule's channel. Nothing was changed.", ephemeral: true });
+      return;
+    }
+
     const updated = await ctx.repositories.serverConfig.upsert(guildId, {
       ...(matchChannel ? { matchChannelId: matchChannel.id } : {}),
+      ...(reactionChannel ? { reactionChannelId: reactionChannel.id } : reactionReset ? { reactionChannelId: null } : {}),
       ...(adminRole ? { adminRoleId: adminRole.id } : {}),
       ...(timezone ? { timezone } : {}),
       ...(roastIntensity !== null ? { defaultRoastIntensity: roastIntensity } : {}),
@@ -91,6 +112,7 @@ const setupCommand: Command = {
       "✅ **Server configuration saved.**",
       `• Timezone: \`${updated.timezone}\``,
       `• Match channel: ${updated.matchChannelId ? `<#${updated.matchChannelId}>` : "_not set_"}`,
+      `• Mari's schedule reactions: ${updated.reactionChannelId ? `<#${updated.reactionChannelId}>` : "_the schedule's own channel_"}`,
       `• Admin role: ${updated.adminRoleId ? `<@&${updated.adminRoleId}>` : "_not set (Administrator permission still works)_"}`,
       `• Default roast intensity: ${updated.defaultRoastIntensity}`,
     ];

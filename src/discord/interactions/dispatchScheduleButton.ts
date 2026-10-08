@@ -1,73 +1,14 @@
 import type { ButtonInteraction } from "discord.js";
 import type { AppContext } from "../../appContext.js";
 import { parseScheduleCustomId } from "../../modules/schedules/scheduleCustomId.js";
-import { buildQuorumMessage, buildScheduleReactionCard } from "../../modules/schedules/scheduleMessage.js";
-import { buildDeclineEvent, buildVoteEvent } from "../../modules/schedules/scheduleAiEvent.js";
-import type { ScheduleSlotRow } from "../../database/schema/schedules.js";
-import { avatarUrlOf } from "../avatarUrl.js";
+import { buildQuorumMessage } from "../../modules/schedules/scheduleMessage.js";
 import { defaultTab, renderPanel } from "./dispatchAgentPick.js";
 import { formatSlotDay, formatSlotTime } from "../../modules/schedules/scheduleLogic.js";
 import { resolveDisplayName } from "../displayName.js";
 import { renderSchedule } from "../scheduleSync.js";
 import { syncAgentBoard } from "../agentBoardSync.js";
 import { loadAgentEmojis } from "../agentEmojiCache.js";
-
-/**
- * Mari's reaction to a schedule vote (2026-10-03): CELEBRATE for a player's
- * first slot in a poll, ROAST for their "can't play any day" — each at most
- * once per player per poll (claimed in the database *before* the model is
- * called, plan section 50), so toggling votes or tapping a second slot never
- * turns the channel into a chat log. Posted publicly with an @mention, like
- * the attendance reactions. Fully isolated: the vote is already recorded and
- * the card already updated, so nothing in here can fail the click (plan
- * sections 48 / 66 #8), and a fallback line is never posted publicly (the
- * player already got their private confirmation).
- */
-async function reactWithMari(
-  interaction: ButtonInteraction,
-  ctx: AppContext,
-  params: { guildId: string; pollId: number; channelId: string; timezone: string; kind: "VOTE" | "DECLINE"; slot?: ScheduleSlotRow; slotCount: number },
-): Promise<void> {
-  if (!ctx.services.ai.enabled) return;
-  try {
-    const player = await ctx.repositories.players.getByDiscordUserId(params.guildId, interaction.user.id);
-    // Premier players only — a server member can't get this far (the service rejects the vote), but the check is cheap and keeps this honest.
-    if (!player || !player.active || player.kind !== "PLAYER") return;
-    if (!(await ctx.services.schedules.claimAiReaction(params.pollId, player.discordUserId, params.kind))) return;
-
-    const outcome =
-      params.kind === "VOTE"
-        ? await ctx.services.ai.respondToScheduleVote({
-            player,
-            mode: "CELEBRATE",
-            pollId: params.pollId,
-            event: buildVoteEvent({ pollId: params.pollId, slot: params.slot!, timezone: params.timezone }),
-          })
-        : await ctx.services.ai.respondToScheduleVote({
-            player,
-            mode: "ROAST",
-            pollId: params.pollId,
-            event: buildDeclineEvent({ pollId: params.pollId, slotCount: params.slotCount }),
-          });
-    if (outcome.source !== "ai") return;
-
-    const card = buildScheduleReactionCard({
-      player,
-      kind: params.kind,
-      text: outcome.text,
-      pollId: params.pollId,
-      slot: params.slot,
-      timezone: params.timezone,
-      avatarUrl: avatarUrlOf(interaction),
-    });
-    await ctx.discord.sendMentionMessage(params.channelId, outcome.text, player.discordUserId, card);
-  } catch (err) {
-    ctx.logger.warn(
-      { event: "schedule.aiReactionFailed", pollId: params.pollId, kind: params.kind, err: err instanceof Error ? err.message : String(err) },
-      "Mari's schedule reaction failed (the vote is still recorded)",
-    );
-  }
-}
+import { reactWithMari } from "../scheduleReaction.js";
 
 /**
  * A click on the weekly schedule card: `sched:<pollId>:vote:<slotId>` toggles
@@ -79,8 +20,9 @@ async function reactWithMari(
  * turn a recorded vote into an error (plan sections 48/66 #8):
  *
  *  - a private confirmation of the player's current slots (deterministic);
- *  - Mari's public reaction (CELEBRATE for a first slot, ROAST for "can't
- *    play any day"), at most once per player per poll — see reactWithMari;
+ *  - Mari's public ROAST for "can't play any day", at most once per player per
+ *    poll — see reactWithMari. (Her CELEBRATE "LOCKED IN" card is *not* sent
+ *    from a vote any more: it waits for the agent pick, so it can show the agent.);
  *  - when this vote is the one that gives a slot its squad (5), the public
  *    "SQUAD LOCKED" card pinging the voters — posted at most once per slot
  *    (the repository claims it atomically, plan section 50).
@@ -153,17 +95,7 @@ export async function dispatchScheduleButton(interaction: ButtonInteraction, ctx
       // The public AGENT SELECT lineup shows who is in (and drops a pick that went with a removed vote). Never throws.
       await syncAgentBoard(ctx, view);
 
-      if (did === "added") {
-        await reactWithMari(interaction, ctx, {
-          guildId,
-          pollId: action.pollId,
-          channelId: view.poll.channelId,
-          timezone: tz,
-          kind: "VOTE",
-          slot,
-          slotCount: view.slots.length,
-        });
-      }
+      // Mari's "LOCKED IN" card is no longer sent here: it waits for the agent pick (dispatchAgentPick.ts), so it can show the agent.
 
       if (reachedQuorum) {
         try {
