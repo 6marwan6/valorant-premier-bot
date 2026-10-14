@@ -178,7 +178,7 @@ export const MAP_COMPS: Partial<Record<MapName, readonly Comp[]>> = {
   ],
   Bind: [
     { name: "Standard", agents: ["raze", "skye", "brimstone", "cypher", "fade"] },
-    { name: "Smokes + info", agents: ["phoenix", "gekko", "viper", "killjoy", "kayo"] },
+    { name: "Smokes + control", agents: ["waylay", "skye", "viper", "brimstone", "raze"] },
   ],
   Breeze: [
     { name: "Standard", agents: ["jett", "sova", "viper", "cypher", "skye"] },
@@ -211,6 +211,10 @@ export const MAP_COMPS: Partial<Record<MapName, readonly Comp[]>> = {
   Sunset: [
     { name: "Standard", agents: ["jett", "gekko", "omen", "killjoy", "fade"] },
     { name: "Mid push", agents: ["raze", "sova", "astra", "cypher", "skye"] },
+  ],
+  Corrode: [
+    { name: "Standard", agents: ["waylay", "sova", "omen", "viper", "fade"] },
+    { name: "Mid push", agents: ["waylay", "kayo", "astra", "cypher", "skye"] },
   ],
   // Corrode and Summit: no map-specific comps yet — they use GENERAL_COMPS until someone adds them here.
 };
