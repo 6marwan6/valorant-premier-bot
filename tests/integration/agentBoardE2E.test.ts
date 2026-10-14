@@ -257,16 +257,19 @@ describeIfDb("AGENT SELECT lineup message (integration)", () => {
       memberPermissions: { has: () => true },
       member: { roles: [] as string[] },
       user: { id: p1.id },
-      options: { getString: () => "sat 7pm, sun 7pm" },
+      options: { getString: (name: string) => (name === "slots" ? "sat 7pm, sun 7pm" : name === "map" ? "Lotus" : null) },
       reply,
     } as unknown as ChatInputCommandInteraction;
     await createScheduleCommand.execute(interaction, ctx);
     expect(reply.mock.calls[0]![0]).toMatchObject({ ephemeral: true });
+    expect((reply.mock.calls[0]![0] as { content: string }).content).toContain("Lotus"); // the admin is told which map was applied
     expect(sends).toHaveLength(2);
     expect(sends[0]!.payload.content).toContain("VALORANT PREMIER"); // the schedule card first, which is what pings the roster
     expect(sends[1]!.payload.content).toContain("AGENT SELECT");
     expect(sends[1]!.payload.mentionUserIds ?? []).toHaveLength(0); // the lineup never pings
     const poll = (await ctx.repositories.schedules.getLatestOpenPoll(guildId))!;
+    expect((await ctx.repositories.schedules.getView(poll.id))!.slots.map((s) => s.map)).toEqual(["Lotus", "Lotus"]); // option -> command -> service -> database
+    expect(JSON.stringify(sends[0]!.payload.embeds)).toContain("Lotus"); // and on the posted card
     expect(poll.messageId).toBe(sends[0]!.id);
     expect(poll.agentBoardMessageId).toBe(sends[1]!.id);
     await finish();

@@ -47,8 +47,11 @@ export interface DueSlotReminder {
 export class ScheduleRepository {
   constructor(private readonly db: Database) {}
 
-  /** Inserts a poll and its slots (earliest first, positions 1..n) atomically. `slotTimes` must already be sorted and distinct. */
-  async createPoll(params: { guildId: string; timezone: string; channelId: string; slotTimes: Date[] }): Promise<{ poll: SchedulePollRow; slots: ScheduleSlotRow[] }> {
+  /**
+   * Inserts a poll and its slots (earliest first, positions 1..n) atomically. `slotTimes` must already be sorted and distinct.
+   * `map` (already canonical, from findMap) is stored on every slot; null/omitted = not decided yet.
+   */
+  async createPoll(params: { guildId: string; timezone: string; channelId: string; slotTimes: Date[]; map?: string | null }): Promise<{ poll: SchedulePollRow; slots: ScheduleSlotRow[] }> {
     return this.db.transaction(async (tx) => {
       const [poll] = await tx
         .insert(schedulePolls)
@@ -56,7 +59,7 @@ export class ScheduleRepository {
         .returning();
       const slots = await tx
         .insert(scheduleSlots)
-        .values(params.slotTimes.map((scheduledAt, i) => ({ pollId: poll!.id, position: i + 1, scheduledAt })))
+        .values(params.slotTimes.map((scheduledAt, i) => ({ pollId: poll!.id, position: i + 1, scheduledAt, map: params.map ?? null })))
         .returning();
       return { poll: poll!, slots: slots.sort((a, b) => a.position - b.position) };
     });

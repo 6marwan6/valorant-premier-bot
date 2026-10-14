@@ -3,6 +3,7 @@ import type { Command } from "./types.js";
 import { requireAdminWithConfig } from "../commandGuards.js";
 import { renderSchedule } from "../scheduleSync.js";
 import { syncAgentBoard } from "../agentBoardSync.js";
+import { MAPS } from "../../modules/agents/agentData.js";
 
 /**
  * /create-schedule — posts the week's Premier slots for the team to vote on.
@@ -13,6 +14,10 @@ import { syncAgentBoard } from "../agentBoardSync.js";
  * `slots` is one text option: entries separated by commas, each a date and a
  * time — `sat 7pm, sun 7pm`, `25/06 19:00, 26/06 19:00`. Times are read in
  * the team's configured timezone (plan section 53) automatically.
+ *
+ * `map` (optional, 2026-10-14) is the map this week's schedule is played on. It is stored on every
+ * slot, so it shows on the card, the AGENT SELECT lineup and the reminders and drives the agent-pick
+ * panel's suggested comps from the first vote. `/schedule-slot map:` still changes one slot later.
  */
 const data = new SlashCommandBuilder()
   .setName("create-schedule")
@@ -23,6 +28,12 @@ const data = new SlashCommandBuilder()
       .setName("slots")
       .setDescription('Slots, comma-separated: "sat 7pm, sun 7pm" or "25/06 19:00, 26/06 19:00" (max 10)')
       .setRequired(true),
+  )
+  .addStringOption((opt) =>
+    opt
+      .setName("map")
+      .setDescription("The map this schedule is played on (optional — drives the suggested comps)")
+      .addChoices(...MAPS.map((m) => ({ name: m, value: m }))),
   );
 
 const createScheduleCommand: Command = {
@@ -31,7 +42,11 @@ const createScheduleCommand: Command = {
     const guard = await requireAdminWithConfig(interaction, ctx);
     if (!guard) return;
 
-    const result = await ctx.services.schedules.create({ guildId: guard.guildId, slotsInput: interaction.options.getString("slots", true) });
+    const result = await ctx.services.schedules.create({
+      guildId: guard.guildId,
+      slotsInput: interaction.options.getString("slots", true),
+      mapInput: interaction.options.getString("map") ?? undefined,
+    });
     if (!result.ok) {
       await interaction.reply({ content: `❌ ${result.error}`, ephemeral: true });
       return;
@@ -60,8 +75,9 @@ const createScheduleCommand: Command = {
     }
 
     ctx.logger.info({ event: "schedule.created", guildId: guard.guildId, pollId: poll.id, slots: result.value.slots.length }, "Weekly schedule posted");
+    const mapLine = result.value.slots[0]?.map ? `\n🗺️ Map: **${result.value.slots[0].map}** (change a slot with \`/schedule-slot map:\`).` : "\n🗺️ Map: not decided yet — set it with `/schedule-slot map:`.";
     await interaction.reply({
-      content: `✅ **Schedule #${poll.id} posted** in <#${channelId}> with ${result.value.slots.length} slot${result.value.slots.length === 1 ? "" : "s"}.\nSet a queue time with \`/schedule-slot\`.`,
+      content: `✅ **Schedule #${poll.id} posted** in <#${channelId}> with ${result.value.slots.length} slot${result.value.slots.length === 1 ? "" : "s"}.${mapLine}\nSet a queue time with \`/schedule-slot\`.`,
       ephemeral: true,
     });
   },

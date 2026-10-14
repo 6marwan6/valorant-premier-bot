@@ -6,6 +6,11 @@ import { planReminders } from "../reminders/reminderScheduling.js";
 import { effectiveAt, MIN_PLAYERS_TO_QUEUE, parseQueueInput, parseSlotsInput } from "./scheduleLogic.js";
 import { findMap } from "../agents/agentData.js";
 
+/** The spellings that mean "no map decided yet" (the choice value `clear` in the commands). */
+function isMapUnset(input: string): boolean {
+  return ["clear", "none", "tbd"].includes(input.trim().toLowerCase());
+}
+
 export type ScheduleResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
 export interface VoteOutcome {
@@ -39,7 +44,7 @@ export class ScheduleService {
    * The caller posts the card, then records its message id; a failed post
    * must call `discard` so nothing half-created is left behind (plan 48).
    */
-  async create(params: { guildId: string; slotsInput: string; now?: Date }): Promise<ScheduleResult<{ poll: SchedulePollRow; slots: ScheduleSlotRow[]; channelId: string }>> {
+  async create(params: { guildId: string; slotsInput: string; /** Optional map (any spelling) every slot of this schedule is played on. */ mapInput?: string; now?: Date }): Promise<ScheduleResult<{ poll: SchedulePollRow; slots: ScheduleSlotRow[]; channelId: string }>> {
     const now = params.now ?? new Date();
     const config = await this.serverConfig.getByGuildId(params.guildId);
     if (!config?.matchChannelId) {
@@ -47,6 +52,14 @@ export class ScheduleService {
     }
     const parsed = parseSlotsInput(params.slotsInput, config.timezone, now);
     if (!parsed.ok) return { ok: false, error: parsed.error };
+
+    // The map is a database fact (plan section 14 / principle #9): only a name from the known list is ever stored.
+    let map: string | null = null;
+    if (params.mapInput !== undefined && !isMapUnset(params.mapInput)) {
+      const found = findMap(params.mapInput);
+      if (!found) return { ok: false, error: `"${params.mapInput}" isn't a Valorant map I know. Pick one from the list.` };
+      map = found;
+    }
 
     for (const open of await this.schedules.listOpenPolls(params.guildId)) {
       const existing = await this.schedules.getView(open.id);
@@ -60,6 +73,7 @@ export class ScheduleService {
       timezone: config.timezone,
       channelId: config.matchChannelId,
       slotTimes: parsed.slots,
+      map,
     });
     return { ok: true, value: { ...created, channelId: config.matchChannelId } };
   }
@@ -152,7 +166,7 @@ export class ScheduleService {
 
     const changes: { queueAt?: Date | null; remindMode?: SlotRemindMode; map?: string | null } = {};
     if (params.mapInput !== undefined) {
-      if (["clear", "none", "tbd"].includes(params.mapInput.trim().toLowerCase())) changes.map = null;
+      if (isMapUnset(params.mapInput)) changes.map = null;
       else {
         const map = findMap(params.mapInput);
         if (!map) return { ok: false, error: `"${params.mapInput}" isn't a Valorant map I know. Pick one from the list.` };

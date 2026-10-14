@@ -42,6 +42,7 @@ function fakeSetupInteraction(opts: FakeInteractionOptions) {
     member: { roles: opts.roleIds },
     options: {
       getChannel: (name: string) => (name === "match_channel" ? (opts.channel ?? null) : null),
+      getBoolean: () => null,
       getRole: (name: string) => (name === "admin_role" ? (opts.role ?? null) : null),
       getString: (name: string) => (name === "timezone" ? (opts.timezone ?? null) : null),
       getInteger: (name: string) =>

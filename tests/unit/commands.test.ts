@@ -1,3 +1,4 @@
+import { MAPS } from "../../src/modules/agents/agentData.js";
 import { describe, expect, it } from "vitest";
 import { PermissionFlagsBits } from "discord.js";
 import { commands, commandsByName } from "../../src/discord/commands/index.js";
@@ -60,6 +61,16 @@ describe("command registry", () => {
         "cancel-schedule",
       ].sort(),
     );
+  });
+
+  it("/create-schedule takes an optional `map` choice covering every known map, and `slots` stays required", () => {
+    const json = commandsByName.get("create-schedule")!.data.toJSON();
+    const byName = new Map((json.options ?? []).map((o) => [o.name, o]));
+    expect((byName.get("slots") as { required?: boolean }).required).toBe(true);
+    const map = byName.get("map") as { required?: boolean; choices?: { name: string; value: string }[] };
+    expect(map).toBeDefined();
+    expect(map.required ?? false).toBe(false);
+    expect((map.choices ?? []).map((c) => c.value).sort()).toEqual([...MAPS].sort());
   });
 
   it("/mari requires a 'message' option, is guild-only, and has no admin permission gate (a personal chat, not an admin tool)", () => {

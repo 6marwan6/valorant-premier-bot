@@ -238,3 +238,33 @@ Rules (enforced by `tests/unit/agentData.test.ts`, which fails the build otherwi
 - A map with no entry (today Corrode and Summit) shows `GENERAL_COMPS` and says "(general)". To add one, add an entry for it. To change what everyone falls back to, edit `GENERAL_COMPS`.
 
 An in-Discord command (e.g. `/map-comps`) is not built; it would store comps in the database instead of the file.
+
+---
+
+# Part 6 — Map chosen when the schedule is created (2026-10-14)
+
+## Request (owner)
+
+Map selection should be an option when creating a schedule, because each schedule is played on a certain map every week.
+
+Plan sections touched: §11 (match creation fields — Part 3 had made the map a manual `/schedule-slot` step because "a Premier map isn't known when the week is posted"; the owner now knows it at posting time), §14 / principle #9 (the map is a deterministic database fact: only a name from the known list is ever stored, never free text or model output), §4 (nothing is fetched from Riot — the admin picks it), principle #11 (one optional option; no new table or migration).
+
+## What changed
+
+- `/create-schedule slots:"sat 7pm, sun 7pm" map:Ascent` — new **optional** `map` option with the same 13-map choice list as `/schedule-slot`. Omit it and nothing changes: the map is "not decided yet", exactly as before.
+- The map is stored on **every slot** of the new schedule (`schedule_slots.map`, the column added in migration 0018 — **no new migration**). Because it is the same data, it shows everywhere the slot map already shows (schedule card, AGENT SELECT lineup, agent-pick panel and its suggested comps, SQUAD LOCKED card, reminders) from the first vote.
+- The admin's confirmation says which map was applied (or that it is still undecided).
+- `/schedule-slot slot:N map:...` is unchanged and still overrides a single slot afterwards (e.g. one day on a different map, or `— not decided yet —`).
+- Validation lives in `ScheduleService.create`: an unknown map is rejected with a clear message **before** anything is created, so a typo can't leave a half-made poll.
+
+## Deploy
+
+Re-run `npm run deploy-commands` (the `/create-schedule` definition gained an option). No migration.
+
+## Tests
+
+Unit: `/create-schedule` exposes an optional `map` choice covering every known map while `slots` stays required. Integration (real Postgres): map stored on every slot (any spelling, persisted and rendered on the card), omitted/`clear` → null, unknown map rejected and no poll created, `/schedule-slot` still changes one slot afterwards, and the full `/create-schedule` command path (option → service → database → posted card).
+
+## Decision to confirm
+
+1. One map per schedule, applied to all its slots (my reading of "each schedule is played on a certain map"). If different slots of one week can have different maps and you'd rather set them in the same command, the slots string could take a per-slot map (`sat 7pm ascent, sun 7pm bind`) — say so and I'll add it.

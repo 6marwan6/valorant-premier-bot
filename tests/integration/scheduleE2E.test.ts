@@ -110,6 +110,39 @@ describeIfDb("Weekly schedule voting + reminders (integration)", () => {
     await ctx.services.schedules.cancel(guildId);
   });
 
+  it("/create-schedule's optional map is stored on every slot (any spelling), shows on the card, and defaults to not decided", async () => {
+    const withMap = await ctx.services.schedules.create({ guildId, slotsInput: "sat 7pm, sun 7pm", mapInput: "aScent", now: new Date("2031-06-25T00:00:00Z") });
+    expect(withMap.ok).toBe(true);
+    if (!withMap.ok) return;
+    expect(withMap.value.slots.map((s) => s.map)).toEqual(["Ascent", "Ascent"]);
+    const view = (await ctx.services.schedules.getView(withMap.value.poll.id))!;
+    expect(view.slots.map((s) => s.map)).toEqual(["Ascent", "Ascent"]); // persisted, not just returned
+    const rendered = await (await import("../../src/discord/scheduleSync.js")).renderSchedule(ctx, view);
+    expect(JSON.stringify(rendered.embeds)).toContain("Ascent");
+    await ctx.services.schedules.cancel(guildId);
+
+    const noMap = await newPoll("sat 7pm");
+    expect(noMap.slots[0]!.map).toBeNull();
+    await ctx.services.schedules.cancel(guildId);
+
+    const cleared = await ctx.services.schedules.create({ guildId, slotsInput: "sat 7pm", mapInput: "clear", now: new Date("2031-06-25T00:00:00Z") });
+    expect(cleared.ok && cleared.value.slots[0]!.map).toBeNull();
+    await ctx.services.schedules.cancel(guildId);
+  });
+
+  it("an unknown map is rejected and creates no poll; /schedule-slot can still change one slot afterwards", async () => {
+    const bad = await ctx.services.schedules.create({ guildId, slotsInput: "sat 7pm", mapInput: "dust2", now: new Date("2031-06-25T00:00:00Z") });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toContain("dust2");
+    expect(await ctx.repositories.schedules.getLatestOpenPoll(guildId)).toBeUndefined();
+
+    const ok = await ctx.services.schedules.create({ guildId, slotsInput: "sat 7pm, sun 7pm", mapInput: "Bind", now: new Date("2031-06-25T00:00:00Z") });
+    expect(ok.ok).toBe(true);
+    const edit = await ctx.services.schedules.editSlot({ guildId, position: 2, mapInput: "Haven", now: new Date("2031-06-25T00:00:00Z") });
+    expect(edit.ok && edit.value.view.slots.map((s) => s.map)).toEqual(["Bind", "Haven"]);
+    await ctx.services.schedules.cancel(guildId);
+  });
+
   it("votes toggle, one row per player and slot, and 'can't play any day' replaces votes (and voting undoes it)", async () => {
     const { poll, slots } = await newPoll("sat 7pm, sun 7pm");
     const [s1, s2] = slots as [(typeof slots)[number], (typeof slots)[number]];
