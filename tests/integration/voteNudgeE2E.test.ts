@@ -148,6 +148,61 @@ describeIfDb("Mari's day-old 'you haven't voted' DM (integration)", () => {
     expect(mine()).toHaveLength(before);
   });
 
+  it("sends a second, final DM 8 hours before the first slot — only to players who are still silent, once", async () => {
+    for (const id of ids) fd.failNext(id, undefined, 0); // earlier tests may have left unused queued failures
+    await ctx.services.schedules.cancel(guildId);
+    const { poll } = await postSchedule("sat 7pm, sun 7pm", "Bind"); // sat = 2031-06-28 16:00Z, so the window opens at 08:00Z
+    const view = (await ctx.services.schedules.getView(poll.id))!;
+    const before = mine().length;
+    const at = (iso: string) => runReminderCronJob(ctx, new Date(iso));
+
+    // Well before the window: the day-old DM goes to the four players (a, b, c, d).
+    await at("2031-06-28T07:00:00Z");
+    expect(mine().slice(before).map((d) => d.userId).sort()).toEqual([...ids].sort());
+    expect(mine().slice(before).every((d) => !d.content.includes("hours away"))).toBe(true); // the day-old wording, not the countdown
+
+    // a votes, b says "can't play any day"; c and d stay silent.
+    await ctx.services.schedules.vote({ guildId, pollId: poll.id, slotId: view.slots[0]!.id, discordUserId: ids[0]!, displayName: "A", now: new Date("2031-06-26T00:00:00Z") });
+    await ctx.services.schedules.decline({ guildId, pollId: poll.id, discordUserId: ids[1]!, displayName: "B" });
+    const afterFirst = mine().length;
+
+    // Not yet 8 hours out: nothing.
+    await at("2031-06-28T07:59:00Z");
+    expect(mine()).toHaveLength(afterFirst);
+
+    // Inside the window: c and d get the final DM (and nobody else).
+    await at("2031-06-28T09:00:00Z");
+    const finals = mine().slice(afterFirst);
+    expect(finals.map((d) => d.userId).sort()).toEqual([ids[2], ids[3]].sort());
+    expect(finals[0]!.content).toContain("about 7 hours away");
+    expect(finals[0]!.content).toContain("Bind");
+    expect(finals.every((d) => d.content.includes("hours away"))).toBe(true);
+
+    // Idempotent, and a later answer ends it — including across overlapping ticks.
+    await Promise.all([at("2031-06-28T09:05:00Z"), at("2031-06-28T09:05:00Z"), at("2031-06-28T12:00:00Z")]);
+    expect(mine()).toHaveLength(afterFirst + 2);
+    // Everyone has now had at most one of each kind.
+    for (const id of ids) expect(mine().slice(before).filter((d) => d.userId === id).length).toBeLessThanOrEqual(2);
+  });
+
+  it("a closed DM on the final reminder is not retried, and a transient failure there is", async () => {
+    await ctx.services.schedules.cancel(guildId);
+    await postSchedule("sat 7pm");
+    const at = (iso: string) => runReminderCronJob(ctx, new Date(iso));
+    fd.failNext(ids[0]!, 50007, 5);
+    fd.failNext(ids[1]!, undefined, 1);
+    const before = mine().length;
+    // Inside the window with a schedule that is old enough: the final DM is the only one that goes.
+    await at("2031-06-28T09:00:00Z");
+    const first = mine().slice(before).map((d) => d.userId).sort();
+    expect(first).toEqual([ids[2], ids[3]].sort());
+    await at("2031-06-28T09:10:00Z");
+    const second = mine().slice(before + 2).map((d) => d.userId);
+    expect(second).toEqual([ids[1]]); // transient failure retried, closed DM (a) never
+    await at("2031-06-28T09:20:00Z");
+    expect(mine().slice(before)).toHaveLength(3);
+  });
+
   it("stays quiet once every slot has started", async () => {
     const before = mine().length;
     await runReminderCronJob(ctx, new Date("2031-07-30T00:00:00Z"));

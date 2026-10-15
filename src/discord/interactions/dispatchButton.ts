@@ -9,7 +9,7 @@ import { isMemoryDeleteCustomId } from "../../modules/memories/memoryManageCusto
 import { handleMemoryDeleteButton } from "../memoryDelete.js";
 import { isScheduleCustomId } from "../../modules/schedules/scheduleCustomId.js";
 import { dispatchScheduleButton } from "./dispatchScheduleButton.js";
-import { isAgentCustomId } from "../../modules/agents/agentCustomId.js";
+import { isAgentCustomId, isLegacyAgentCustomId } from "../../modules/agents/agentCustomId.js";
 import { dispatchAgentButton } from "./dispatchAgentPick.js";
 import { avatarUrlOf } from "../avatarUrl.js";
 import type { MatchRow } from "../../database/schema/matches.js";
@@ -180,9 +180,16 @@ export async function dispatchButton(interaction: ButtonInteraction, ctx: AppCon
     return;
   }
 
-  // Agent-pick panel (2026-10-04): `agent:<slotId>:...` — see dispatchAgentPick.ts.
+  // Agent-pick panel (2026-10-04; per schedule since 2026-10-15): `squad:<pollId>:...` — see dispatchAgentPick.ts.
   if (isAgentCustomId(interaction.customId)) {
     await dispatchAgentButton(interaction, ctx);
+    return;
+  }
+
+  // A panel left open from before the squad became one per schedule (`agent:<slotId>:...`). Its ids carry a slot, not a
+  // schedule, so they are never acted on — the player is pointed at the new panel instead.
+  if (isLegacyAgentCustomId(interaction.customId)) {
+    await interaction.reply({ content: "This agent panel is from before the squad became one per schedule. Tap **🎯 PICK AGENT** on the schedule to open the new one.", ephemeral: true });
     return;
   }
 

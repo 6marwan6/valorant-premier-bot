@@ -11,12 +11,12 @@ const AVATAR = "https://cdn.example/a.png";
 const fields = (c: ReturnType<typeof buildScheduleReactionCard>) => Object.fromEntries((c.embeds[0]!.toJSON().fields ?? []).map((f) => [f.name, f.value]));
 
 describe("the LOCKED IN card shows the picked agent", () => {
-  const base = { player, kind: "VOTE" as const, text: "LET'S GO", pollId: 1, slot, timezone: "Africa/Cairo", avatarUrl: AVATAR };
+  const base = { player, kind: "VOTE" as const, text: "LET'S GO", pollId: 1, slots: [slot], timezone: "Africa/Cairo", avatarUrl: AVATAR };
 
   it("names the picked agent and its role (not the profile's preferred agent), with the portrait as the picture and the avatar in the author line", () => {
     const card = buildScheduleReactionCard({ ...base, agent: { key: "sova", name: "Sova", role: "INITIATOR" } });
     const j = card.embeds[0]!.toJSON();
-    expect(fields(card).Agent).toBe("🔎 **Sova**");
+    expect(fields(card)["Main agent"]).toBe("🔎 **Sova**");
     expect(fields(card).Role).toBe("🔎 Initiator");
     expect(JSON.stringify(j)).not.toContain("Raze");
     expect(j.thumbnail?.url).toBe(agentIconUrl(agentByKey("sova")!));
@@ -25,28 +25,45 @@ describe("the LOCKED IN card shows the picked agent", () => {
 
   it("uses the portrait emoji for the agent once uploaded", () => {
     const emojis = agentEmojiMapFrom([{ id: "111111111111111111", name: "agent_sova" }]);
-    expect(fields(buildScheduleReactionCard({ ...base, agent: { key: "sova", name: "Sova", role: "INITIATOR" }, emojis })).Agent).toBe("<:agent_sova:111111111111111111> **Sova**");
+    expect(fields(buildScheduleReactionCard({ ...base, agent: { key: "sova", name: "Sova", role: "INITIATOR" }, emojis }))["Main agent"]).toBe("<:agent_sova:111111111111111111> **Sova**");
   });
 
   it("a player-suggested agent has no portrait: the avatar stays the picture and the role glyph stands in", () => {
     const card = buildScheduleReactionCard({ ...base, agent: { key: "newguy", name: "Newguy", role: "CONTROLLER" } });
     expect(card.embeds[0]!.toJSON().thumbnail?.url).toBe(AVATAR);
-    expect(fields(card).Agent).toBe("☁️ **Newguy**");
+    expect(fields(card)["Main agent"]).toBe("☁️ **Newguy**");
   });
 
   it("without an agent (and for OUT THIS WEEK) it is the same card as before: avatar, role, preferred agent", () => {
-    const out = buildScheduleReactionCard({ ...base, kind: "DECLINE", slot: undefined });
+    const out = buildScheduleReactionCard({ ...base, kind: "DECLINE", slots: undefined });
     expect(out.embeds[0]!.toJSON().thumbnail?.url).toBe(AVATAR);
     expect(fields(out)).toEqual({ Role: "⚔️ Duelist", Agent: "Raze" });
   });
 });
 
+describe("the LOCKED IN card for a player who is in several slots", () => {
+  it("lists every slot they are in under 'Slots' (the squad plays them all), and 'Slot' when there is just one", () => {
+    const sunday = { ...slot, id: 2, position: 2, scheduledAt: new Date("2026-10-11T16:00:00Z") };
+    const base = { player, kind: "VOTE" as const, text: "LET'S GO", pollId: 1, timezone: "Africa/Cairo", avatarUrl: AVATAR, agent: { key: "sova", name: "Sova", role: "INITIATOR" as const } };
+    const two = fields(buildScheduleReactionCard({ ...base, slots: [slot, sunday] }));
+    expect(two.Slots).toBe("SAT 10/10 · 19:00\nSUN 11/10 · 19:00");
+    expect(two.Slot).toBeUndefined();
+    expect(fields(buildScheduleReactionCard({ ...base, slots: [slot] })).Slot).toBe("SAT 10/10 · 19:00");
+  });
+});
+
 describe("what Mari is told", () => {
+  it("a vote event lists every slot the player is in", () => {
+    const sunday = { ...slot, id: 2, position: 2, scheduledAt: new Date("2026-10-11T16:00:00Z") };
+    const lines = buildVoteEvent({ pollId: 1, slots: [slot, sunday], timezone: "Africa/Cairo" }).lines.join("\n");
+    expect(lines).toContain("CAN play SAT 10/10 at 19:00, SUN 11/10 at 19:00 (Africa/Cairo)");
+  });
+
   it("a vote event carries the locked-in agent as a fact when there is one, and is unchanged otherwise", () => {
-    const withAgent = buildVoteEvent({ pollId: 1, slot, timezone: "Africa/Cairo", agent: { name: "Jett", role: "DUELIST" } }).lines.join("\n");
-    expect(withAgent).toContain("Agent they locked in for that slot: Jett (Duelist)");
+    const withAgent = buildVoteEvent({ pollId: 1, slots: [slot], timezone: "Africa/Cairo", agent: { name: "Jett", role: "DUELIST" } }).lines.join("\n");
+    expect(withAgent).toContain("Main agent they locked in (for every slot they are in this week): Jett (Duelist)");
     expect(withAgent).toContain("Player response: PLAYING");
-    expect(buildVoteEvent({ pollId: 1, slot, timezone: "Africa/Cairo" }).lines.join("\n")).not.toContain("locked in");
+    expect(buildVoteEvent({ pollId: 1, slots: [slot], timezone: "Africa/Cairo" }).lines.join("\n")).not.toContain("locked in");
     expect(buildDeclineEvent({ pollId: 1, slotCount: 2 }).lines.join("\n")).not.toContain("Agent");
   });
 });

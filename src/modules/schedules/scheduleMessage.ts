@@ -9,6 +9,7 @@ import { agentByKey, agentIconUrl, ROLE_SINGULAR, type AgentRole } from "../agen
 import type { CustomAgentRow } from "../../database/schema/schedules.js";
 import { effectiveAt, formatSlotDay, formatSlotTime, MIN_PLAYERS_TO_QUEUE, pickLeadingSlot, voteBar } from "./scheduleLogic.js";
 import { formatOffsetLabel } from "../reminders/reminderScheduling.js";
+import { squadOf } from "../agents/squad.js";
 
 /**
  * Everything the weekly schedule shows: the poll card (its own message,
@@ -59,33 +60,33 @@ function nameOf(userId: string, profiles: Map<string, SchedulePlayer>): string {
   return `${glyph}<@${userId}>`;
 }
 
-/** `⚔️ <@id> · **Jett**` — a person with the agent they picked for this slot. */
-function withPick(userId: string, profiles: Map<string, SchedulePlayer>, picks: Map<string, string>, keys?: Map<string, string>, emojis?: AgentEmojiMap): string {
+/** What a player's squad pick looks like in text: their main, and their second if they chose one. */
+interface PickText {
+  main: string;
+  mainKey: string;
+  second: string | null;
+}
+
+/** user id -> their squad pick (the same for every slot — one squad per schedule, 2026-10-15). Players with no main are absent. */
+function pickTexts(picks: readonly AgentPickRow[], customAgents: readonly CustomAgentRow[]): Map<string, PickText> {
+  const out = new Map<string, PickText>();
+  for (const [userId, entry] of squadOf(picks)) {
+    if (!entry.main) continue;
+    out.set(userId, {
+      main: agentNameFor(entry.main, customAgents),
+      mainKey: entry.main,
+      second: entry.second ? agentNameFor(entry.second, customAgents) : null,
+    });
+  }
+  return out;
+}
+
+/** `⚔️ <@id> · **Jett** / Reyna` — a person with their main agent (and second, if any). */
+function withPick(userId: string, profiles: Map<string, SchedulePlayer>, picks: Map<string, PickText>, emojis?: AgentEmojiMap): string {
   const pick = picks.get(userId);
-  const portrait = pick ? emojis?.get(keys?.get(userId) ?? "") : undefined; // the agent's portrait, once `npm run sync-agent-emojis` has been run
-  return `${nameOf(userId, profiles)}${pick ? ` · ${portrait ? `${emojiMarkup(portrait)} ` : ""}**${escapeMarkdown(pick)}**` : ""}`;
-}
-
-/** slot id -> (user id -> agent key), to look a pick's portrait up. */
-function pickKeysBySlot(picks: readonly AgentPickRow[]): Map<number, Map<string, string>> {
-  const out = new Map<number, Map<string, string>>();
-  for (const p of picks) {
-    const inner = out.get(p.slotId) ?? new Map<string, string>();
-    inner.set(p.discordUserId, p.agentKey);
-    out.set(p.slotId, inner);
-  }
-  return out;
-}
-
-/** slot id -> (user id -> agent display name). */
-function picksBySlot(picks: readonly AgentPickRow[], customAgents: readonly CustomAgentRow[]): Map<number, Map<string, string>> {
-  const out = new Map<number, Map<string, string>>();
-  for (const p of picks) {
-    const inner = out.get(p.slotId) ?? new Map<string, string>();
-    inner.set(p.discordUserId, agentNameFor(p.agentKey, customAgents));
-    out.set(p.slotId, inner);
-  }
-  return out;
+  if (!pick) return nameOf(userId, profiles);
+  const portrait = emojis?.get(pick.mainKey); // the agent's portrait, once `npm run sync-agent-emojis` has been run
+  return `${nameOf(userId, profiles)} · ${portrait ? `${emojiMarkup(portrait)} ` : ""}**${escapeMarkdown(pick.main)}**${pick.second ? ` / ${escapeMarkdown(pick.second)}` : ""}`;
 }
 
 /** The notification line: every Premier player on the roster, @mentioned, so posting the schedule pings the team. */
@@ -156,8 +157,7 @@ export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[
   const bySlot = votesBySlot(view.votes);
   const counts = new Map(slots.map((s) => [s.id, bySlot.get(s.id)?.length ?? 0]));
   const leader = cancelled ? null : pickLeadingSlot(slots, counts, now);
-  const picksFor = picksBySlot(view.picks ?? [], customAgents);
-  const keysFor = pickKeysBySlot(view.picks ?? []);
+  const picksFor = pickTexts(view.picks ?? [], customAgents);
 
   // The roster is @mentioned in the message text, so posting the schedule notifies the team (the card itself is an embed, and an embed never pings). Edits don't re-notify: they are sent with mentions suppressed.
   const pings = !cancelled && roster.length > 0 ? `\n${rosterPings(roster)}` : "";
@@ -196,9 +196,8 @@ export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[
   const blocks: string[] = slots.map((s) => {
     const voters = bySlot.get(s.id) ?? [];
     const heading = `${NUMBER_EMOJI[s.position - 1] ?? s.position}  **${formatSlotDay(s.scheduledAt, tz)} · ${formatSlotTime(s.scheduledAt, tz)}**${s.map ? ` · 🗺️ ${s.map.toUpperCase()}` : ""}  —  **${voters.length}/${MIN_PLAYERS_TO_QUEUE}**`;
-    const slotPicks = picksFor.get(s.id) ?? new Map<string, string>();
-    const slotKeys = keysFor.get(s.id);
-    const people = voters.length ? voters.map((v) => withPick(v.discordUserId, profiles, slotPicks, slotKeys, emojis)).join(slotPicks.size > 0 ? "\n" : "  ·  ") : "_no votes yet_";
+    const anyPick = voters.some((v) => picksFor.has(v.discordUserId));
+    const people = voters.length ? voters.map((v) => withPick(v.discordUserId, profiles, picksFor, emojis)).join(anyPick ? "\n" : "  ·  ") : "_no votes yet_";
     return `${heading}\n${people}`;
   });
   const out: string[] = [];
@@ -242,11 +241,15 @@ export function buildScheduleMessage(view: ScheduleView, roster: SchedulePlayer[
   return { content, embeds: [status, whoIsIn], components };
 }
 
-/** One line per person for lineups: `⚔️ <@id> · **Jett**` — the agent they picked for this slot, else their profile's preferred agent. */
-function lineupLine(userId: string, profiles: Map<string, SchedulePlayer>, picks: Map<string, string>): string {
+/** One line per person for lineups: `⚔️ <@id> · **Jett** / Reyna` — their squad pick (main, and second if any), else their profile's preferred agent. */
+function lineupLine(userId: string, profiles: Map<string, SchedulePlayer>, picks: Map<string, PickText>): string {
   const picked = picks.get(userId);
   const preferred = profiles.get(userId)?.preferredAgent;
-  const agent = picked ? ` · **${escapeMarkdown(picked)}**` : preferred ? ` · ${escapeMarkdown(preferred)}` : "";
+  const agent = picked
+    ? ` · **${escapeMarkdown(picked.main)}**${picked.second ? ` / ${escapeMarkdown(picked.second)}` : ""}`
+    : preferred
+      ? ` · ${escapeMarkdown(preferred)}`
+      : "";
   return `${nameOf(userId, profiles)}${agent}`;
 }
 
@@ -264,7 +267,7 @@ export function buildQuorumMessage(
   customAgents: readonly CustomAgentRow[] = [],
 ): { content: string; embeds: EmbedBuilder[]; mentionUserIds: string[] } {
   const profiles = new Map(roster.map((p) => [p.discordUserId, p]));
-  const slotPicks = picksBySlot(picks.filter((p) => p.slotId === slot.id), customAgents).get(slot.id) ?? new Map<string, string>();
+  const slotPicks = pickTexts(picks, customAgents);
   const ids = voters.map((v) => v.discordUserId);
   const at = unix(effectiveAt(slot));
   const lines = [
@@ -302,7 +305,7 @@ export function buildSlotReminderMessage(
   customAgents: readonly CustomAgentRow[] = [],
 ): { content: string; embeds: EmbedBuilder[]; mentionUserIds: string[] } {
   const profiles = new Map(roster.map((p) => [p.discordUserId, p]));
-  const slotPicks = picksBySlot(picks.filter((p) => p.slotId === slot.id), customAgents).get(slot.id) ?? new Map<string, string>();
+  const slotPicks = pickTexts(picks, customAgents);
   const ids = voters.map((v) => v.discordUserId);
   const imminent = offsetMinutes <= 20;
   const at = unix(effectiveAt(slot));
@@ -337,8 +340,8 @@ export function buildScheduleReactionCard(params: {
   kind: "VOTE" | "DECLINE";
   text: string;
   pollId: number;
-  /** The slot voted for (VOTE only). */
-  slot?: ScheduleSlotRow;
+  /** The slots the player is in (VOTE only) — the squad plays all of them. */
+  slots?: ScheduleSlotRow[];
   timezone: string;
   avatarUrl?: string | null;
   /** The agent the player locked in (VOTE only): shown on the card, with its portrait as the picture. */
@@ -357,11 +360,15 @@ export function buildScheduleReactionCard(params: {
   if (picture) embed.setThumbnail(picture);
 
   const fields: Array<{ name: string; value: string; inline: boolean }> = [];
-  if (kind === "VOTE" && params.slot) {
-    fields.push({ name: "Slot", value: `${formatSlotDay(params.slot.scheduledAt, params.timezone)} · ${formatSlotTime(params.slot.scheduledAt, params.timezone)}`, inline: true });
+  if (kind === "VOTE" && params.slots && params.slots.length > 0) {
+    fields.push({
+      name: params.slots.length === 1 ? "Slot" : "Slots",
+      value: params.slots.map((sl) => `${formatSlotDay(sl.scheduledAt, params.timezone)} · ${formatSlotTime(sl.scheduledAt, params.timezone)}`).join("\n"),
+      inline: true,
+    });
   }
   if (kind === "VOTE" && agent) {
-    fields.push({ name: "Agent", value: `${agentIconText(agent.key, ROLE_GLYPH[agent.role], params.emojis)} **${escapeMarkdown(agent.name)}**`, inline: true });
+    fields.push({ name: "Main agent", value: `${agentIconText(agent.key, ROLE_GLYPH[agent.role], params.emojis)} **${escapeMarkdown(agent.name)}**`, inline: true });
     fields.push({ name: "Role", value: `${ROLE_GLYPH[agent.role]} ${ROLE_SINGULAR[agent.role]}`, inline: true });
   } else {
     if (player.role) fields.push({ name: "Role", value: `${ROLE_GLYPH[player.role]} ${player.role.charAt(0)}${player.role.slice(1).toLowerCase()}`, inline: true });

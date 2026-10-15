@@ -5,11 +5,12 @@ import type { ReplyPayload } from "../discordRest.js";
 import { agentByKey, ROLE_SINGULAR, type AgentRole } from "../../modules/agents/agentData.js";
 import { agentNameFor } from "../../modules/agents/agentPanel.js";
 import { reactWithMari } from "../scheduleReaction.js";
-import { agentModalId, parseAgentCustomId, parseAgentModalCustomId } from "../../modules/agents/agentCustomId.js";
+import { agentModalId, parseAgentCustomId, parseAgentModalCustomId, type PickTarget } from "../../modules/agents/agentCustomId.js";
 import { buildAgentPanel } from "../../modules/agents/agentPanel.js";
 import type { PanelOutcome, PanelState } from "../../modules/agents/agentPickService.js";
 import type { PlayerRow } from "../../database/schema/players.js";
 import { syncScheduleMessage } from "../scheduleSync.js";
+import { squadOf } from "../../modules/agents/squad.js";
 import { loadAgentEmojis } from "../agentEmojiCache.js";
 import type { AgentEmojiMap } from "../../modules/agents/agentEmojis.js";
 
@@ -31,15 +32,15 @@ export function defaultTab(player: PlayerRow | undefined): AgentRole {
   return player?.kind === "PLAYER" && player.role ? player.role : "DUELIST";
 }
 
-export function renderPanel(state: PanelState, viewerId: string, tab: AgentRole, notice?: string, emojis?: AgentEmojiMap): ReplyPayload {
+export function renderPanel(state: PanelState, viewerId: string, tab: AgentRole, target: PickTarget, notice?: string, emojis?: AgentEmojiMap): ReplyPayload {
   const panel = buildAgentPanel({
     poll: state.poll,
-    slot: state.slot,
+    slots: state.slots,
     picks: state.picks,
     customAgents: state.customAgents,
     viewerId,
     tab,
-    hasOtherSlots: state.mySlots.length > 1,
+    target,
     notice,
     emojis,
   });
@@ -57,11 +58,11 @@ function tabAfter(outcome: PanelOutcome, fallback: AgentRole, agentKey?: string)
 }
 
 /** The popup behind "➕ Add an agent". It has to be the interaction's first response, so the HTTP router answers with it directly. */
-export function buildAddAgentModal(slotId: number, role: AgentRole): { type: InteractionResponseType.Modal; data: APIModalInteractionResponseCallbackData } {
+export function buildAddAgentModal(pollId: number, role: AgentRole, target: PickTarget): { type: InteractionResponseType.Modal; data: APIModalInteractionResponseCallbackData } {
   return {
     type: InteractionResponseType.Modal,
     data: {
-      custom_id: agentModalId(slotId, role),
+      custom_id: agentModalId(pollId, role, target),
       title: `Add a ${ROLE_SINGULAR[role]}`.slice(0, 45),
       components: [
         {
@@ -95,7 +96,7 @@ function extractAgentName(raw: Pick<APIModalSubmitInteraction, "data">): string 
 }
 
 /**
- * A press on the panel (role tab, an agent, clear, switch slot). The panel is
+ * A press on the panel (role tab, an agent, main/second, clear). The panel is
  * an ephemeral message, so `update` redraws it in place. "Add an agent" is not
  * here: it opens a popup, which the router answers before any of this runs.
  */
@@ -110,30 +111,30 @@ export async function dispatchAgentButton(interaction: ButtonInteraction, ctx: A
   const startedAt = Date.now();
   try {
     const service = ctx.services.agentPicks;
-    const common = { guildId, slotId: action.slotId, discordUserId };
+    const common = { guildId, pollId: action.pollId, discordUserId };
     let outcome: { ok: true; value: PanelOutcome } | { ok: false; error: string };
     let tab: AgentRole;
+    let target: PickTarget;
 
     switch (action.kind) {
-      case "role": {
+      case "role":
+      case "target": {
         const state = await service.load(common);
         outcome = state.ok ? { ok: true, value: { state: state.value } } : state;
         tab = action.role;
+        target = action.target;
         break;
       }
       case "pick": {
-        outcome = await service.pick({ ...common, agentKey: action.agentKey });
+        outcome = await service.pick({ ...common, agentKey: action.agentKey, target: action.target });
         tab = outcome.ok ? tabAfter(outcome.value, "DUELIST", action.agentKey) : "DUELIST";
+        target = outcome.ok ? (outcome.value.target ?? action.target) : action.target;
         break;
       }
       case "clear": {
-        outcome = await service.clear(common);
+        outcome = await service.clear({ ...common, scope: action.scope });
         tab = action.role;
-        break;
-      }
-      case "switch": {
-        outcome = await service.nextSlot(common);
-        tab = action.role;
+        target = outcome.ok ? (outcome.value.target ?? "MAIN") : "MAIN";
         break;
       }
     }
@@ -143,9 +144,9 @@ export async function dispatchAgentButton(interaction: ButtonInteraction, ctx: A
       return;
     }
     const emojis = await loadAgentEmojis(ctx.discord, ctx.logger);
-    await interaction.update(renderPanel(outcome.value.state, discordUserId, tab, outcome.value.notice, emojis));
+    await interaction.update(renderPanel(outcome.value.state, discordUserId, tab, target, outcome.value.notice, emojis));
     ctx.logger.info(
-      { event: "agent.panel", op: action.kind, guildId, slotId: outcome.value.state.slot.id, discordUserId, changed: outcome.value.changed ?? false, latencyMs: Date.now() - startedAt },
+      { event: "agent.panel", op: action.kind, guildId, pollId: action.pollId, discordUserId, changed: outcome.value.changed ?? false, latencyMs: Date.now() - startedAt },
       "Agent panel interaction",
     );
 
@@ -153,29 +154,29 @@ export async function dispatchAgentButton(interaction: ButtonInteraction, ctx: A
       const view = await ctx.services.schedules.getView(outcome.value.state.poll.id);
       if (view) await syncScheduleMessage(ctx, view);
 
-      // Mari's public "LOCKED IN" card is sent once the player has picked an agent (2026-10-08), so it shows that agent.
-      // It is claimed once per player per poll, so changing the pick afterwards stays silent. Never throws.
-      if (action.kind === "pick") {
+      // Mari's public "LOCKED IN" card is sent once the player has picked a main agent (2026-10-08), so it shows that agent.
+      // It is claimed once per player per schedule, so changing a pick afterwards stays silent. Never throws.
+      if (outcome.value.pickedMain) {
         const { state } = outcome.value;
-        const mine = state.picks.find((p) => p.discordUserId === discordUserId);
-        const role = mine ? (agentByKey(mine.agentKey)?.role ?? state.customAgents.find((c) => c.key === mine.agentKey)?.role) : undefined;
-        if (mine && role) {
+        const mine = squadOf(state.picks).get(discordUserId);
+        const role = mine?.main ? (agentByKey(mine.main)?.role ?? state.customAgents.find((c) => c.key === mine.main)?.role) : undefined;
+        if (mine?.main && role) {
           await reactWithMari(interaction, ctx, {
             guildId,
             pollId: state.poll.id,
             channelId: state.poll.channelId,
             timezone: state.poll.timezone,
             kind: "VOTE",
-            slot: state.slot,
+            slots: state.mySlots,
             slotCount: view?.slots.length ?? 1,
-            agent: { key: mine.agentKey, name: agentNameFor(mine.agentKey, state.customAgents), role },
+            agent: { key: mine.main, name: agentNameFor(mine.main, state.customAgents), role },
           });
         }
       }
     }
   } catch (err) {
     ctx.logger.error(
-      { event: "agent.panel.failed", op: action.kind, guildId, slotId: action.slotId, latencyMs: Date.now() - startedAt, err: err instanceof Error ? err.message : String(err) },
+      { event: "agent.panel.failed", op: action.kind, guildId, pollId: action.pollId, latencyMs: Date.now() - startedAt, err: err instanceof Error ? err.message : String(err) },
       "Agent panel handler threw",
     );
     await interaction.reply({ content: "Something went wrong. Please try again.", ephemeral: true }).catch(() => undefined);
@@ -200,7 +201,7 @@ export async function handleAgentAddModal(raw: APIModalSubmitInteraction, ctx: A
   try {
     const outcome = await ctx.services.agentPicks.suggest({
       guildId,
-      slotId: parsed.slotId,
+      pollId: parsed.pollId,
       discordUserId: sender.id,
       displayName: raw.member?.nick ?? sender.global_name ?? sender.username,
       name: extractAgentName(raw),
@@ -212,11 +213,11 @@ export async function handleAgentAddModal(raw: APIModalSubmitInteraction, ctx: A
     }
     const tab = outcome.value.focusRole ?? parsed.role;
     const emojis = await loadAgentEmojis(ctx.discord, ctx.logger);
-    await ctx.discord.editOriginalInteractionResponse(raw.token, renderPanel(outcome.value.state, sender.id, tab, outcome.value.notice, emojis));
-    ctx.logger.info({ event: "agent.suggested", guildId, slotId: parsed.slotId, discordUserId: sender.id, latencyMs: Date.now() - startedAt }, "Agent suggestion handled");
+    await ctx.discord.editOriginalInteractionResponse(raw.token, renderPanel(outcome.value.state, sender.id, tab, parsed.target, outcome.value.notice, emojis));
+    ctx.logger.info({ event: "agent.suggested", guildId, pollId: parsed.pollId, discordUserId: sender.id, latencyMs: Date.now() - startedAt }, "Agent suggestion handled");
   } catch (err) {
     ctx.logger.error(
-      { event: "agent.suggest.failed", guildId, slotId: parsed.slotId, latencyMs: Date.now() - startedAt, err: err instanceof Error ? err.message : String(err) },
+      { event: "agent.suggest.failed", guildId, pollId: parsed.pollId, latencyMs: Date.now() - startedAt, err: err instanceof Error ? err.message : String(err) },
       "Agent suggestion threw",
     );
     await ctx.discord.sendInteractionFollowup(raw.token, { content: "Something went wrong adding that agent. Please try again.", ephemeral: true }).catch(() => undefined);

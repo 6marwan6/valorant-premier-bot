@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { pgTable, pgEnum, serial, integer, text, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { serverConfig } from "./serverConfig.js";
 import { reminderStatusEnum } from "./reminders.js";
@@ -127,14 +128,16 @@ export const scheduleAiReactions = pgTable(
 );
 
 /**
- * Mari's "you haven't voted" DM (2026-10-14, owner's request): at most one per
- * (poll, player), whatever happens — the unique index is the claim (plan section
+ * Mari's "you haven't voted" DMs (2026-10-14, owner's request; a second one added
+ * 2026-10-15): at most one of each kind per (poll, player), whatever happens — the unique index is the claim (plan section
  * 50), taken *before* the DM goes out so a second cron tick can never send a
  * second one. `sentAt` is null on a row whose DM did not go out because the
  * player's DMs are closed to the bot: the row stays, so the bot never retries a
  * player who can't be reached (a transient failure instead deletes its row, so
  * the next tick tries again).
  */
+export type VoteNudgeKind = "FIRST" | "FINAL";
+
 export const scheduleVoteNudges = pgTable(
   "schedule_vote_nudges",
   {
@@ -143,36 +146,49 @@ export const scheduleVoteNudges = pgTable(
       .notNull()
       .references(() => schedulePolls.id, { onDelete: "cascade" }),
     discordUserId: text("discord_user_id").notNull(),
+    // FIRST = the day-old reminder; FINAL = the one 8 hours before the first slot (2026-10-15). One of each per player per poll.
+    kind: text("kind").$type<VoteNudgeKind>().notNull().default("FIRST"),
     sentAt: timestamp("sent_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex("schedule_vote_nudges_poll_user_idx").on(table.pollId, table.discordUserId)],
+  (table) => [uniqueIndex("schedule_vote_nudges_poll_user_kind_idx").on(table.pollId, table.discordUserId, table.kind)],
 );
 
+export type AgentPickKind = "MAIN" | "SECOND";
+
 /**
- * Agent picks (2026-10-04, owner's request): which agent each voter plays in a
- * slot's match. Valorant doesn't allow duplicate agents on a team, so an agent
- * can be held by one player per slot, and a player holds one agent per slot —
- * both enforced by unique indexes, which is also what makes a double-delivered
- * click or two players tapping the same agent at once safe (plan section 50).
- * A pick disappears with the vote it belongs to (see ScheduleRepository).
+ * Agent picks — one squad per schedule (2026-10-15, owner's request; before
+ * that, 2026-10-04, picks were per slot). Each player who is in at least one
+ * slot has a MAIN agent and, if they want one, a SECOND agent, and the same
+ * pair applies to every slot that week.
+ *
+ * Valorant doesn't allow duplicate agents on a team, so a MAIN agent can be held
+ * by one player per schedule (the partial unique index); a SECOND is a backup
+ * and may overlap with anyone's. A player holds at most one pick of each kind
+ * and can't hold the same agent twice. All three rules are unique indexes, which
+ * is also what makes a double-delivered click or two players tapping the same
+ * agent at once safe (plan section 50). Picks disappear with the player's last
+ * vote in the schedule, or when they say they can't play any day (see
+ * ScheduleRepository).
  */
 export const agentPicks = pgTable(
   "agent_picks",
   {
     id: serial("id").primaryKey(),
-    slotId: integer("slot_id")
+    pollId: integer("poll_id")
       .notNull()
-      .references(() => scheduleSlots.id, { onDelete: "cascade" }),
+      .references(() => schedulePolls.id, { onDelete: "cascade" }),
     discordUserId: text("discord_user_id").notNull(),
     // Normalized agent key: a built-in agent's slug ("jett", "kayo") or a custom agent's.
     agentKey: text("agent_key").notNull(),
+    kind: text("kind").$type<AgentPickKind>().notNull().default("MAIN"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("agent_picks_slot_user_idx").on(table.slotId, table.discordUserId),
-    uniqueIndex("agent_picks_slot_agent_idx").on(table.slotId, table.agentKey),
+    uniqueIndex("agent_picks_poll_user_kind_idx").on(table.pollId, table.discordUserId, table.kind),
+    uniqueIndex("agent_picks_poll_main_agent_idx").on(table.pollId, table.agentKey).where(sql`${table.kind} = 'MAIN'`),
+    uniqueIndex("agent_picks_poll_user_agent_idx").on(table.pollId, table.discordUserId, table.agentKey),
   ],
 );
 

@@ -47,16 +47,16 @@ export async function dispatchScheduleButton(interaction: ButtonInteraction, ctx
   const who = { discordUserId: interaction.user.id, displayName: resolveDisplayName(interaction) };
   try {
     if (action.kind === "agents") {
-      // "🎯 PICK AGENT" on the card: open my panel for my first upcoming slot. The click was acknowledged as an update of
+      // "🎯 PICK AGENT" on the card: open my panel (one squad for the whole schedule). The click was acknowledged as an update of
       // the public card, which stays untouched — the panel is a private follow-up.
-      const opened = await ctx.services.agentPicks.openFirst({ guildId, pollId: action.pollId, discordUserId: who.discordUserId });
+      const opened = await ctx.services.agentPicks.load({ guildId, pollId: action.pollId, discordUserId: who.discordUserId });
       if (!opened.ok) {
         await interaction.reply({ content: `❌ ${opened.error}`, ephemeral: true });
         return;
       }
       const profile = await ctx.repositories.players.getByDiscordUserId(guildId, who.discordUserId);
       const emojis = await loadAgentEmojis(ctx.discord, ctx.logger);
-      await interaction.followUp({ ...renderPanel(opened.value, who.discordUserId, defaultTab(profile), undefined, emojis), ephemeral: true });
+      await interaction.followUp({ ...renderPanel(opened.value, who.discordUserId, defaultTab(profile), "MAIN", undefined, emojis), ephemeral: true });
       return;
     }
 
@@ -82,11 +82,11 @@ export async function dispatchScheduleButton(interaction: ButtonInteraction, ctx
       if (did === "added") {
         // 2026-10-04: choosing a date opens the AGENT PICK panel (map, suggested comps, agents by role) instead of a bare
         // confirmation. If it can't be built the player still gets the plain confirmation — the vote is already recorded.
-        const panel = await ctx.services.agentPicks.load({ guildId, slotId: slot.id, discordUserId: who.discordUserId }).catch(() => null);
+        const panel = await ctx.services.agentPicks.load({ guildId, pollId: action.pollId, discordUserId: who.discordUserId }).catch(() => null);
         const profile = await ctx.repositories.players.getByDiscordUserId(guildId, who.discordUserId).catch(() => undefined);
-        const notice = `✅ You're **in** for **${label}**. ${mine} Pick your agent below 👇`;
+        const notice = `✅ You're **in** for **${label}**. ${mine} Pick your main agent below — it counts for every slot 👇`;
         const emojis = await loadAgentEmojis(ctx.discord, ctx.logger);
-        const reply = panel?.ok ? { ...renderPanel(panel.value, who.discordUserId, defaultTab(profile), notice, emojis), ephemeral: true } : { content: `✅ You're **in** for **${label}**. ${mine}`, ephemeral: true };
+        const reply = panel?.ok ? { ...renderPanel(panel.value, who.discordUserId, defaultTab(profile), "MAIN", notice, emojis), ephemeral: true } : { content: `✅ You're **in** for **${label}**. ${mine}`, ephemeral: true };
         await interaction.followUp(reply).catch(() => undefined);
       } else {
         await interaction.followUp({ content: `↩️ Removed your vote for **${label}**. ${mine}`, ephemeral: true }).catch(() => undefined);

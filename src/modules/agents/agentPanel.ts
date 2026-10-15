@@ -1,6 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } from "discord.js";
 import type { AgentPickRow, CustomAgentRow, ScheduleSlotRow } from "../../database/schema/schedules.js";
-import { formatSlotDay, formatSlotTime } from "../schedules/scheduleLogic.js";
+import { effectiveAt, formatSlotDay, formatSlotTime } from "../schedules/scheduleLogic.js";
+import { mainHolders, squadMap, squadOf } from "./squad.js";
 import {
   AGENTS,
   ROLE_BLURB,
@@ -14,7 +15,7 @@ import {
   roleIconUrl,
   type AgentRole,
 } from "./agentData.js";
-import { agentAddId, agentClearId, agentPickId, agentRoleId, agentSwitchId } from "./agentCustomId.js";
+import { agentAddId, agentClearId, agentPickId, agentRoleId, agentTargetId, type PickTarget } from "./agentCustomId.js";
 import { agentIconText, emojiMarkup, type AgentEmojiMap } from "./agentEmojis.js";
 
 /**
@@ -30,7 +31,9 @@ import { agentIconText, emojiMarkup, type AgentEmojiMap } from "./agentEmojis.js
  *    PICKED BY @someone). The portrait is an application emoji when the team
  *    has run `npm run sync-agent-emojis`, otherwise the role glyph;
  *  - role tabs, the agent buttons (also in rows, with the same portrait), and
- *    pick / clear / add-an-agent / switch-slot.
+ *    pick-a-second / add-an-agent / clear. One squad per schedule (2026-10-15): a main
+ *    agent (one holder each) and an optional second (a backup that may overlap), the
+ *    same for every slot — so there is no per-slot state and no "switch slot".
  *
  * Everyone's picks are on the public AGENT SELECT lineup message
  * (agentBoard.ts); this panel is the private place to choose.
@@ -41,18 +44,20 @@ import { agentIconText, emojiMarkup, type AgentEmojiMap } from "./agentEmojis.js
 
 export interface AgentPanelInput {
   poll: { id: number; timezone: string };
-  slot: ScheduleSlotRow;
-  /** Picks for THIS slot only. */
+  /** Every slot of the schedule that is still ahead: the squad plays all of them. */
+  slots: ScheduleSlotRow[];
+  /** Everyone's picks for the whole schedule. */
   picks: AgentPickRow[];
   customAgents: CustomAgentRow[];
   viewerId: string;
   tab: AgentRole;
-  /** The viewer is in more than one upcoming slot, so a "Switch slot" button is useful. */
-  hasOtherSlots: boolean;
+  /** Which pick the viewer is choosing: their main agent, or the optional second. */
+  target: PickTarget;
   /** One line shown above the panel: what just happened (picked / already taken / agent added). */
   notice?: string;
   /** Uploaded agent portrait emojis (discord/agentEmojiCache.ts). Absent or empty = role glyphs. */
   emojis?: AgentEmojiMap;
+  now?: Date;
 }
 
 /** A built-in or player-suggested agent, normalized for display. */
@@ -88,11 +93,13 @@ export function agentNameFor(key: string, customAgents: readonly CustomAgentRow[
 const COMP_LETTER = ["A", "B"];
 
 export function buildAgentPanel(input: AgentPanelInput): { content: string; embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } {
-  const { poll, slot, picks, customAgents, viewerId, tab, emojis } = input;
+  const { poll, slots, picks, customAgents, viewerId, tab, target, emojis } = input;
   const tz = poll.timezone;
-  const holderOf = new Map(picks.map((p) => [p.agentKey, p.discordUserId]));
-  const mine = picks.find((p) => p.discordUserId === viewerId);
-  const { comps, general } = compsFor(slot.map);
+  const squad = squadOf(picks);
+  const mains = mainHolders(picks);
+  const mine = squad.get(viewerId) ?? { main: null, second: null };
+  const { map, mixed } = squadMap(slots, input.now ?? new Date());
+  const { comps, general } = compsFor(map);
 
   // Which comp(s) suggest each agent.
   const suggestedBy = new Map<string, string[]>();
@@ -105,57 +112,82 @@ export function buildAgentPanel(input: AgentPanelInput): { content: string; embe
     const a = agentByKey(key);
     return agentIconText(key, a ? ROLE_GLYPH[a.role] : "▫️", emojis);
   };
-  const dayTime = `${formatSlotDay(slot.scheduledAt, tz)} · ${formatSlotTime(slot.scheduledAt, tz)}`;
-  const at = Math.floor((slot.queueAt ?? slot.scheduledAt).getTime() / 1000);
+  const portraitOf = (key: string) => (emojis?.get(key) ? `${emojiMarkup(emojis.get(key)!)} ` : "");
 
   // ---- header: one block per idea, a blank line between them
+  const slotLines = slots.map((s, i) => `${formatSlotDay(s.scheduledAt, tz)} · ${formatSlotTime(s.queueAt ?? s.scheduledAt, tz)}${i === 0 ? ` · <t:${Math.floor(effectiveAt(s).getTime() / 1000)}:R>` : ""}`);
+  const mapLine = map
+    ? `🗺️ **MAP: ${map.toUpperCase()}**${mixed ? " _(some slots use another map — see the schedule)_" : ""}`
+    : "🗺️ **MAP: TBD** — an admin sets it with `/schedule-slot`";
   const compBlocks = comps.map((comp, i) => {
-    const line = comp.agents.map((key) => `${iconOf(key)} ${nameOf(key)}${holderOf.has(key) ? " ✅" : ""}`).join("  ·  ");
+    const line = comp.agents.map((key) => `${iconOf(key)} ${nameOf(key)}${mains.has(key) ? " ✅" : ""}`).join("  ·  ");
     return `${i === 0 ? "🅰️" : "🅱️"} **COMP ${COMP_LETTER[i]} — ${comp.name}${general ? " (general)" : ""}**\n${line}`;
   });
+  const myPicks = [
+    `🎯 **YOUR MAIN:** ${mine.main ? `**${nameOf(mine.main)}**` : "_none yet — tap an agent below_"}`,
+    `🎒 **YOUR SECOND:** ${mine.second ? `**${nameOf(mine.second)}**` : mine.main ? "_optional — tap **Pick a second agent** if you want a backup_" : "_optional — after you pick a main_"}`,
+  ].join("\n");
+  const squadMembers = [...squad.entries()].filter(([, e]) => e.main);
   const header = new EmbedBuilder()
     .setColor(COLOR_HEADER)
     .setTitle("◢ AGENT PICK ◣")
     .setDescription(
       [
-        `📅 **${dayTime}** · <t:${at}:R>\n${slot.map ? `🗺️ **MAP: ${slot.map.toUpperCase()}**` : "🗺️ **MAP: TBD** — an admin sets it with `/schedule-slot`"}`,
-        `🎯 **YOUR PICK:** ${mine ? `**${nameOf(mine.agentKey)}**` : "_none yet — tap an agent below_"}`,
+        `📅 **ONE SQUAD FOR EVERY SLOT**\n${slotLines.join("\n")}\n${mapLine}`,
+        myPicks,
         ...compBlocks,
-        ...(picks.length > 0 ? [`🔒 **SQUAD · ${picks.length} locked**\n${picks.map((p) => `<@${p.discordUserId}> — ${emojis?.get(p.agentKey) ? `${emojiMarkup(emojis.get(p.agentKey)!)} ` : ""}**${nameOf(p.agentKey)}**`).join("\n")}`] : []),
+        ...(squadMembers.length > 0
+          ? [
+              `🔒 **SQUAD · ${squadMembers.length} locked**\n${squadMembers
+                .map(([id, e]) => `<@${id}> — ${portraitOf(e.main!)}**${nameOf(e.main!)}**${e.second ? `  ·  2nd ${portraitOf(e.second)}${nameOf(e.second)}` : ""}`)
+                .join("\n")}`,
+            ]
+          : []),
       ].join("\n\n"),
     );
-  if (mine) {
-    const portrait = agentByKey(mine.agentKey);
+  if (mine.main) {
+    const portrait = agentByKey(mine.main);
     if (portrait) header.setThumbnail(agentIconUrl(portrait)); // the selected agent, big — like the centre of the game's select screen
   }
 
   // ---- the open tab: suggested agents first, then the other options, three across
   const all = agentsForRole(tab, customAgents);
   const ordered = [...all.filter((a) => suggestedBy.has(a.key)), ...all.filter((a) => !suggestedBy.has(a.key))];
+  /** What each agent's cell and button say, for the pick being chosen. A main is exclusive; a second may overlap. */
+  const stateOf = (key: string): { status: string; selectable: boolean; mineHere: boolean; takenMain: boolean } => {
+    const holder = mains.get(key);
+    if (target === "MAIN") {
+      if (holder === viewerId) return { status: "✅ **YOUR MAIN**", selectable: true, mineHere: true, takenMain: false };
+      if (holder) return { status: `🔒 <@${holder}>`, selectable: false, mineHere: false, takenMain: true };
+      if (mine.second === key) return { status: "🔁 your second", selectable: true, mineHere: false, takenMain: false };
+      return { status: "🟢 Open", selectable: true, mineHere: false, takenMain: false };
+    }
+    if (mine.main === key) return { status: "⭐ your main", selectable: false, mineHere: false, takenMain: false };
+    if (mine.second === key) return { status: "✅ **YOUR 2ND**", selectable: true, mineHere: true, takenMain: false };
+    return { status: holder ? `🎯 <@${holder}>'s main` : "🟢 Open", selectable: true, mineHere: false, takenMain: false };
+  };
   const cells = ordered.slice(0, MAX_AGENT_BUTTONS).map((a) => {
-    const holder = holderOf.get(a.key);
-    const isMine = holder === viewerId;
-    const status = isMine ? "✅ **YOU**" : holder ? `🔒 <@${holder}>` : "🟢 Open";
+    const st = stateOf(a.key);
     const tags = suggestedBy.has(a.key) ? `⭐ ${suggestedBy.get(a.key)!.join(", ")}` : a.custom ? `➕ by <@${a.custom.suggestedByUserId}>` : null;
     return {
       name: `${a.custom ? ROLE_GLYPH[tab] : iconOf(a.key)} ${a.name.toUpperCase()}`.slice(0, 256),
-      value: tags ? `${status}\n${tags}` : status,
+      value: tags ? `${st.status}\n${tags}` : st.status,
       inline: true,
     };
   });
   const agents = new EmbedBuilder()
     .setColor(COLOR_AGENTS)
-    .setTitle(`${ROLE_GLYPH[tab]} ${ROLE_LABEL[tab].toUpperCase()}`)
+    .setTitle(`${ROLE_GLYPH[tab]} ${ROLE_LABEL[tab].toUpperCase()} — choosing your ${target === "MAIN" ? "MAIN" : "SECOND"}`)
     .setDescription(`_${ROLE_BLURB[tab]}_`)
     .addFields(cells)
-    .setFooter({ text: `PREMIER · Schedule #${poll.id} · slot ${slot.position} · one agent each, no duplicates` });
+    .setFooter({ text: `PREMIER · Schedule #${poll.id} · same pick for every slot · each main is picked once` });
 
   // ---- buttons
   const rows: ActionRowBuilder<ButtonBuilder>[] = [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       ROLE_ORDER.map((r) =>
         new ButtonBuilder()
-          .setCustomId(agentRoleId(slot.id, r))
+          .setCustomId(agentRoleId(poll.id, r, target))
           .setLabel(ROLE_LABEL[r])
           .setEmoji(ROLE_GLYPH[r])
           .setStyle(r === tab ? ButtonStyle.Primary : ButtonStyle.Secondary)
@@ -168,14 +200,12 @@ export function buildAgentPanel(input: AgentPanelInput): { content: string; embe
     rows.push(
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         shown.slice(i, i + 5).map((a) => {
-          const holder = holderOf.get(a.key);
-          const isMine = holder === viewerId;
-          const takenByOther = Boolean(holder) && !isMine;
+          const st = stateOf(a.key);
           const button = new ButtonBuilder()
-            .setCustomId(agentPickId(slot.id, a.key))
-            .setLabel(takenByOther ? `${a.name} 🔒`.slice(0, 80) : a.name.slice(0, 80))
-            .setStyle(isMine ? ButtonStyle.Success : suggestedBy.has(a.key) && !takenByOther ? ButtonStyle.Primary : ButtonStyle.Secondary)
-            .setDisabled(takenByOther);
+            .setCustomId(agentPickId(poll.id, a.key, target))
+            .setLabel(st.takenMain ? `${a.name} 🔒`.slice(0, 80) : a.name.slice(0, 80))
+            .setStyle(st.mineHere ? ButtonStyle.Success : suggestedBy.has(a.key) && st.selectable ? ButtonStyle.Primary : ButtonStyle.Secondary)
+            .setDisabled(!st.selectable);
           const portrait = a.custom ? undefined : emojis?.get(a.key);
           if (portrait) button.setEmoji({ id: portrait.id, name: portrait.name });
           return button;
@@ -184,12 +214,13 @@ export function buildAgentPanel(input: AgentPanelInput): { content: string; embe
     );
   }
   const actions = [
-    new ButtonBuilder().setCustomId(agentAddId(slot.id, tab)).setLabel("Add an agent").setEmoji("➕").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(agentClearId(slot.id, tab)).setLabel("Clear my pick").setStyle(ButtonStyle.Danger).setDisabled(!mine),
+    target === "MAIN"
+      ? new ButtonBuilder().setCustomId(agentTargetId(poll.id, tab, "SECOND")).setLabel("Pick a second agent").setEmoji("🎒").setStyle(ButtonStyle.Primary).setDisabled(!mine.main)
+      : new ButtonBuilder().setCustomId(agentTargetId(poll.id, tab, "MAIN")).setLabel("Back to my main").setEmoji("🎯").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(agentAddId(poll.id, tab, target)).setLabel("Add an agent").setEmoji("➕").setStyle(ButtonStyle.Secondary),
   ];
-  if (input.hasOtherSlots) {
-    actions.push(new ButtonBuilder().setCustomId(agentSwitchId(slot.id, tab)).setLabel("Switch slot").setEmoji("🗓️").setStyle(ButtonStyle.Secondary));
-  }
+  if (mine.second) actions.push(new ButtonBuilder().setCustomId(agentClearId(poll.id, tab, "SECOND")).setLabel("Clear second").setStyle(ButtonStyle.Secondary));
+  actions.push(new ButtonBuilder().setCustomId(agentClearId(poll.id, tab, "ALL")).setLabel("Clear my picks").setStyle(ButtonStyle.Danger).setDisabled(!mine.main));
   rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(actions));
 
   // `content` is always a string: an edit that omits it would leave the previous notice on screen.

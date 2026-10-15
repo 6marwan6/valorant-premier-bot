@@ -224,16 +224,35 @@ describe("roster pings, maps and agent picks on the schedule card (2026-10-04)",
   it("lists each voter with the agent they picked, one per line", () => {
     const v = view({
       votes: [vote(11, "u1"), vote(11, "u2")],
-      picks: [{ id: 1, slotId: 11, discordUserId: "u1", agentKey: "jett", createdAt: NOW, updatedAt: NOW }],
+      picks: [{ id: 1, pollId: 1, kind: "MAIN" as const, discordUserId: "u1", agentKey: "jett", createdAt: NOW, updatedAt: NOW }],
     });
     const block = who(buildScheduleMessage(v, roster, NOW)).description!.split("\n\n")[0]!;
     expect(block.split("\n").slice(1).join("\n")).toBe("⚔️ <@u1> · **Jett**\n<@u2>");
   });
 
+  it("shows the same pick on every slot a player is in — one squad per schedule — with their second after a slash", () => {
+    const v = view({
+      votes: [vote(11, "u1"), vote(12, "u1"), vote(12, "u2")],
+      picks: [
+        { id: 1, pollId: 1, kind: "MAIN" as const, discordUserId: "u1", agentKey: "jett", createdAt: NOW, updatedAt: NOW },
+        { id: 2, pollId: 1, kind: "SECOND" as const, discordUserId: "u1", agentKey: "reyna", createdAt: NOW, updatedAt: NOW },
+      ],
+    });
+    const blocks = who(buildScheduleMessage(v, roster, NOW)).description!.split("\n\n");
+    expect(blocks[0]).toContain("⚔️ <@u1> · **Jett** / Reyna"); // slot 1
+    expect(blocks[1]).toContain("⚔️ <@u1> · **Jett** / Reyna"); // slot 2: the same pair
+    expect(blocks[1]).toContain("<@u2>");
+  });
+
+  it("shows nothing for a second on its own (a second needs a main)", () => {
+    const v = view({ votes: [vote(11, "u1")], picks: [{ id: 2, pollId: 1, kind: "SECOND" as const, discordUserId: "u1", agentKey: "reyna", createdAt: NOW, updatedAt: NOW }] });
+    expect(who(buildScheduleMessage(v, roster, NOW)).description).not.toContain("Reyna");
+  });
+
   it("names a player-suggested agent from the custom list", () => {
     const v = view({
       votes: [vote(11, "u2")],
-      picks: [{ id: 1, slotId: 11, discordUserId: "u2", agentKey: "newguy", createdAt: NOW, updatedAt: NOW }],
+      picks: [{ id: 1, pollId: 1, kind: "MAIN" as const, discordUserId: "u2", agentKey: "newguy", createdAt: NOW, updatedAt: NOW }],
     });
     const custom = [{ id: 1, guildId: "g", key: "newguy", displayName: "Newguy", role: "DUELIST" as const, suggestedByUserId: "u1", suggestedByName: "Ahmed", createdAt: NOW }];
     expect(who(buildScheduleMessage(v, roster, NOW, custom)).description).toContain("<@u2> · **Newguy**");
@@ -248,17 +267,20 @@ describe("roster pings, maps and agent picks on the schedule card (2026-10-04)",
   it("the squad-locked card and the reminder show the map and each player's picked agent", () => {
     const s = slot(11, 1, "2026-10-10T16:00:00Z", { map: "Haven" });
     const voters = ["u1", "u2", "u3", "u4", "u5"].map((u) => vote(11, u));
-    const picks = [{ id: 1, slotId: 11, discordUserId: "u1", agentKey: "kayo", createdAt: NOW, updatedAt: NOW }];
+    const picks = [{ id: 1, pollId: 1, kind: "MAIN" as const, discordUserId: "u1", agentKey: "kayo", createdAt: NOW, updatedAt: NOW }];
     const q = visibleText(buildQuorumMessage(s, voters, [{ discordUserId: "u1", displayName: "A", preferredAgent: "Jett" }], TZ, picks));
     expect(q).toContain("Map: Haven");
     expect(q).toContain("<@u1> · **KAY/O**"); // the pick wins over the profile's preferred agent
+    const withSecond = [...picks, { id: 2, pollId: 1, kind: "SECOND" as const, discordUserId: "u1", agentKey: "sova", createdAt: NOW, updatedAt: NOW }];
+    expect(visibleText(buildQuorumMessage(s, voters, [], TZ, withSecond))).toContain("<@u1> · **KAY/O** / Sova");
+    expect(visibleText(buildSlotReminderMessage(s, voters, [], TZ, 300, 1, withSecond))).toContain("<@u1> · **KAY/O** / Sova");
     const r = visibleText(buildSlotReminderMessage(s, voters, [], TZ, 300, 1, picks));
     expect(r).toContain("Map: Haven");
     expect(r).toContain("<@u1> · **KAY/O**");
   });
 
   it("shows the picked agent's portrait emoji next to its name once portraits are uploaded, and nothing extra before", () => {
-    const v = view({ votes: [vote(11, "u1"), vote(11, "u2")], picks: [{ id: 1, slotId: 11, discordUserId: "u1", agentKey: "jett", createdAt: NOW, updatedAt: NOW }] });
+    const v = view({ votes: [vote(11, "u1"), vote(11, "u2")], picks: [{ id: 1, pollId: 1, kind: "MAIN" as const, discordUserId: "u1", agentKey: "jett", createdAt: NOW, updatedAt: NOW }] });
     const emojis = agentEmojiMapFrom([{ id: "111111111111111111", name: "agent_jett" }]);
     expect(who(buildScheduleMessage(v, [], NOW, [], emojis)).description).toContain("<@u1> · <:agent_jett:111111111111111111> **Jett**");
     expect(who(buildScheduleMessage(v, [], NOW, [], undefined)).description).toContain("<@u1> · **Jett**");

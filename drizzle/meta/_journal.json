@@ -155,6 +155,20 @@
       "when": 1791110156772,
       "tag": "0021_add_schedule_vote_nudges",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1791196556772,
+      "tag": "0022_add_vote_nudge_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791282956772,
+      "tag": "0023_agent_picks_per_schedule",
+      "breakpoints": true
     }
   ]
 }

@@ -137,8 +137,8 @@ describeIfDb("AGENT SELECT lineup message (integration)", () => {
     expect(visibleText(last)).toContain(`<@${p1.id}>`);
     expect(lineupFields(last)).toEqual([]);
 
-    await dispatchButton(click(agentPickId(slotId, "jett"), p1, guildId).interaction, ctx);
-    await dispatchButton(click(agentPickId(slotId, "omen"), p2, guildId).interaction, ctx);
+    await dispatchButton(click(agentPickId(poll.id, "jett", "MAIN"), p1, guildId).interaction, ctx);
+    await dispatchButton(click(agentPickId(poll.id, "omen", "MAIN"), p2, guildId).interaction, ctx);
     last = edits.filter((e) => e.messageId === id).at(-1)!.payload;
     expect(lineupFields(last)).toEqual([`JETT=<@${p1.id}>`, `OMEN=<@${p2.id}>`]);
     expect(visibleText(last)).not.toContain("STILL CHOOSING");

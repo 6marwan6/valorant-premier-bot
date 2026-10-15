@@ -19,6 +19,8 @@ import {
   type ScheduleAiKind,
   type AgentPickRow,
   type CustomAgentRow,
+  type VoteNudgeKind,
+  type AgentPickKind,
 } from "../schema/schedules.js";
 import type { PlayerRow } from "../schema/players.js";
 import type { ReminderPlanEntry } from "../../modules/reminders/reminderScheduling.js";
@@ -29,9 +31,15 @@ export interface ScheduleView {
   slots: ScheduleSlotRow[];
   votes: ScheduleVoteRow[];
   declines: ScheduleDeclineRow[];
-  /** Who plays which agent in which slot (see schema/schedules.ts agentPicks). */
+  /** Each player's MAIN and optional SECOND agent for the whole schedule (see schema/schedules.ts agentPicks). */
   picks: AgentPickRow[];
 }
+
+/** Outcome of ScheduleRepository.pickAgent. */
+export type PickResult =
+  | { ok: true; changed: boolean; /** MAIN only: the old main that moved to SECOND when the player picked their own second as main. */ swappedWith?: string }
+  | { ok: false; reason: "TAKEN"; takenBy: string }
+  | { ok: false; reason: "NEEDS_MAIN" | "SAME_AS_MAIN" };
 
 export interface DueSlotReminder {
   reminder: SlotReminderRow;
@@ -131,13 +139,7 @@ export class ScheduleRepository {
       this.db.select().from(scheduleSlots).where(eq(scheduleSlots.pollId, pollId)).orderBy(asc(scheduleSlots.position)),
       this.db.select().from(scheduleVotes).where(eq(scheduleVotes.pollId, pollId)).orderBy(asc(scheduleVotes.createdAt), asc(scheduleVotes.id)),
       this.db.select().from(scheduleDeclines).where(eq(scheduleDeclines.pollId, pollId)).orderBy(asc(scheduleDeclines.createdAt), asc(scheduleDeclines.id)),
-      this.db
-        .select({ pick: agentPicks })
-        .from(agentPicks)
-        .innerJoin(scheduleSlots, eq(agentPicks.slotId, scheduleSlots.id))
-        .where(eq(scheduleSlots.pollId, pollId))
-        .orderBy(asc(agentPicks.id))
-        .then((rows) => rows.map((r) => r.pick)),
+      this.db.select().from(agentPicks).where(eq(agentPicks.pollId, pollId)).orderBy(asc(agentPicks.id)),
     ]);
     return { poll, slots, votes, declines, picks };
   }
@@ -156,8 +158,14 @@ export class ScheduleRepository {
         .where(and(eq(scheduleVotes.slotId, params.slotId), eq(scheduleVotes.discordUserId, params.discordUserId)))
         .returning({ id: scheduleVotes.id });
       if (removed.length > 0) {
-        // Taking back your vote gives the agent back: a pick only exists for someone who is in the slot.
-        await tx.delete(agentPicks).where(and(eq(agentPicks.slotId, params.slotId), eq(agentPicks.discordUserId, params.discordUserId)));
+        // The squad is per schedule, so picks go only when the player's *last* vote does: a pick exists for someone
+        // who is in at least one slot.
+        const [stillIn] = await tx
+          .select({ id: scheduleVotes.id })
+          .from(scheduleVotes)
+          .where(and(eq(scheduleVotes.pollId, params.pollId), eq(scheduleVotes.discordUserId, params.discordUserId)))
+          .limit(1);
+        if (!stillIn) await tx.delete(agentPicks).where(and(eq(agentPicks.pollId, params.pollId), eq(agentPicks.discordUserId, params.discordUserId)));
         return "removed";
       }
 
@@ -183,14 +191,7 @@ export class ScheduleRepository {
         .delete(scheduleVotes)
         .where(and(eq(scheduleVotes.pollId, params.pollId), eq(scheduleVotes.discordUserId, params.discordUserId)))
         .returning({ id: scheduleVotes.id });
-      await tx
-        .delete(agentPicks)
-        .where(
-          and(
-            eq(agentPicks.discordUserId, params.discordUserId),
-            inArray(agentPicks.slotId, tx.select({ id: scheduleSlots.id }).from(scheduleSlots).where(eq(scheduleSlots.pollId, params.pollId))),
-          ),
-        );
+      await tx.delete(agentPicks).where(and(eq(agentPicks.pollId, params.pollId), eq(agentPicks.discordUserId, params.discordUserId)));
       const inserted = await tx
         .insert(scheduleDeclines)
         .values({ pollId: params.pollId, discordUserId: params.discordUserId, discordDisplayName: params.displayName })
@@ -214,22 +215,24 @@ export class ScheduleRepository {
     return rows.length > 0;
   }
 
-  /** Claims the one "you haven't voted" DM for (poll, player). True only for the single caller that won it (plan section 50). */
-  async claimVoteNudge(pollId: number, discordUserId: string): Promise<boolean> {
-    const rows = await this.db.insert(scheduleVoteNudges).values({ pollId, discordUserId }).onConflictDoNothing().returning({ id: scheduleVoteNudges.id });
+  /** Claims one "you haven't voted" DM (of `kind`) for (poll, player). True only for the single caller that won it (plan section 50). */
+  async claimVoteNudge(pollId: number, discordUserId: string, kind: VoteNudgeKind): Promise<boolean> {
+    const rows = await this.db.insert(scheduleVoteNudges).values({ pollId, discordUserId, kind }).onConflictDoNothing().returning({ id: scheduleVoteNudges.id });
     return rows.length > 0;
   }
 
-  async markVoteNudgeSent(pollId: number, discordUserId: string): Promise<void> {
+  async markVoteNudgeSent(pollId: number, discordUserId: string, kind: VoteNudgeKind): Promise<void> {
     await this.db
       .update(scheduleVoteNudges)
       .set({ sentAt: new Date() })
-      .where(and(eq(scheduleVoteNudges.pollId, pollId), eq(scheduleVoteNudges.discordUserId, discordUserId)));
+      .where(and(eq(scheduleVoteNudges.pollId, pollId), eq(scheduleVoteNudges.discordUserId, discordUserId), eq(scheduleVoteNudges.kind, kind)));
   }
 
   /** Gives the claim back after a *transient* failure so the next cron tick retries. (Closed DMs keep their claim — never retried.) */
-  async releaseVoteNudge(pollId: number, discordUserId: string): Promise<void> {
-    await this.db.delete(scheduleVoteNudges).where(and(eq(scheduleVoteNudges.pollId, pollId), eq(scheduleVoteNudges.discordUserId, discordUserId)));
+  async releaseVoteNudge(pollId: number, discordUserId: string, kind: VoteNudgeKind): Promise<void> {
+    await this.db
+      .delete(scheduleVoteNudges)
+      .where(and(eq(scheduleVoteNudges.pollId, pollId), eq(scheduleVoteNudges.discordUserId, discordUserId), eq(scheduleVoteNudges.kind, kind)));
   }
 
   /** Atomically stamps the slot's first-quorum moment; true only for the one caller that won it (so the "MATCH ON" card posts once). */
@@ -350,43 +353,71 @@ export class ScheduleRepository {
   }
 
   /**
-   * Gives `discordUserId` the agent for this slot, replacing whatever they held. An agent can be held by one player
-   * per slot (Valorant has no duplicate agents on a team): if someone else has it nothing changes and the holder is
-   * returned. Two players grabbing the same agent at once is settled by the unique index, never by luck.
+   * Sets a player's MAIN or SECOND agent for the whole schedule (2026-10-15: one squad per schedule).
+   *
+   * - MAIN: one holder per agent per schedule (Valorant has no duplicate agents on a team) — if someone else has it
+   *   nothing changes and the holder is returned. Choosing your own SECOND as your main swaps them: the old main
+   *   becomes your second. Two players grabbing the same agent at once is settled by the unique index, never by luck.
+   * - SECOND: a backup, so it may overlap with anyone's; it needs a MAIN first and can't be the same agent as it.
    */
-  async pickAgent(params: { slotId: number; discordUserId: string; agentKey: string }): Promise<{ ok: true; changed: boolean } | { ok: false; takenBy: string }> {
-    const holderOf = async () => {
-      const [row] = await this.db.select().from(agentPicks).where(and(eq(agentPicks.slotId, params.slotId), eq(agentPicks.agentKey, params.agentKey))).limit(1);
+  async pickAgent(params: { pollId: number; discordUserId: string; agentKey: string; kind: AgentPickKind }): Promise<PickResult> {
+    const { pollId, discordUserId, agentKey, kind } = params;
+    const mainHolder = async (client: Pick<Database, "select">) => {
+      const [row] = await client.select().from(agentPicks).where(and(eq(agentPicks.pollId, pollId), eq(agentPicks.agentKey, agentKey), eq(agentPicks.kind, "MAIN"))).limit(1);
       return row;
     };
     try {
-      return await this.db.transaction(async (tx) => {
-        const [held] = await tx.select().from(agentPicks).where(and(eq(agentPicks.slotId, params.slotId), eq(agentPicks.agentKey, params.agentKey))).limit(1);
-        if (held) return held.discordUserId === params.discordUserId ? { ok: true as const, changed: false } : { ok: false as const, takenBy: held.discordUserId };
-        await tx.delete(agentPicks).where(and(eq(agentPicks.slotId, params.slotId), eq(agentPicks.discordUserId, params.discordUserId)));
-        await tx.insert(agentPicks).values({ slotId: params.slotId, discordUserId: params.discordUserId, agentKey: params.agentKey });
-        return { ok: true as const, changed: true };
+      return await this.db.transaction(async (tx): Promise<PickResult> => {
+        const mine = await tx.select().from(agentPicks).where(and(eq(agentPicks.pollId, pollId), eq(agentPicks.discordUserId, discordUserId)));
+        const myMain = mine.find((p) => p.kind === "MAIN");
+        const mySecond = mine.find((p) => p.kind === "SECOND");
+
+        if (kind === "SECOND") {
+          if (!myMain) return { ok: false, reason: "NEEDS_MAIN" };
+          if (myMain.agentKey === agentKey) return { ok: false, reason: "SAME_AS_MAIN" };
+          if (mySecond?.agentKey === agentKey) return { ok: true, changed: false };
+          if (mySecond) await tx.delete(agentPicks).where(eq(agentPicks.id, mySecond.id));
+          await tx.insert(agentPicks).values({ pollId, discordUserId, agentKey, kind: "SECOND" });
+          return { ok: true, changed: true };
+        }
+
+        const held = await mainHolder(tx);
+        if (held) return held.discordUserId === discordUserId ? { ok: true, changed: false } : { ok: false, reason: "TAKEN", takenBy: held.discordUserId };
+        // The pair the player ends up with: the new main, and a backup that is kept unless it is the agent that just
+        // became the main (then the old main takes its place — a swap).
+        const swapped = mySecond?.agentKey === agentKey && myMain ? myMain.agentKey : null;
+        const keptSecond = swapped ?? (mySecond && mySecond.agentKey !== agentKey ? mySecond.agentKey : null);
+        await tx.delete(agentPicks).where(and(eq(agentPicks.pollId, pollId), eq(agentPicks.discordUserId, discordUserId)));
+        await tx.insert(agentPicks).values({ pollId, discordUserId, agentKey, kind: "MAIN" });
+        if (keptSecond) await tx.insert(agentPicks).values({ pollId, discordUserId, agentKey: keptSecond, kind: "SECOND" });
+        return { ok: true, changed: true, swappedWith: swapped ?? undefined };
       });
     } catch (err) {
       const code = (err as { code?: string; cause?: { code?: string } })?.cause?.code ?? (err as { code?: string })?.code;
       if (code !== "23505") throw err;
-      // Lost a race on the unique index: someone else got there first.
-      const holder = await holderOf();
-      if (holder && holder.discordUserId !== params.discordUserId) return { ok: false, takenBy: holder.discordUserId };
+      // Lost a race on a unique index: someone else got the main agent first (or a double-delivered click already did this).
+      if (kind === "MAIN") {
+        const holder = await mainHolder(this.db);
+        if (holder && holder.discordUserId !== discordUserId) return { ok: false, reason: "TAKEN", takenBy: holder.discordUserId };
+      }
       return { ok: true, changed: false };
     }
   }
 
-  async clearPick(slotId: number, discordUserId: string): Promise<boolean> {
+  /**
+   * Clears a player's picks: `ALL` removes both (a SECOND can't outlive its MAIN), `SECOND` removes only the backup.
+   * True when something was removed.
+   */
+  async clearPicks(pollId: number, discordUserId: string, scope: "ALL" | "SECOND"): Promise<boolean> {
     const rows = await this.db
       .delete(agentPicks)
-      .where(and(eq(agentPicks.slotId, slotId), eq(agentPicks.discordUserId, discordUserId)))
+      .where(and(eq(agentPicks.pollId, pollId), eq(agentPicks.discordUserId, discordUserId), scope === "SECOND" ? eq(agentPicks.kind, "SECOND") : undefined))
       .returning({ id: agentPicks.id });
     return rows.length > 0;
   }
 
-  async listPicksBySlot(slotId: number): Promise<AgentPickRow[]> {
-    return this.db.select().from(agentPicks).where(eq(agentPicks.slotId, slotId)).orderBy(asc(agentPicks.id));
+  async listPicksByPoll(pollId: number): Promise<AgentPickRow[]> {
+    return this.db.select().from(agentPicks).where(eq(agentPicks.pollId, pollId)).orderBy(asc(agentPicks.id));
   }
 
   async listCustomAgents(guildId: string): Promise<CustomAgentRow[]> {

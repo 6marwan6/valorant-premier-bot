@@ -38,7 +38,8 @@ export async function reactWithMari(
     channelId: string;
     timezone: string;
     kind: "VOTE" | "DECLINE";
-    slot?: ScheduleSlotRow;
+    /** VOTE only: the slots the player is in (the squad plays all of them). */
+    slots?: ScheduleSlotRow[];
     slotCount: number;
     /** VOTE only: the agent the player just locked in. */
     agent?: { key: string; name: string; role: AgentRole };
@@ -57,7 +58,7 @@ export async function reactWithMari(
             player,
             mode: "CELEBRATE",
             pollId: params.pollId,
-            event: buildVoteEvent({ pollId: params.pollId, slot: params.slot!, timezone: params.timezone, agent: params.agent }),
+            event: buildVoteEvent({ pollId: params.pollId, slots: params.slots ?? [], timezone: params.timezone, agent: params.agent }),
           })
         : await ctx.services.ai.respondToScheduleVote({
             player,
@@ -72,7 +73,7 @@ export async function reactWithMari(
       kind: params.kind,
       text: outcome.text,
       pollId: params.pollId,
-      slot: params.slot,
+      slots: params.slots,
       timezone: params.timezone,
       avatarUrl: avatarUrlOf(interaction),
       agent: params.agent,

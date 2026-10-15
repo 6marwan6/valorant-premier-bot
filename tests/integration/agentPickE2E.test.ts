@@ -9,7 +9,7 @@ import { dispatchButton } from "../../src/discord/interactions/dispatchButton.js
 import { handleAgentAddModal } from "../../src/discord/interactions/dispatchAgentPick.js";
 import { logger } from "../../src/config/logger.js";
 import { buildVoteCustomId, buildDeclineCustomId, buildAgentsCustomId } from "../../src/modules/schedules/scheduleCustomId.js";
-import { agentPickId, agentClearId, agentRoleId, agentSwitchId } from "../../src/modules/agents/agentCustomId.js";
+import { agentPickId, agentClearId, agentRoleId, agentTargetId } from "../../src/modules/agents/agentCustomId.js";
 import { MAX_SUGGESTIONS_PER_PLAYER } from "../../src/modules/agents/agentPickService.js";
 import { visibleText } from "../unit/helpers/embedText.js";
 
@@ -102,9 +102,15 @@ describeIfDb("Agent pick panel (integration)", () => {
     const c = click(buildVoteCustomId(pollId, slotId), u, guildId);
     return dispatchButton(c.interaction, ctx).then(() => c);
   };
+  /** A press of one of the panel's agent buttons: main by default, or the optional second. */
+  const pickVia = (pollId: number, key: string, u: { id: string; name: string }, target: "MAIN" | "SECOND" = "MAIN") => {
+    const c = click(agentPickId(pollId, key, target), u, guildId);
+    return dispatchButton(c.interaction, ctx).then(() => c);
+  };
+  const picksOf = async (pollId: number) => (await ctx.repositories.schedules.listPicksByPoll(pollId)).map((p) => [p.discordUserId, p.kind, p.agentKey] as const);
   const lastPanel = (c: ReturnType<typeof click>) => (c.update.mock.calls.at(-1)?.[0] ?? c.followUp.mock.calls.at(-1)![0]) as ReplyPayload;
 
-  it("choosing a date opens the AGENT PICK panel (private), not a bare confirmation", async () => {
+  it("choosing a date opens the AGENT PICK panel (private) for the whole schedule, not a bare confirmation", async () => {
     const { poll, slots } = await freshPoll();
     const c = await voteVia(poll.id, slots[0]!.id, p1);
     expect(c.update).toHaveBeenCalledTimes(1); // the public card
@@ -115,46 +121,50 @@ describeIfDb("Agent pick panel (integration)", () => {
     expect(panel.components!.length).toBeGreaterThanOrEqual(3);
     const text = visibleText(panel);
     expect(text).toContain("AGENT PICK");
+    expect(text).toContain("ONE SQUAD FOR EVERY SLOT");
     expect(text).toContain("SAT 28/06");
+    expect(text).toContain("SUN 29/06"); // the whole week, not just the slot just voted for
     expect(text).toContain("COMP A");
     expect(text).toContain("MAP: TBD");
+    expect(text).toContain("choosing your MAIN");
     expect(panel.content).toContain("You're **in**");
-    // p1 is a Duelist: the panel opens on the Duelists tab.
-    expect(cell(panel, "Jett")).toBeTruthy();
-    // the controller and sentinel tabs are one tap away
-    const tabs = (panel.components![0]!.toJSON().components as Array<{ label: string; disabled?: boolean }>);
+    expect(panel.content).toContain("counts for every slot");
+    expect(cell(panel, "Jett")).toBeTruthy(); // p1 is a Duelist: the panel opens on the Duelists tab
+    const tabs = panel.components![0]!.toJSON().components as Array<{ label: string; disabled?: boolean }>;
     expect(tabs.map((t) => t.label)).toEqual(["Duelists", "Initiators", "Controllers", "Sentinels"]);
     expect(tabs[0]!.disabled).toBe(true);
     await finish();
   });
 
-  it("the panel shows the map and its comps once an admin sets the map", async () => {
-    const { poll, slots } = await freshPoll();
-    const edit = await ctx.services.schedules.editSlot({ guildId, position: 1, mapInput: "ascent", now: FAR });
-    expect(edit.ok && edit.value.slot.map).toBe("Ascent");
-    const c = await voteVia(poll.id, slots[0]!.id, p1);
+  it("the panel shows the schedule's map and its comps (set when the schedule was created)", async () => {
+    const created = await ctx.services.schedules.create({ guildId, slotsInput: "sat 7pm, sun 7pm", mapInput: "Ascent", now: FAR });
+    if (!created.ok) throw new Error(created.error);
+    await ctx.services.schedules.recordMessage(created.value.poll.id, `msg-${created.value.poll.id}`);
+    const c = await voteVia(created.value.poll.id, created.value.slots[0]!.id, p1);
     const text = visibleText(c.followUp.mock.calls[0]![0]);
     expect(text).toContain("MAP: ASCENT");
     expect(text).not.toContain("(general)");
-    const bad = await ctx.services.schedules.editSlot({ guildId, position: 1, mapInput: "dust2", now: FAR });
-    expect(bad.ok).toBe(false);
-    const cleared = await ctx.services.schedules.editSlot({ guildId, position: 1, mapInput: "clear", now: FAR });
-    expect(cleared.ok && cleared.value.slot.map).toBeNull();
+    await finish();
+    // an admin can still change a single slot's map afterwards; the panel then says the slots differ
+    const { poll, slots } = await freshPoll();
+    await ctx.services.schedules.editSlot({ guildId, position: 1, mapInput: "ascent", now: FAR });
+    await ctx.services.schedules.editSlot({ guildId, position: 2, mapInput: "bind", now: FAR });
+    const mixed = await voteVia(poll.id, slots[0]!.id, p1);
+    expect(visibleText(mixed.followUp.mock.calls[0]![0])).toContain("some slots use another map");
     await finish();
   });
 
-  it("picking an agent: saved, panel redrawn with 'YOUR PICK', and the public card shows it without re-pinging anyone", async () => {
+  it("picking a main: saved, panel redrawn with 'YOUR MAIN', and the public card shows it without re-pinging anyone", async () => {
     const { poll, slots } = await freshPoll();
-    const slotId = slots[0]!.id;
-    await voteVia(poll.id, slotId, p1);
+    await voteVia(poll.id, slots[0]!.id, p1);
     edits.length = 0;
 
-    const c = click(agentPickId(slotId, "jett"), p1, guildId);
-    await dispatchButton(c.interaction, ctx);
+    const c = await pickVia(poll.id, "jett", p1);
     const panel = lastPanel(c);
-    expect(panel.content).toContain("You're playing **Jett**");
-    expect(visibleText(panel)).toContain("YOUR PICK");
-    expect((await ctx.repositories.schedules.listPicksBySlot(slotId)).map((p) => [p.discordUserId, p.agentKey])).toEqual([[p1.id, "jett"]]);
+    expect(panel.content).toContain("**Jett** is your main");
+    expect(panel.content).toContain("every slot this week");
+    expect(visibleText(panel)).toContain("YOUR MAIN");
+    expect(await picksOf(poll.id)).toEqual([[p1.id, "MAIN", "jett"]]);
 
     // the public schedule card was refreshed with the pick, and that edit cannot notify anyone
     expect(cardEdits(poll.id)).toHaveLength(1);
@@ -164,94 +174,207 @@ describeIfDb("Agent pick panel (integration)", () => {
 
     // picking the same agent again changes nothing and doesn't refresh the card
     edits.length = 0;
-    const again = click(agentPickId(slotId, "jett"), p1, guildId);
-    await dispatchButton(again.interaction, ctx);
-    expect(lastPanel(again).content).toContain("already your pick");
+    expect(lastPanel(await pickVia(poll.id, "jett", p1)).content).toContain("already your main");
     expect(edits).toHaveLength(0);
     await finish();
   });
 
-  it("an agent has one holder per slot: the second player is told who has it; the first player can change and free it", async () => {
+  it("a main agent has one holder: the second player is told who has it; the first can change and free it", async () => {
     const { poll, slots } = await freshPoll();
-    const slotId = slots[0]!.id;
-    await voteVia(poll.id, slotId, p1);
-    await voteVia(poll.id, slotId, p2);
-    await dispatchButton(click(agentPickId(slotId, "jett"), p1, guildId).interaction, ctx);
+    await voteVia(poll.id, slots[0]!.id, p1);
+    await voteVia(poll.id, slots[0]!.id, p2);
+    await pickVia(poll.id, "jett", p1);
 
-    const taken = click(agentPickId(slotId, "jett"), p2, guildId);
-    await dispatchButton(taken.interaction, ctx);
-    expect(lastPanel(taken).content).toContain(`already picked by <@${p1.id}>`);
-    expect((await ctx.repositories.schedules.listPicksBySlot(slotId)).map((p) => p.discordUserId)).toEqual([p1.id]);
-    // The panel jumps to the tab of the agent that was refused and shows Jett as picked by p1, with its button disabled.
+    const taken = await pickVia(poll.id, "jett", p2);
+    expect(lastPanel(taken).content).toContain(`already <@${p1.id}>'s main`);
+    expect(lastPanel(taken).content).toContain("take it as your second");
+    expect(await picksOf(poll.id)).toEqual([[p1.id, "MAIN", "jett"]]);
     expect(cell(lastPanel(taken), "Jett")!.value).toContain(`🔒 <@${p1.id}>`);
     const jettButton = (lastPanel(taken).components!.flatMap((r) => r.toJSON().components) as Array<{ label: string; disabled?: boolean }>).find((b) => b.label.startsWith("Jett"))!;
     expect(jettButton.disabled).toBe(true);
 
     // p1 switches to Raze: Jett is free again for p2
-    await dispatchButton(click(agentPickId(slotId, "raze"), p1, guildId).interaction, ctx);
-    expect((await ctx.repositories.schedules.listPicksBySlot(slotId)).map((p) => p.agentKey)).toEqual(["raze"]);
-    const nowFree = click(agentPickId(slotId, "jett"), p2, guildId);
-    await dispatchButton(nowFree.interaction, ctx);
-    expect(lastPanel(nowFree).content).toContain("You're playing **Jett**");
+    await pickVia(poll.id, "raze", p1);
+    expect((await picksOf(poll.id)).map((p) => p[2])).toEqual(["raze"]);
+    expect(lastPanel(await pickVia(poll.id, "jett", p2)).content).toContain("**Jett** is your main");
     await finish();
   });
 
-  it("two players grabbing the same agent at once: exactly one wins (unique index, not luck)", async () => {
+  it("two players grabbing the same main at once: exactly one wins (unique index, not luck)", async () => {
     const { poll, slots } = await freshPoll();
-    const slotId = slots[0]!.id;
-    await voteVia(poll.id, slotId, p1);
-    await voteVia(poll.id, slotId, p2);
+    await voteVia(poll.id, slots[0]!.id, p1);
+    await voteVia(poll.id, slots[0]!.id, p2);
     const results = await Promise.all([
-      ctx.services.agentPicks.pick({ guildId, slotId, discordUserId: p1.id, agentKey: "omen" }),
-      ctx.services.agentPicks.pick({ guildId, slotId, discordUserId: p2.id, agentKey: "omen" }),
+      ctx.services.agentPicks.pick({ guildId, pollId: poll.id, discordUserId: p1.id, agentKey: "omen", target: "MAIN" }),
+      ctx.services.agentPicks.pick({ guildId, pollId: poll.id, discordUserId: p2.id, agentKey: "omen", target: "MAIN" }),
     ]);
     expect(results.every((r) => r.ok)).toBe(true);
-    const picks = await ctx.repositories.schedules.listPicksBySlot(slotId);
-    expect(picks.filter((p) => p.agentKey === "omen")).toHaveLength(1);
+    expect((await picksOf(poll.id)).filter((p) => p[2] === "omen")).toHaveLength(1);
     await finish();
   });
 
-  it("clear my pick; and a pick is per slot, so the same agent can be played in two matches", async () => {
-    const { poll, slots } = await freshPoll();
-    const [s1, s2] = slots as [(typeof slots)[number], (typeof slots)[number]];
-    await voteVia(poll.id, s1.id, p1);
-    await voteVia(poll.id, s2.id, p1);
-    await dispatchButton(click(agentPickId(s1.id, "jett"), p1, guildId).interaction, ctx);
-    await dispatchButton(click(agentPickId(s2.id, "jett"), p1, guildId).interaction, ctx);
-    expect((await ctx.repositories.schedules.listPicksBySlot(s1.id))).toHaveLength(1);
-    expect((await ctx.repositories.schedules.listPicksBySlot(s2.id))).toHaveLength(1);
+  describe("the optional second agent", () => {
+    it("needs a main first, can't be the same agent as the main, and replaces the previous second", async () => {
+      const { poll, slots } = await freshPoll();
+      await voteVia(poll.id, slots[0]!.id, p1);
 
-    const clear = click(agentClearId(s1.id, "DUELIST"), p1, guildId);
-    await dispatchButton(clear.interaction, ctx);
-    expect(lastPanel(clear).content).toContain("Pick cleared");
-    expect(await ctx.repositories.schedules.listPicksBySlot(s1.id)).toHaveLength(0);
-    expect(await ctx.repositories.schedules.listPicksBySlot(s2.id)).toHaveLength(1);
+      const early = await pickVia(poll.id, "reyna", p1, "SECOND");
+      expect(lastPanel(early).content).toContain("Pick your **main** agent first");
+      expect(await picksOf(poll.id)).toEqual([]);
 
-    // clearing again is harmless
-    const twice = click(agentClearId(s1.id, "DUELIST"), p1, guildId);
-    await dispatchButton(twice.interaction, ctx);
-    expect(lastPanel(twice).content).toContain("hadn't picked");
-    await finish();
+      await pickVia(poll.id, "jett", p1);
+      const same = await pickVia(poll.id, "jett", p1, "SECOND");
+      expect(lastPanel(same).content).toContain("already your main");
+
+      const first = await pickVia(poll.id, "reyna", p1, "SECOND");
+      expect(lastPanel(first).content).toContain("**Reyna** is your second agent");
+      expect(await picksOf(poll.id)).toEqual([[p1.id, "MAIN", "jett"], [p1.id, "SECOND", "reyna"]]);
+      expect(visibleText(lastPanel(first))).toContain("YOUR SECOND");
+
+      await pickVia(poll.id, "raze", p1, "SECOND"); // replaces Reyna
+      expect((await picksOf(poll.id)).filter((p) => p[1] === "SECOND").map((p) => p[2])).toEqual(["raze"]);
+      expect(lastPanel(await pickVia(poll.id, "raze", p1, "SECOND")).content).toContain("already your second");
+      await finish();
+    });
+
+    it("is a backup, so it may be an agent someone else plays as their main — and then two players may share a second", async () => {
+      const { poll, slots } = await freshPoll();
+      await voteVia(poll.id, slots[0]!.id, p1);
+      await voteVia(poll.id, slots[0]!.id, p2);
+      await voteVia(poll.id, slots[0]!.id, p3);
+      await pickVia(poll.id, "jett", p1);
+      await pickVia(poll.id, "omen", p2);
+      await pickVia(poll.id, "sova", p3);
+      await pickVia(poll.id, "jett", p2, "SECOND"); // p1's main
+      await pickVia(poll.id, "jett", p3, "SECOND"); // and the same backup as p2
+      expect((await picksOf(poll.id)).filter((p) => p[1] === "SECOND").map((p) => [p[0], p[2]])).toEqual([[p2.id, "jett"], [p3.id, "jett"]]);
+      // ...but it can never become a *main* while p1 holds it
+      expect((await picksOf(poll.id)).filter((p) => p[1] === "MAIN" && p[2] === "jett")).toHaveLength(1);
+      await finish();
+    });
+
+    it("the 'Pick a second agent' button switches the panel to the second, and 'Back to my main' switches back", async () => {
+      const { poll, slots } = await freshPoll();
+      await voteVia(poll.id, slots[0]!.id, p1);
+      await pickVia(poll.id, "jett", p1);
+      const toSecond = click(agentTargetId(poll.id, "DUELIST", "SECOND"), p1, guildId);
+      await dispatchButton(toSecond.interaction, ctx);
+      expect(visibleText(lastPanel(toSecond))).toContain("choosing your SECOND");
+      expect(cell(lastPanel(toSecond), "Jett")!.value).toContain("⭐ your main");
+      // role tabs keep choosing the second
+      const tab = click(agentRoleId(poll.id, "SENTINEL", "SECOND"), p1, guildId);
+      await dispatchButton(tab.interaction, ctx);
+      expect(visibleText(lastPanel(tab))).toContain("choosing your SECOND");
+      const back = click(agentTargetId(poll.id, "SENTINEL", "MAIN"), p1, guildId);
+      await dispatchButton(back.interaction, ctx);
+      expect(visibleText(lastPanel(back))).toContain("choosing your MAIN");
+      await finish();
+    });
+
+    it("choosing your own second as your main swaps them", async () => {
+      const { poll, slots } = await freshPoll();
+      await voteVia(poll.id, slots[0]!.id, p1);
+      await pickVia(poll.id, "jett", p1);
+      await pickVia(poll.id, "reyna", p1, "SECOND");
+      const swap = await pickVia(poll.id, "reyna", p1);
+      expect(lastPanel(swap).content).toContain("**Reyna** is your main");
+      expect(lastPanel(swap).content).toContain("**Jett** moved to your second");
+      expect(await picksOf(poll.id)).toEqual([[p1.id, "MAIN", "reyna"], [p1.id, "SECOND", "jett"]]);
+      // changing the main to something else keeps the backup
+      await pickVia(poll.id, "raze", p1);
+      expect(await picksOf(poll.id)).toEqual([[p1.id, "MAIN", "raze"], [p1.id, "SECOND", "jett"]]);
+      await finish();
+    });
+
+    it("the public card and the lineup show both, and Clear second / Clear my picks remove them", async () => {
+      const { poll, slots } = await freshPoll();
+      await voteVia(poll.id, slots[0]!.id, p1);
+      await pickVia(poll.id, "jett", p1);
+      edits.length = 0;
+      await pickVia(poll.id, "reyna", p1, "SECOND");
+      expect(visibleText(cardEdits(poll.id).at(-1)!.payload)).toContain(`<@${p1.id}> · **Jett** / Reyna`);
+
+      const clearSecond = click(agentClearId(poll.id, "DUELIST", "SECOND"), p1, guildId);
+      await dispatchButton(clearSecond.interaction, ctx);
+      expect(lastPanel(clearSecond).content).toContain("Second agent cleared");
+      expect(visibleText(lastPanel(clearSecond))).toContain("choosing your SECOND");
+      expect(await picksOf(poll.id)).toEqual([[p1.id, "MAIN", "jett"]]);
+
+      await pickVia(poll.id, "reyna", p1, "SECOND");
+      const clearAll = click(agentClearId(poll.id, "DUELIST", "ALL"), p1, guildId);
+      await dispatchButton(clearAll.interaction, ctx);
+      expect(lastPanel(clearAll).content).toContain("Picks cleared");
+      expect(visibleText(lastPanel(clearAll))).toContain("choosing your MAIN"); // a second can't outlive its main
+      expect(await picksOf(poll.id)).toEqual([]);
+
+      const twice = click(agentClearId(poll.id, "DUELIST", "ALL"), p1, guildId);
+      await dispatchButton(twice.interaction, ctx);
+      expect(lastPanel(twice).content).toContain("hadn't picked");
+      await finish();
+    });
   });
 
-  it("'Switch slot' cycles through my upcoming slots (only offered with more than one)", async () => {
-    const { poll, slots } = await freshPoll();
-    const [s1, s2] = slots as [(typeof slots)[number], (typeof slots)[number]];
-    const one = await voteVia(poll.id, s1.id, p3);
-    expect(JSON.stringify(lastPanel({ ...one, update: one.update } as never).components!.map((r) => r.toJSON()))).not.toContain("Switch slot");
-    const two = await voteVia(poll.id, s2.id, p3);
-    expect(JSON.stringify(two.followUp.mock.calls[0]![0].components!.map((r) => r.toJSON()))).toContain("Switch slot");
+  describe("one squad for the whole schedule", () => {
+    it("one pick covers every slot: it shows on each slot the player is in, and survives dropping one of them", async () => {
+      const { poll, slots } = await freshPoll();
+      const [s1, s2] = slots as [(typeof slots)[number], (typeof slots)[number]];
+      await voteVia(poll.id, s1.id, p1);
+      await voteVia(poll.id, s2.id, p1);
+      await pickVia(poll.id, "jett", p1);
+      await pickVia(poll.id, "reyna", p1, "SECOND");
+      expect(await picksOf(poll.id)).toHaveLength(2); // two rows for the player — not one per slot
 
-    const sw = click(agentSwitchId(s2.id, "SENTINEL"), p3, guildId);
-    await dispatchButton(sw.interaction, ctx);
-    expect(visibleText(lastPanel(sw))).toContain("SAT 28/06"); // back to the first slot
-    const sw2 = click(agentSwitchId(s1.id, "SENTINEL"), p3, guildId);
-    await dispatchButton(sw2.interaction, ctx);
-    expect(visibleText(lastPanel(sw2))).toContain("SUN 29/06");
-    await finish();
+      const view = (await ctx.services.schedules.getView(poll.id))!;
+      expect(view.picks.map((p) => p.agentKey).sort()).toEqual(["jett", "reyna"]);
+      const card = visibleText(cardEdits(poll.id).at(-1)!.payload);
+      expect(card.match(/<@[^>]+> · \*\*Jett\*\* \/ Reyna/g)).toHaveLength(2); // once under each slot
+
+      await voteVia(poll.id, s1.id, p1); // toggles the first slot off — they are still in the second
+      expect(await picksOf(poll.id)).toHaveLength(2);
+      await finish();
+    });
+
+    it("picks go when the player's LAST vote does, and when they say they can't play any day", async () => {
+      const { poll, slots } = await freshPoll();
+      const [s1, s2] = slots as [(typeof slots)[number], (typeof slots)[number]];
+      await voteVia(poll.id, s1.id, p1);
+      await voteVia(poll.id, s2.id, p1);
+      await pickVia(poll.id, "jett", p1);
+      await pickVia(poll.id, "reyna", p1, "SECOND");
+      await voteVia(poll.id, s1.id, p1);
+      expect(await picksOf(poll.id)).toHaveLength(2);
+      await voteVia(poll.id, s2.id, p1); // the last one
+      expect(await picksOf(poll.id)).toEqual([]);
+
+      await voteVia(poll.id, s1.id, p1);
+      await pickVia(poll.id, "jett", p1);
+      await dispatchButton(click(buildDeclineCustomId(poll.id), p1, guildId).interaction, ctx);
+      expect(await picksOf(poll.id)).toEqual([]);
+      // and now the panel is refused: they're out
+      const refused = await pickVia(poll.id, "raze", p1);
+      expect(refused.reply.mock.calls[0]![0].content).toContain("Vote for a slot first");
+      await finish();
+    });
+
+    it("the AGENT SELECT lineup is one squad card with the second under the main", async () => {
+      const { poll, slots } = await freshPoll();
+      await voteVia(poll.id, slots[0]!.id, p1);
+      await voteVia(poll.id, slots[1]!.id, p1);
+      await voteVia(poll.id, slots[1]!.id, p2);
+      await pickVia(poll.id, "jett", p1);
+      await pickVia(poll.id, "reyna", p1, "SECOND");
+      const lineup = edits.filter((e) => e.messageId.startsWith("posted-")).at(-1)!.payload;
+      expect(lineup.embeds).toHaveLength(1);
+      const embed = lineup.embeds![0]!.toJSON();
+      expect(embed.title).toContain("THE SQUAD");
+      expect(embed.description).toContain("1/2"); // p1 locked in, p2 still choosing
+      expect(embed.fields!.find((f) => f.name.includes("JETT"))!.value).toContain("2nd:");
+      expect(embed.fields!.find((f) => f.name.includes("STILL CHOOSING"))!.value).toBe(`<@${p2.id}>`);
+      await finish();
+    });
   });
 
-  it("the card's 🎯 PICK AGENT button opens the panel for my first slot; refuses someone with no vote", async () => {
+  it("the card's 🎯 PICK AGENT button opens the panel; refuses someone with no vote", async () => {
     const { poll, slots } = await freshPoll();
     const none = click(buildAgentsCustomId(poll.id), p1, guildId);
     await dispatchButton(none.interaction, ctx);
@@ -262,54 +385,40 @@ describeIfDb("Agent pick panel (integration)", () => {
     const open = click(buildAgentsCustomId(poll.id), p1, guildId);
     await dispatchButton(open.interaction, ctx);
     expect(open.update).not.toHaveBeenCalled(); // the public card is left alone
-    expect(visibleText(open.followUp.mock.calls[0]![0])).toContain("SUN 29/06");
-    await finish();
-  });
-
-  it("taking back a vote (or declining) gives the agent back", async () => {
-    const { poll, slots } = await freshPoll();
-    const [s1, s2] = slots as [(typeof slots)[number], (typeof slots)[number]];
-    await voteVia(poll.id, s1.id, p1);
-    await voteVia(poll.id, s2.id, p1);
-    await dispatchButton(click(agentPickId(s1.id, "jett"), p1, guildId).interaction, ctx);
-    await dispatchButton(click(agentPickId(s2.id, "raze"), p1, guildId).interaction, ctx);
-
-    await voteVia(poll.id, s1.id, p1); // toggles the vote off
-    expect(await ctx.repositories.schedules.listPicksBySlot(s1.id)).toHaveLength(0);
-    expect(await ctx.repositories.schedules.listPicksBySlot(s2.id)).toHaveLength(1);
-
-    await dispatchButton(click(buildDeclineCustomId(poll.id), p1, guildId).interaction, ctx);
-    expect(await ctx.repositories.schedules.listPicksBySlot(s2.id)).toHaveLength(0);
-    // and now the panel is refused: they're out
-    const refused = click(agentPickId(s2.id, "raze"), p1, guildId);
-    await dispatchButton(refused.interaction, ctx);
-    expect(refused.reply.mock.calls[0]![0].content).toContain("Vote for this slot first");
+    expect(visibleText(open.followUp.mock.calls[0]![0])).toContain("ONE SQUAD FOR EVERY SLOT");
     await finish();
   });
 
   it("only voters who are Premier players can open or use the panel", async () => {
     const { poll, slots } = await freshPoll();
-    const slotId = slots[0]!.id;
-    await voteVia(poll.id, slotId, p1);
+    await voteVia(poll.id, slots[0]!.id, p1);
 
-    for (const [who, msg] of [[member, "Premier players only"], [outsider, "Only Premier players"], [p2, "Vote for this slot first"]] as const) {
-      const c = click(agentPickId(slotId, "jett"), who, guildId);
-      await dispatchButton(c.interaction, ctx);
+    for (const [who, msg] of [[member, "Premier players only"], [outsider, "Only Premier players"], [p2, "Vote for a slot first"]] as const) {
+      const c = await pickVia(poll.id, "jett", who);
       expect(c.reply.mock.calls[0]![0].content, who.name).toContain(msg);
     }
-    expect(await ctx.repositories.schedules.listPicksBySlot(slotId)).toHaveLength(0);
-    // an agent that doesn't exist, and a slot that doesn't exist
-    const ghost = click(agentPickId(slotId, "notanagent"), p1, guildId);
-    await dispatchButton(ghost.interaction, ctx);
+    expect(await picksOf(poll.id)).toEqual([]);
+    // an agent that doesn't exist, and a schedule that doesn't exist
+    const ghost = await pickVia(poll.id, "notanagent", p1);
     expect(ghost.reply.mock.calls[0]![0].content).toContain("isn't in the list");
-    const gone = click(agentPickId(999999999, "jett"), p1, guildId);
-    await dispatchButton(gone.interaction, ctx);
+    const gone = await pickVia(999999999, "jett", p1);
     expect(gone.reply.mock.calls[0]![0].content).toContain("no longer exists");
     await finish();
   });
 
+  it("a button from a panel posted before the squad was per schedule is refused with a pointer, and touches nothing", async () => {
+    const { poll, slots } = await freshPoll();
+    await voteVia(poll.id, slots[0]!.id, p1);
+    // `agent:<slotId>:p:jett` — the slot's id happens to equal some poll's id in a fresh database; it must never be read as one.
+    const legacy = click(`agent:${slots[0]!.id}:p:jett`, p1, guildId);
+    await dispatchButton(legacy.interaction, ctx);
+    expect(legacy.reply.mock.calls[0]![0].content).toContain("PICK AGENT");
+    expect(await picksOf(poll.id)).toEqual([]);
+    await finish();
+  });
+
   describe("adding an agent that isn't listed", () => {
-    const submit = async (slotId: number, role: "DUELIST" | "INITIATOR" | "CONTROLLER" | "SENTINEL", who: { id: string; name: string }, name: string, token = "tok") => {
+    const submit = async (pollId: number, role: "DUELIST" | "INITIATOR" | "CONTROLLER" | "SENTINEL", who: { id: string; name: string }, name: string, target: "MAIN" | "SECOND" = "MAIN", token = "tok") => {
       const code = { DUELIST: "D", INITIATOR: "I", CONTROLLER: "C", SENTINEL: "S" }[role];
       const raw = {
         id: "i-modal",
@@ -317,7 +426,7 @@ describeIfDb("Agent pick panel (integration)", () => {
         guild_id: guildId,
         user: { id: who.id, username: who.name, global_name: who.name },
         member: { user: { id: who.id, username: who.name, global_name: who.name }, nick: null, roles: [] },
-        data: { custom_id: `agentadd:${slotId}:${code}`, components: [{ type: ComponentType.Label, component: { type: ComponentType.TextInput, custom_id: "agent_name", value: name } }] },
+        data: { custom_id: `squadadd:${pollId}:${code}${target === "MAIN" ? 1 : 2}`, components: [{ type: ComponentType.Label, component: { type: ComponentType.TextInput, custom_id: "agent_name", value: name } }] },
       } as unknown as APIModalSubmitInteraction;
       interactionEdits.length = 0;
       followups.length = 0;
@@ -327,11 +436,10 @@ describeIfDb("Agent pick panel (integration)", () => {
 
     it("adds it to the role, says who suggested it, shows it to everyone, and lets people pick it", async () => {
       const { poll, slots } = await freshPoll();
-      const slotId = slots[0]!.id;
-      await voteVia(poll.id, slotId, p1);
-      await voteVia(poll.id, slotId, p2);
+      await voteVia(poll.id, slots[0]!.id, p1);
+      await voteVia(poll.id, slots[0]!.id, p2);
 
-      const r = await submit(slotId, "DUELIST", p1, "Zephyr");
+      const r = await submit(poll.id, "DUELIST", p1, "Zephyr");
       expect(r.edit!.content).toContain("**Zephyr** added to Duelists");
       expect(r.edit!.content).toContain(`suggested by <@${p1.id}>`);
       const card = cell(r.edit!, "Zephyr")!;
@@ -341,26 +449,33 @@ describeIfDb("Agent pick panel (integration)", () => {
       expect(stored).toMatchObject({ displayName: "Zephyr", role: "DUELIST", suggestedByUserId: p1.id });
 
       // another player sees it on the Duelists tab, credited to p1
-      const tab = click(agentRoleId(slotId, "DUELIST"), p2, guildId);
+      const tab = click(agentRoleId(poll.id, "DUELIST", "MAIN"), p2, guildId);
       await dispatchButton(tab.interaction, ctx);
       expect(cell(lastPanel(tab), "Zephyr")!.value).toContain(`➕ by <@${p1.id}>`);
 
       // ...and can pick it; the public card then shows the name
       edits.length = 0;
-      const pickIt = click(agentPickId(slotId, "zephyr"), p2, guildId);
-      await dispatchButton(pickIt.interaction, ctx);
-      expect(lastPanel(pickIt).content).toContain("You're playing **Zephyr**");
+      const pickIt = await pickVia(poll.id, "zephyr", p2);
+      expect(lastPanel(pickIt).content).toContain("**Zephyr** is your main");
       expect(visibleText(cardEdits(poll.id).at(-1)!.payload)).toContain(`<@${p2.id}> · **Zephyr**`);
+      await finish();
+    });
+
+    it("the popup returns to the same pick it was opened from (a second stays a second)", async () => {
+      const { poll, slots } = await freshPoll();
+      await voteVia(poll.id, slots[0]!.id, p1);
+      await pickVia(poll.id, "jett", p1);
+      const r = await submit(poll.id, "SENTINEL", p1, "Bastion", "SECOND");
+      expect(visibleText(r.edit!)).toContain("choosing your SECOND");
       await finish();
     });
 
     it("a second submit of the same name doesn't add a duplicate; it says who added it", async () => {
       const { poll, slots } = await freshPoll();
-      const slotId = slots[0]!.id;
-      await voteVia(poll.id, slotId, p1);
-      await voteVia(poll.id, slotId, p2);
-      await submit(slotId, "SENTINEL", p1, "Bastion");
-      const dup = await submit(slotId, "SENTINEL", p2, " bastion ");
+      await voteVia(poll.id, slots[0]!.id, p1);
+      await voteVia(poll.id, slots[0]!.id, p2);
+      await submit(poll.id, "SENTINEL", p1, "Bastion");
+      const dup = await submit(poll.id, "SENTINEL", p2, " bastion ");
       expect(dup.edit!.content).toContain(`already added by <@${p1.id}>`);
       expect((await ctx.repositories.schedules.listCustomAgents(guildId)).filter((c) => c.key === "bastion")).toHaveLength(1);
       await finish();
@@ -368,9 +483,8 @@ describeIfDb("Agent pick panel (integration)", () => {
 
     it("a built-in agent can't be 'added' again, however it's spelled — and it jumps to the right tab", async () => {
       const { poll, slots } = await freshPoll();
-      const slotId = slots[0]!.id;
-      await voteVia(poll.id, slotId, p1);
-      const r = await submit(slotId, "DUELIST", p1, "kay-o");
+      await voteVia(poll.id, slots[0]!.id, p1);
+      const r = await submit(poll.id, "DUELIST", p1, "kay-o");
       expect(r.edit!.content).toContain("**KAY/O** is already in the list under Initiators");
       expect(cell(r.edit!, "KAY/O")).toBeTruthy(); // now on the Initiators tab
       await finish();
@@ -380,7 +494,7 @@ describeIfDb("Agent pick panel (integration)", () => {
       const { poll, slots } = await freshPoll();
       await voteVia(poll.id, slots[0]!.id, p1);
       const before = (await ctx.repositories.schedules.listCustomAgents(guildId)).length;
-      const r = await submit(slots[0]!.id, "DUELIST", p1, name);
+      const r = await submit(poll.id, "DUELIST", p1, name);
       expect(r.edit!.content).toMatch(/Agent names are 2–20 characters|isn't usable/);
       expect((await ctx.repositories.schedules.listCustomAgents(guildId)).length).toBe(before);
       await finish();
@@ -388,23 +502,21 @@ describeIfDb("Agent pick panel (integration)", () => {
 
     it("limits how many agents one player can add", async () => {
       const { poll, slots } = await freshPoll();
-      const slotId = slots[0]!.id;
-      await voteVia(poll.id, slotId, p3);
+      await voteVia(poll.id, slots[0]!.id, p3);
       const mine = (await ctx.repositories.schedules.listCustomAgents(guildId)).filter((c) => c.suggestedByUserId === p3.id).length;
-      for (let i = mine; i < MAX_SUGGESTIONS_PER_PLAYER; i++) await submit(slotId, "CONTROLLER", p3, `Capagent${i}x`);
-      const over = await submit(slotId, "CONTROLLER", p3, "Onetoomany");
+      for (let i = mine; i < MAX_SUGGESTIONS_PER_PLAYER; i++) await submit(poll.id, "CONTROLLER", p3, `Capagent${i}x`);
+      const over = await submit(poll.id, "CONTROLLER", p3, "Onetoomany");
       expect(over.edit!.content).toContain(`already added ${MAX_SUGGESTIONS_PER_PLAYER} agents`);
       await finish();
     });
 
     it("members, non-voters and unregistered users get a private refusal and nothing is stored", async () => {
       const { poll, slots } = await freshPoll();
-      const slotId = slots[0]!.id;
-      await voteVia(poll.id, slotId, p1);
+      await voteVia(poll.id, slots[0]!.id, p1);
       const before = (await ctx.repositories.schedules.listCustomAgents(guildId)).length;
       for (const who of [member, outsider, p2]) {
-        const r = await submit(slotId, "DUELIST", who, "Sneaky");
-        expect(r.followup!.content, who.name).toMatch(/Premier players|Vote for this slot first/);
+        const r = await submit(poll.id, "DUELIST", who, "Sneaky");
+        expect(r.followup!.content, who.name).toMatch(/Premier players|Vote for a slot first/);
         expect(r.edit).toBeUndefined();
       }
       expect((await ctx.repositories.schedules.listCustomAgents(guildId)).length).toBe(before);

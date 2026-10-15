@@ -97,7 +97,7 @@ describeIfDb("Mari's LOCKED IN card waits for the agent pick (integration)", () 
   }
   const finish = () => ctx.services.schedules.cancel(guildId);
   const vote = (pollId: number, slotId: number, u = p1) => click(buildVoteCustomId(pollId, slotId), u, guildId);
-  const pickAgent = (slotId: number, key: string, u = p1) => click(agentPickId(slotId, key), u, guildId);
+  const pickAgent = (pollId: number, key: string, u = p1) => click(agentPickId(pollId, key, "MAIN"), u, guildId);
   const fieldsOf = (card?: { embeds: Array<{ toJSON(): any }> }) => Object.fromEntries((card?.embeds[0]?.toJSON().fields ?? []).map((f: { name: string; value: string }) => [f.name, f.value]));
 
   it("a vote alone does not trigger the card — nothing is said, and the model isn't called", async () => {
@@ -113,18 +113,18 @@ describeIfDb("Mari's LOCKED IN card waits for the agent pick (integration)", () 
   it("the first agent pick sends it: the AI is told the picked agent, and the card shows that agent (not the profile's preferred one) with its portrait", async () => {
     const { poll, slots } = await freshPoll();
     await dispatchButton(vote(poll.id, slots[0]!.id).interaction, ctx);
-    await dispatchButton(pickAgent(slots[0]!.id, "jett").interaction, ctx);
+    await dispatchButton(pickAgent(poll.id, "jett").interaction, ctx);
 
     expect(mentions).toHaveLength(1);
     expect(mentions[0]!.channelId).toBe(channelId); // no reaction channel configured: the schedule's own
     expect(mentions[0]!.userId).toBe(p1.id);
     expect(aiCalls).toHaveLength(1);
     expect(aiCalls[0]!.mode).toBe("CELEBRATE");
-    expect(aiCalls[0]!.lines.join("\n")).toContain("Agent they locked in for that slot: Jett (Duelist)");
+    expect(aiCalls[0]!.lines.join("\n")).toContain("Main agent they locked in (for every slot they are in this week): Jett (Duelist)");
 
     const card = mentions[0]!.card!.embeds[0]!.toJSON();
     expect(card.title).toContain("LOCKED IN");
-    expect(fieldsOf(mentions[0]!.card).Agent).toContain("**Jett**");
+    expect(fieldsOf(mentions[0]!.card)["Main agent"]).toContain("**Jett**");
     expect(JSON.stringify(card)).not.toContain("Raze");
     expect(fieldsOf(mentions[0]!.card).Role).toContain("Duelist");
     expect(fieldsOf(mentions[0]!.card).Slot).toBeTruthy();
@@ -132,13 +132,13 @@ describeIfDb("Mari's LOCKED IN card waits for the agent pick (integration)", () 
     await finish();
   });
 
-  it("changing the pick afterwards, or picking in another slot, stays silent (once per player per poll)", async () => {
+  it("changing the pick afterwards, or voting for another slot, stays silent (once per player per poll)", async () => {
     const { poll, slots } = await freshPoll();
     await dispatchButton(vote(poll.id, slots[0]!.id).interaction, ctx);
-    await dispatchButton(pickAgent(slots[0]!.id, "jett").interaction, ctx);
-    await dispatchButton(pickAgent(slots[0]!.id, "raze").interaction, ctx);
+    await dispatchButton(pickAgent(poll.id, "jett").interaction, ctx);
+    await dispatchButton(pickAgent(poll.id, "raze").interaction, ctx);
     await dispatchButton(vote(poll.id, slots[1]!.id).interaction, ctx);
-    await dispatchButton(pickAgent(slots[1]!.id, "neon").interaction, ctx);
+    await dispatchButton(pickAgent(poll.id, "neon").interaction, ctx);
     expect(mentions).toHaveLength(1);
     expect(aiCalls).toHaveLength(1);
     await finish();
@@ -148,10 +148,10 @@ describeIfDb("Mari's LOCKED IN card waits for the agent pick (integration)", () 
     const { poll, slots } = await freshPoll();
     for (const [u, key] of [[p1, "jett"], [p2, "omen"]] as const) {
       await dispatchButton(vote(poll.id, slots[0]!.id, u).interaction, ctx);
-      await dispatchButton(pickAgent(slots[0]!.id, key, u).interaction, ctx);
+      await dispatchButton(pickAgent(poll.id, key, u).interaction, ctx);
     }
     expect(mentions.map((m) => m.userId)).toEqual([p1.id, p2.id]);
-    expect(fieldsOf(mentions[1]!.card).Agent).toContain("**Omen**");
+    expect(fieldsOf(mentions[1]!.card)["Main agent"]).toContain("**Omen**");
     await finish();
   });
 
@@ -159,14 +159,14 @@ describeIfDb("Mari's LOCKED IN card waits for the agent pick (integration)", () 
     await ctx.repositories.serverConfig.upsert(guildId, { reactionChannelId: reactionChannel });
     let { poll, slots } = await freshPoll();
     await dispatchButton(vote(poll.id, slots[0]!.id).interaction, ctx);
-    await dispatchButton(pickAgent(slots[0]!.id, "jett").interaction, ctx);
+    await dispatchButton(pickAgent(poll.id, "jett").interaction, ctx);
     expect(mentions.map((m) => m.channelId)).toEqual([reactionChannel]);
     await finish();
 
     await ctx.repositories.serverConfig.upsert(guildId, { reactionChannelId: null });
     ({ poll, slots } = await freshPoll());
     await dispatchButton(vote(poll.id, slots[0]!.id).interaction, ctx);
-    await dispatchButton(pickAgent(slots[0]!.id, "jett").interaction, ctx);
+    await dispatchButton(pickAgent(poll.id, "jett").interaction, ctx);
     expect(mentions.map((m) => m.channelId)).toEqual([channelId]);
     await finish();
   });
@@ -186,7 +186,7 @@ describeIfDb("Mari's LOCKED IN card waits for the agent pick (integration)", () 
     let { poll, slots } = await freshPoll();
     aiSource = "fallback";
     await dispatchButton(vote(poll.id, slots[0]!.id).interaction, ctx);
-    await dispatchButton(pickAgent(slots[0]!.id, "jett").interaction, ctx);
+    await dispatchButton(pickAgent(poll.id, "jett").interaction, ctx);
     expect(mentions).toHaveLength(0);
     aiSource = "ai";
     await finish();
@@ -194,7 +194,7 @@ describeIfDb("Mari's LOCKED IN card waits for the agent pick (integration)", () 
     ({ poll, slots } = await freshPoll());
     failMention = true;
     await dispatchButton(vote(poll.id, slots[0]!.id).interaction, ctx);
-    const pick = pickAgent(slots[0]!.id, "jett");
+    const pick = pickAgent(poll.id, "jett");
     await dispatchButton(pick.interaction, ctx);
     failMention = false;
     expect(pick.update).toHaveBeenCalledTimes(1); // the panel updated normally

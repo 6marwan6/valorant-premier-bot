@@ -126,7 +126,7 @@ export async function handleDiscordInteraction(params: {
     if (isAgentCustomId(interaction.data.custom_id)) {
       const parsed = parseAgentCustomId(interaction.data.custom_id);
       if (parsed?.kind === "add") {
-        params.sendInitialResponse(200, buildAddAgentModal(parsed.slotId, parsed.role));
+        params.sendInitialResponse(200, buildAddAgentModal(parsed.pollId, parsed.role, parsed.target));
         return;
       }
     }

@@ -38,12 +38,12 @@ const user = { id: "user-1", username: "ahmed", global_name: "Ahmed" };
 describe("handleDiscordInteraction — agent-pick popup", () => {
   it("'➕ Add an agent' answers with the popup immediately, before any ctx/database work (Discord's 3s rule)", async () => {
     const responses = await run(
-      { type: InteractionType.MessageComponent, id: "i-1", token: "t", guild_id: "g", user, data: { component_type: ComponentType.Button, custom_id: "agent:7:a:C" } },
+      { type: InteractionType.MessageComponent, id: "i-1", token: "t", guild_id: "g", user, data: { component_type: ComponentType.Button, custom_id: "squad:7:a:C1" } },
       neverCtx,
     );
     expect(responses).toHaveLength(1);
     expect(responses[0]!.body.type).toBe(InteractionResponseType.Modal);
-    expect(responses[0]!.body.data.custom_id).toBe("agentadd:7:C");
+    expect(responses[0]!.body.data.custom_id).toBe("squadadd:7:C1");
     expect(responses[0]!.body.data.title).toBe("Add a Controller");
     const field = responses[0]!.body.data.components[0].component;
     expect(field.custom_id).toBe("agent_name");
@@ -52,9 +52,24 @@ describe("handleDiscordInteraction — agent-pick popup", () => {
     expect(field.required).toBe(true);
   });
 
+  it("the popup remembers whether the player was choosing their main or second", async () => {
+    const [main, second] = await Promise.all(
+      ["1", "2"].map((t) => run({ type: InteractionType.MessageComponent, id: "i", token: "t", guild_id: "g", user, data: { component_type: ComponentType.Button, custom_id: `squad:7:a:S${t}` } }, neverCtx)),
+    );
+    expect(main![0]!.body.data.custom_id).toBe("squadadd:7:S1");
+    expect(second![0]!.body.data.custom_id).toBe("squadadd:7:S2");
+  });
+
+  it("a button from a panel posted before the squad was per schedule never opens a popup (its id is a slot, not a poll)", async () => {
+    const responses = await run({ type: InteractionType.MessageComponent, id: "i", token: "t", guild_id: "g", user, data: { component_type: ComponentType.Button, custom_id: "agent:7:a:C" } }, () => {
+      throw new Error("ctx needed");
+    }).catch(() => []);
+    expect(responses.every((r) => r.body?.type !== InteractionResponseType.Modal)).toBe(true);
+  });
+
   it("each role names its popup after that role", async () => {
     for (const [code, title] of [["D", "Duelist"], ["I", "Initiator"], ["S", "Sentinel"]] as const) {
-      const r = await run({ type: InteractionType.MessageComponent, id: "i", token: "t", user, data: { component_type: ComponentType.Button, custom_id: `agent:7:a:${code}` } }, neverCtx);
+      const r = await run({ type: InteractionType.MessageComponent, id: "i", token: "t", user, data: { component_type: ComponentType.Button, custom_id: `squad:7:a:${code}2` } }, neverCtx);
       expect(r[0]!.body.data.title).toBe(`Add a ${title}`);
     }
   });
@@ -62,7 +77,7 @@ describe("handleDiscordInteraction — agent-pick popup", () => {
   it("other panel buttons are deferred as an update of the (ephemeral) panel, then dispatched", async () => {
     // A malformed id still goes through the normal button path: acked as a deferred update, never a modal.
     const responses: Array<any> = [];
-    const rawBody = JSON.stringify({ type: InteractionType.MessageComponent, id: "i", token: "t", guild_id: "g", user, data: { component_type: ComponentType.Button, custom_id: "agent:7:r:D" } });
+    const rawBody = JSON.stringify({ type: InteractionType.MessageComponent, id: "i", token: "t", guild_id: "g", user, data: { component_type: ComponentType.Button, custom_id: "squad:7:r:D1" } });
     const ts = String(Math.floor(Date.now() / 1000));
     await handleDiscordInteraction({
       rawBody,
