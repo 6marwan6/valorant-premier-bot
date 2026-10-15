@@ -148,6 +148,13 @@
       "when": 1791106556772,
       "tag": "0020_add_reaction_channel",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791110156772,
+      "tag": "0021_add_schedule_vote_nudges",
+      "breakpoints": true
     }
   ]
 }

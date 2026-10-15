@@ -3,6 +3,7 @@ import { planReminders } from "../../modules/reminders/reminderScheduling.js";
 import { buildReminderNudgeMessage } from "../../modules/reminders/reminderMessages.js";
 import { buildRosterMessage } from "../../modules/attendance/rosterMessage.js";
 import { runScheduleReminders } from "./scheduleReminderJob.js";
+import { runScheduleVoteNudges, type VoteNudgeSummary } from "./scheduleVoteNudgeJob.js";
 
 export interface ReminderCronSummary {
   guildsProcessed: number;
@@ -14,6 +15,10 @@ export interface ReminderCronSummary {
   slotRemindersSent: number;
   slotRemindersSkipped: number;
   slotRemindersFailed: number;
+  /** Mari's "you haven't voted" DMs (scheduleVoteNudgeJob.ts). */
+  voteNudgesSent: number;
+  voteNudgesUnreachable: number;
+  voteNudgesFailed: number;
 }
 
 /**
@@ -173,6 +178,14 @@ export async function runReminderCronJob(ctx: AppContext, now: Date = new Date()
     ctx.logger.error({ event: "schedule.cronFailed", err: err instanceof Error ? err.message : String(err) }, "Weekly schedule reminder pass failed");
   }
 
+  // Mari's day-old "you haven't voted" DMs: own try/catch, so a failure here can't cost the reminders above.
+  let nudgeSummary: VoteNudgeSummary = { voteNudgesSent: 0, voteNudgesUnreachable: 0, voteNudgesFailed: 0 };
+  try {
+    nudgeSummary = await runScheduleVoteNudges(ctx, configs, now);
+  } catch (err) {
+    ctx.logger.error({ event: "schedule.voteNudgeCronFailed", err: err instanceof Error ? err.message : String(err) }, "Vote nudge pass failed");
+  }
+
   return {
     guildsProcessed: configs.length,
     matchesReconciled,
@@ -180,5 +193,6 @@ export async function runReminderCronJob(ctx: AppContext, now: Date = new Date()
     remindersSent,
     remindersFailed,
     ...slotSummary,
+    ...nudgeSummary,
   };
 }

@@ -127,6 +127,29 @@ export const scheduleAiReactions = pgTable(
 );
 
 /**
+ * Mari's "you haven't voted" DM (2026-10-14, owner's request): at most one per
+ * (poll, player), whatever happens — the unique index is the claim (plan section
+ * 50), taken *before* the DM goes out so a second cron tick can never send a
+ * second one. `sentAt` is null on a row whose DM did not go out because the
+ * player's DMs are closed to the bot: the row stays, so the bot never retries a
+ * player who can't be reached (a transient failure instead deletes its row, so
+ * the next tick tries again).
+ */
+export const scheduleVoteNudges = pgTable(
+  "schedule_vote_nudges",
+  {
+    id: serial("id").primaryKey(),
+    pollId: integer("poll_id")
+      .notNull()
+      .references(() => schedulePolls.id, { onDelete: "cascade" }),
+    discordUserId: text("discord_user_id").notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("schedule_vote_nudges_poll_user_idx").on(table.pollId, table.discordUserId)],
+);
+
+/**
  * Agent picks (2026-10-04, owner's request): which agent each voter plays in a
  * slot's match. Valorant doesn't allow duplicate agents on a team, so an agent
  * can be held by one player per slot, and a player holds one agent per slot —

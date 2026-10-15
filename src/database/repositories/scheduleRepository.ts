@@ -6,6 +6,7 @@ import {
   scheduleAiReactions,
   scheduleDeclines,
   schedulePolls,
+  scheduleVoteNudges,
   scheduleSlots,
   scheduleVotes,
   slotReminders,
@@ -211,6 +212,24 @@ export class ScheduleRepository {
       .onConflictDoNothing()
       .returning({ id: scheduleAiReactions.id });
     return rows.length > 0;
+  }
+
+  /** Claims the one "you haven't voted" DM for (poll, player). True only for the single caller that won it (plan section 50). */
+  async claimVoteNudge(pollId: number, discordUserId: string): Promise<boolean> {
+    const rows = await this.db.insert(scheduleVoteNudges).values({ pollId, discordUserId }).onConflictDoNothing().returning({ id: scheduleVoteNudges.id });
+    return rows.length > 0;
+  }
+
+  async markVoteNudgeSent(pollId: number, discordUserId: string): Promise<void> {
+    await this.db
+      .update(scheduleVoteNudges)
+      .set({ sentAt: new Date() })
+      .where(and(eq(scheduleVoteNudges.pollId, pollId), eq(scheduleVoteNudges.discordUserId, discordUserId)));
+  }
+
+  /** Gives the claim back after a *transient* failure so the next cron tick retries. (Closed DMs keep their claim — never retried.) */
+  async releaseVoteNudge(pollId: number, discordUserId: string): Promise<void> {
+    await this.db.delete(scheduleVoteNudges).where(and(eq(scheduleVoteNudges.pollId, pollId), eq(scheduleVoteNudges.discordUserId, discordUserId)));
   }
 
   /** Atomically stamps the slot's first-quorum moment; true only for the one caller that won it (so the "MATCH ON" card posts once). */
